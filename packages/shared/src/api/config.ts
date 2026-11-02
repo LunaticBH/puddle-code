@@ -14,6 +14,8 @@ const fields = {
     .number()
     .int()
     .min(64 * 1024),
+  /** Age of inactive bulk terminal output; zero disables age-based cleanup. */
+  logRetentionDays: z.number().int().min(0).max(3650),
   replayBytes: z.number().int().min(1024),
   /** Days a (project, profile) ui_state row survives without an update. */
   uiStateRetentionDays: z.number().int().min(1),
@@ -38,6 +40,7 @@ export const daemonConfigSchema = z.object({
   autoResume: fields.autoResume.default(true),
   fetchIntervalMinutes: fields.fetchIntervalMinutes.default(15),
   logMaxBytes: fields.logMaxBytes.default(10 * 1024 * 1024),
+  logRetentionDays: fields.logRetentionDays.default(3),
   replayBytes: fields.replayBytes.default(256 * 1024),
   uiStateRetentionDays: fields.uiStateRetentionDays.default(90),
   agentPath: fields.agentPath.default('~/.local/bin:~/bin:/opt/homebrew/bin:/usr/local/bin'),

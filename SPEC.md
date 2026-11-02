@@ -83,6 +83,17 @@ from one to thirty seconds; successful partial writes are never duplicated.
 Snapshot failures retain live emulators, clean temporary files and back off too.
 History dropped during an outage cannot be recovered after restart.
 
+Inactive bulk terminal logs default to three days of retention (`logRetentionDays`,
+25.6; zero disables age-based cleanup). Startup and hourly sweeps atomically compact
+older logs to the full configured replay tail (256 KiB by default), preserving
+canonical screen/scrollback snapshots, shell histories and terminal ids. This keeps
+archived restoration and hand-off fallback byte-for-byte unchanged, including older
+terminals with no snapshot. Active/open logs, changed files and symlinks are skipped;
+copies use bounded buffers and leave the original intact on failure. Root diagnostic
+logs belong to other processes and are outside this policy. Retention follows settings
+on the next sweep; an increased replay window cannot recover previously discarded
+bulk output. Native conversations, worktrees and SQLite records are never swept.
+
 SQLite capacity errors return HTTP 507 `storage_full`; failed user operations and
 native conversation switches are never automatically replayed. Background runtime
 status and exit observations stay in a bounded, coalesced queue (4,096 placements),

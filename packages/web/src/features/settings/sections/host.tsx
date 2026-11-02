@@ -2,7 +2,7 @@ import { toastError } from '../../../lib/errors';
 import type { DaemonConfig } from '@puddle/shared';
 import { Input } from '../../../components/ui/input';
 import { Switch } from '../../../components/ui/switch';
-import { useConfig, useHostInfo, usePatchConfig } from '../../../lib/queries';
+import { useConfig, useDaemonVersion, useHostInfo, usePatchConfig } from '../../../lib/queries';
 import { SectionTitle, SettingRow } from '../parts';
 
 function NumberSetting({
@@ -16,7 +16,13 @@ function NumberSetting({
   label: string;
   description?: string;
   field: keyof DaemonConfig &
-    ('fetchIntervalMinutes' | 'logMaxBytes' | 'replayBytes' | 'uiStateRetentionDays');
+    (
+      | 'fetchIntervalMinutes'
+      | 'logMaxBytes'
+      | 'logRetentionDays'
+      | 'replayBytes'
+      | 'uiStateRetentionDays'
+    );
   config: DaemonConfig;
   min: number;
   step?: number;
@@ -52,6 +58,9 @@ export function HostSection() {
   const config = useConfig();
   const patch = usePatchConfig();
   const host = useHostInfo();
+  const protocol = useDaemonVersion().data?.protocol;
+  const retentionSupported =
+    protocol && (protocol.major > 25 || (protocol.major === 25 && protocol.minor >= 6));
   if (!config.data) return null;
 
   return (
@@ -96,6 +105,15 @@ export function HostSection() {
         min={65536}
         step={1048576}
       />
+      {retentionSupported && (
+        <NumberSetting
+          label="Bulk log retention (days)"
+          description="Older inactive terminal logs keep only their replay tail. Archived restoration and shell history are preserved. Set 0 to disable age-based cleanup."
+          field="logRetentionDays"
+          config={config.data}
+          min={0}
+        />
+      )}
       <NumberSetting
         label="Replay size (bytes)"
         description="Log tail sent to a terminal on attach."

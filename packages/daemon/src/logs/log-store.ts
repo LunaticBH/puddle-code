@@ -42,6 +42,12 @@ export class LogStore {
     return this.pendingBytes;
   }
 
+  /** Retention must not replace a descriptor used by live or pending output. */
+  isOpen(sessionId: string, term: string): boolean {
+    const key = `${sessionId}/${term}`;
+    return this.fds.has(key) || this.pending.has(key);
+  }
+
   append(sessionId: string, term: string, data: string): void {
     const key = `${sessionId}/${term}`;
     this.closed.delete(key);

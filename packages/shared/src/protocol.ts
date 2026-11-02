@@ -312,4 +312,5 @@
 // 25.3: bounded kernel completion and inspection for notebook cell editors.
 // 25.4: bounded widget state, live comms and exact kernel-generation ownership.
 // 25.5: local/SSH storage diagnostics and explicit unsaved runtime metadata.
-export const PROTOCOL_VERSION = { major: 25, minor: 5 } as const;
+// 25.6: configurable bulk terminal-log retention, preserving restoration tails.
+export const PROTOCOL_VERSION = { major: 25, minor: 6 } as const;

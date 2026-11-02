@@ -33,7 +33,7 @@ import {
 
 describe('shared API schemas', () => {
   it('declares protocol 25.0 for terminal-only programme execution', () => {
-    expect(PROTOCOL_VERSION).toEqual({ major: 25, minor: 5 });
+    expect(PROTOCOL_VERSION).toEqual({ major: 25, minor: 6 });
   });
 
   it('accepts headless mode and rejects the previous scripted name', () => {

@@ -1,5 +1,11 @@
 # The puddle communication protocol
 
+Protocol 25.6 adds `logRetentionDays` to host configuration and its patch, defaulting
+to three days when omitted (zero disables age-based cleanup). New clients gate the
+setting on 25.6. Retention compacts inactive bulk output while preserving the entire
+replay tail and all snapshots/history needed for archived terminal restoration.
+Remote protocol and operation allowlists remain unchanged.
+
 Protocol 25.5 adds local/SSH-only GET `/api/storage` with available space/inodes,
 log and database persistence health, plus optional `Session.persistence_pending`
 for observed runtime status awaiting persistence. New clients gate polling on

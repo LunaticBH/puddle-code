@@ -11,6 +11,7 @@ Past releases: see docs/changelogs/.
 
 ### Added
 
+- Default inactive bulk terminal logs to three-day retention, preserving archived restoration, replay tails, snapshots and shell history; expose the host setting in protocol 25.6.
 - Warn about low host storage and inodes, report persistence failures, and block new sessions/worktrees at critical capacity (protocol 25.5, local/SSH diagnostics).
 
 ### Fixed

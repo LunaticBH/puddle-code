@@ -64,6 +64,7 @@ describe('daemon config', () => {
       autoResume: true,
       fetchIntervalMinutes: 15,
       logMaxBytes: 10 * 1024 * 1024,
+      logRetentionDays: 3,
       replayBytes: 256 * 1024,
       uiStateRetentionDays: 90,
       agentPath: '~/.local/bin:~/bin:/opt/homebrew/bin:/usr/local/bin',

@@ -9,7 +9,8 @@ import { codex } from './agents/codex/index.js';
 import { geminiCli } from './agents/gemini-cli/index.js';
 import { opencode } from './agents/opencode/index.js';
 import { AdapterRegistry } from './agents/registry.js';
-import { loadConfig } from './config.js';
+import { loadConfig, readConfig } from './config.js';
+import { LogRetention } from './logs/retention.js';
 import { NotebookKernels } from './notebooks/kernels.js';
 import { createCodeProviders } from './code/provider.js';
 import { createCodeTerminalLauncher } from './code/terminal.js';
@@ -369,12 +370,26 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
       tracker,
     });
 
+    const retention = new LogRetention(() => {
+      const current = readConfig(paths);
+      return {
+        logsDir: paths.logsDir,
+        retentionDays: current.logRetentionDays,
+        // The live LogStore keeps its boot-time replay window until restart.
+        replayBytes: Math.max(config.replayBytes, current.replayBytes),
+        isBusy: (stream, term) => ptys.has(stream, term) || logs.isOpen(stream, term),
+      };
+    });
+    retention.start();
+    failedStartup.push(() => retention.dispose());
+
     return {
       port,
       authority,
       paths,
       service,
       async stop() {
+        await retention.dispose();
         storage.dispose();
         await puddlang.dispose();
         stopPush();
