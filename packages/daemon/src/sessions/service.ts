@@ -1,3 +1,5 @@
+import { RuntimePersistence } from '../storage/runtime-persistence.js';
+import type { StorageMonitor } from '../storage/monitor.js';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { existsSync, statSync } from 'node:fs';
@@ -52,6 +54,8 @@ import { TerminalAgentMonitor } from './terminal-agent-monitor.js';
 import { notificationContent } from './notification-content.js';
 
 export interface SessionServiceDeps {
+  storage?: StorageMonitor;
+  storagePaths?: string[];
   profiles: ProfileStore;
   accounts: AccountStore;
   repos: RepoStore;
@@ -212,14 +216,18 @@ export class SessionService extends EventEmitter {
   private shuttingDown = false;
   private readonly titleTimer: ReturnType<typeof setInterval>;
   private readonly terminalAgents: TerminalAgentMonitor;
+  private readonly persistence: RuntimePersistence;
+  private lastPersistenceRetry = 0;
 
   constructor(private readonly deps: SessionServiceDeps) {
     super();
+    this.persistence = new RuntimePersistence(deps.sessions, deps.events, deps.storage);
     this.sessionRefs = new SessionRefs(deps);
     this.terminalAgents = new TerminalAgentMonitor({
       adapters: deps.adapters.list(),
       quietMs: deps.statusQuietMs,
-      notify: (session, reason) => this.notifyAgent(session, reason),
+      notify: (session, reason) =>
+        this.persistence.observe(() => this.notifyAgent(session, reason)),
       targets: () =>
         [...this.liveAgents.values()].flatMap((live) => {
           if (live.detector !== null) return [];
@@ -232,17 +240,28 @@ export class SessionService extends EventEmitter {
         this.emit('sessions-changed', { projectIds: [deps.sessions.get(id).project_id] });
       },
     });
-    deps.ptys.on('data', (e: PtyDataEvent) => this.onPtyData(e));
-    deps.ptys.on('exit', (e: PtyExitEvent) => this.onPtyExit(e));
+    deps.ptys.on('data', (e: PtyDataEvent) => this.persistence.observe(() => this.onPtyData(e)));
+    deps.ptys.on('exit', (e: PtyExitEvent) => this.persistence.observe(() => this.onPtyExit(e)));
     deps.ptys.on('input', (e: { stream: string; term: string }) => {
       if (e.term === 'agent') this.liveAgents.get(e.stream)?.lifecycleResource?.control?.input?.();
     });
-    deps.ptys.on('env-delta', (e: PtyEnvDeltaEvent) => this.onEnvDelta(e));
-    deps.ptys.on('cwd', (e: PtyCwdEvent) => this.onCwd(e));
+    deps.ptys.on('env-delta', (e: PtyEnvDeltaEvent) =>
+      this.persistence.observe(() => this.onEnvDelta(e)),
+    );
+    deps.ptys.on('cwd', (e: PtyCwdEvent) => this.persistence.observe(() => this.onCwd(e)));
     // Catch in-agent renames that emit no signal (see TITLE_REFRESH_MS). Unref'd
     // so it never keeps the process (or a test run) alive.
     this.titleTimer = setInterval(() => {
-      for (const id of this.liveAgents.keys()) this.refreshAgentIdentity(id);
+      if (Date.now() - this.lastPersistenceRetry >= 30_000) {
+        this.lastPersistenceRetry = Date.now();
+        const saved = this.persistence.retry();
+        if (saved.length)
+          this.emit('sessions-changed', {
+            projectIds: [...new Set(saved.map((id) => deps.sessions.get(id).project_id))],
+          });
+      }
+      for (const id of this.liveAgents.keys())
+        this.persistence.observe(() => this.refreshAgentIdentity(id));
     }, this.deps.titleRefreshMs ?? TITLE_REFRESH_MS);
     this.titleTimer.unref?.();
   }
@@ -266,7 +285,10 @@ export class SessionService extends EventEmitter {
   list(
     filter: { project_id?: string; profile_id?: string; status?: SessionStatus } = {},
   ): Session[] {
-    return this.deps.sessions.list(filter).map((s) => this.withComputed(s));
+    return this.deps.sessions
+      .list({ ...filter, status: undefined })
+      .map((s) => this.withComputed(s))
+      .filter((s) => filter.status === undefined || s.status === filter.status);
   }
 
   /**
@@ -315,7 +337,7 @@ export class SessionService extends EventEmitter {
       .catch(() => false)
       .then(() => {
         this.bindRuntimeConversation(sessionId);
-        this.refreshAgentTitle(sessionId);
+        this.persistence.observe(() => this.refreshAgentTitle(sessionId));
       });
   }
 
@@ -345,7 +367,7 @@ export class SessionService extends EventEmitter {
       return;
     }
     if ((next ?? null) === (session.agent_title ?? null)) return;
-    this.deps.sessions.setAgentTitle(sessionId, next);
+    this.persistence.observe(() => this.deps.sessions.setAgentTitle(sessionId, next));
     this.emit('renamed', {
       session: sessionId,
       title: session.title,
@@ -361,6 +383,7 @@ export class SessionService extends EventEmitter {
     const project = this.deps.projects.get(input.project_id);
     const profile = this.deps.profiles.get(project.profile_id);
     const repo = this.deps.repos.get(project.repo_id);
+    await this.deps.storage?.assertAdmission([...(this.deps.storagePaths ?? []), repo.path]);
 
     // A terminal session has no account/agent — it forks off into its own path
     // (a shell in the worktree, no onboarding, no conversation — SPEC §4).
@@ -599,6 +622,7 @@ export class SessionService extends EventEmitter {
     repo: ReturnType<RepoStore['get']>,
     command?: TerminalCommand,
   ): Promise<Session> {
+    await this.deps.storage?.assertAdmission([...(this.deps.storagePaths ?? []), repo.path]);
     const separateBranch = input.separate_branch === true; // default off for terminals
     const separateWorktree = input.separate_worktree === true; // terminals: share by default
     const sessionId = randomUUID();
@@ -714,6 +738,10 @@ export class SessionService extends EventEmitter {
 
   private async resumeCore(id: string): Promise<Session> {
     const session = this.deps.sessions.get(id);
+    await this.deps.storage?.assertAdmission([
+      ...(this.deps.storagePaths ?? []),
+      session.worktree_path,
+    ]);
     if (session.conversation_missing) {
       throw ApiError.conflict(
         'conversation_missing',
@@ -1313,6 +1341,11 @@ export class SessionService extends EventEmitter {
     launchOpts?: LaunchOpts,
     resumeRef?: string,
   ): Promise<void> {
+    await this.deps.storage?.assertAdmission([
+      ...(this.deps.storagePaths ?? []),
+      worktreePath,
+      account.config_dir,
+    ]);
     // The status-signal side-channel (SPEC §4): a per-spawn nonce plus the
     // daemon's own /agent-signal URL, injected so agent hook processes (which
     // inherit this env) can report running ⇄ waiting_input authoritatively.
@@ -1429,9 +1462,12 @@ export class SessionService extends EventEmitter {
     const detector = new StatusDetector(
       adapter.statusPatterns,
       {
-        onStatus: (s) => this.onDetected(live?.activeSessionId ?? sessionId, s),
+        onStatus: (s) =>
+          this.persistence.observe(() => this.onDetected(live?.activeSessionId ?? sessionId, s)),
         onLimitReached: () =>
-          this.deps.events.record(live?.activeSessionId ?? sessionId, 'limit_reached'),
+          this.persistence.observe(() =>
+            this.deps.events.record(live?.activeSessionId ?? sessionId, 'limit_reached'),
+          ),
       },
       this.deps.statusQuietMs ?? 2000,
     );
@@ -1479,12 +1515,14 @@ export class SessionService extends EventEmitter {
     const now = Date.now();
     if (now - live.lastTouch > 1000) {
       live.lastTouch = now;
-      this.deps.sessions.touchActivity(e.stream, new Date(now).toISOString());
+      this.persistence.observe(() =>
+        this.deps.sessions.touchActivity(e.stream, new Date(now).toISOString()),
+      );
     }
     if (e.term !== 'agent') return;
     if (live.status === 'starting') {
       live.status = 'running';
-      this.transition(e.stream, 'running');
+      this.observeTransition(e.stream, 'running');
     }
     live.detector?.feed(e.data);
     if (live.detector === null) this.terminalAgents.feed(e.stream, e.data);
@@ -1781,7 +1819,7 @@ export class SessionService extends EventEmitter {
     // its output-based flips misread idle TUI redraws as activity.
     if (source === 'detector' && live.signalled) return;
     live.status = detected;
-    this.transition(sessionId, detected);
+    this.observeTransition(sessionId, detected);
     // Backstop for adoption: by waiting_input the agent has written its
     // conversation file, which was usually absent at spawn time.
     if (detected === 'waiting_input') {
@@ -1845,10 +1883,9 @@ export class SessionService extends EventEmitter {
       if (live.detector === null) this.terminalAgents.exited(e.stream);
       else this.notifyAgent(e.stream, 'exited');
     }
-    this.transition(e.stream, 'exited');
+    this.observeTransition(e.stream, 'exited', e.exitCode);
     this.terminalAgents.forget(e.stream);
     this.refreshAgentIdentity(e.stream); // capture the final ref/name for the durable row
-    this.deps.events.record(e.stream, 'exited', { code: e.exitCode });
     this.noticeOnAbnormalExit(e, startupFailure);
     this.expectedExits.delete(e.stream);
     this.expectedExits.delete(`${e.stream}:agent`);
@@ -1932,6 +1969,17 @@ export class SessionService extends EventEmitter {
 
   private transition(id: string, status: SessionStatus): void {
     const s = this.deps.sessions.setStatus(id, status);
+    this.persistence.forget(id);
+    this.emit('status', {
+      session: id,
+      status,
+      last_activity_at: s.last_activity_at,
+    } satisfies StatusEvent);
+  }
+
+  private observeTransition(id: string, status: SessionStatus, exitCode?: number): void {
+    this.persistence.save(id, { status, ...(exitCode !== undefined ? { exitCode } : {}) });
+    const s = this.deps.sessions.get(id);
     this.emit('status', {
       session: id,
       status,
@@ -1941,6 +1989,8 @@ export class SessionService extends EventEmitter {
 
   /** Worktree-missing and stale-running badges are computed, never stored (SPEC §4). */
   private withComputed(session: Session): Session {
+    const pending = this.persistence.state(session.id);
+    if (pending) session = { ...session, status: pending.status, persistence_pending: true };
     if (session.kind === 'terminal') {
       const live = this.liveAgents.get(session.id);
       session = {

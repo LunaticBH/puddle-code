@@ -1,3 +1,4 @@
+import { isStorageFull } from '../storage/errors.js';
 import { existsSync, readFileSync, watch, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -111,7 +112,11 @@ export class MarkerFileSync {
       sessionId,
       setTimeout(() => {
         this.timers.delete(sessionId);
-        this.sync(sessionId, repoId, dir);
+        try {
+          this.sync(sessionId, repoId, dir);
+        } catch (error) {
+          if (!isStorageFull(error)) throw error;
+        }
       }, 300),
     );
   }

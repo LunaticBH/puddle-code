@@ -83,9 +83,10 @@ export class PtyManager extends EventEmitter {
      */
     private readonly theme?: TerminalTheme,
     stateDir?: string,
+    onScreenHealth?: (degraded: boolean) => void,
   ) {
     super();
-    this.screens = new TerminalScreenStateStore(stateDir);
+    this.screens = new TerminalScreenStateStore(stateDir, onScreenHealth);
   }
 
   spawn(

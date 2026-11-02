@@ -1,3 +1,5 @@
+import { isStorageFull } from '../storage/errors.js';
+import { storageUnavailable, type StorageMonitor } from '../storage/monitor.js';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import type { UpgradeWebSocket } from 'hono/ws';
@@ -55,6 +57,7 @@ export interface AppDeps {
   authority: LeaseRegistry;
   api?: {
     paths: PuddlePaths;
+    storage?: StorageMonitor;
     profiles: ProfileStore;
     accounts: AccountStore;
     repos: RepoStore;
@@ -86,6 +89,11 @@ export interface AppDeps {
 export function buildApp(deps: AppDeps): Hono {
   const app = new Hono();
   app.onError((err, c) => {
+    if (isStorageFull(err)) {
+      deps.api?.storage?.noteFailure(err);
+      const failure = storageUnavailable();
+      return c.json({ error: { code: failure.code, message: failure.message } }, 507);
+    }
     if (err instanceof ApiError) {
       // Cast: Hono types statuses as literals; ours is a runtime value.
       return c.json(
@@ -110,6 +118,16 @@ export function buildApp(deps: AppDeps): Hono {
 
   if (deps.api) {
     const api = deps.api;
+    app.use('/api/*', async (c, next) => {
+      if (
+        c.req.method !== 'GET' &&
+        c.req.method !== 'HEAD' &&
+        api.storage?.status().database_degraded
+      )
+        throw storageUnavailable();
+      return next();
+    });
+    if (api.storage) app.get('/api/storage', (c) => c.json(api.storage!.status()));
     app.route('/api/profiles', profileRoutes(api));
     app.route('/api/accounts', accountRoutes(api));
     app.route('/api/agents', agentRoutes(api));

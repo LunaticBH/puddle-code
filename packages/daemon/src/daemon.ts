@@ -1,3 +1,5 @@
+import { tmpdir } from 'node:os';
+import { StorageMonitor } from './storage/monitor.js';
 import { createAdaptorServer, upgradeWebSocket, type ServerType } from '@hono/node-server';
 import { WebSocketServer } from 'ws';
 import type { AgentAdapter } from './agents/adapter.js';
@@ -110,18 +112,47 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
     const events = new EventStore(db);
     const compilationSettings = new CompilationSettingsStore(db);
 
-    const logs = new LogStore(paths.logsDir, config.replayBytes, config.logMaxBytes);
+    const storagePaths = [paths.home, paths.logsDir, paths.worktreesDir, tmpdir()];
+    const storage = new StorageMonitor(() => [
+      ...storagePaths,
+      ...repos.list().map((repo) => repo.path),
+      ...sessions
+        .list()
+        .filter((session) => ['starting', 'running', 'waiting_input'].includes(session.status))
+        .map((session) => session.worktree_path),
+      ...accounts.list().map((account) => account.config_dir),
+    ]);
+    // A write to an existing metadata page tests SQLite recovery without replaying
+    // any failed user operation or allocating a separate probe database.
+    const schemaVersion = db.pragma('user_version', { simple: true }) as number;
+    storage.setDatabaseProbe(() => {
+      db.pragma(`user_version = ${schemaVersion}`);
+    });
+    await storage.refresh();
+    storage.start();
+    failedStartup.push(() => storage.dispose());
+    const logs = new LogStore(paths.logsDir, config.replayBytes, config.logMaxBytes, (degraded) =>
+      storage.setLogsDegraded(degraded),
+    );
     // Clients report their resolved terminal colours over the WS (14.1); the
     // PTY layer answers agents' OSC 10/11 colour queries from the last report.
     const terminalTheme = new TerminalTheme();
-    const ptys = new PtyManager(logs, terminalTheme, paths.logsDir);
+    const ptys = new PtyManager(logs, terminalTheme, paths.logsDir, (degraded) =>
+      storage.setLogsDegraded(degraded, 'screens'),
+    );
     const shellHooks = installShellHooks(paths);
     failedStartup.push(() => {
       ptys.killAll();
       logs.closeAll();
     });
     const scanner = new PortScanner({ ptys });
-    const worktrees = new WorktreeManager({ paths, mutex: new KeyedMutex(), repos, sessions });
+    const worktrees = new WorktreeManager({
+      paths,
+      storage,
+      mutex: new KeyedMutex(),
+      repos,
+      sessions,
+    });
     const latex = new LatexProvider({ sessions, repos });
     const notebooks = new NotebookKernels({ sessions, repos });
     failedStartup.push(() => notebooks.dispose());
@@ -139,6 +170,8 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
       events,
     });
     const service = new SessionService({
+      storage,
+      storagePaths,
       profiles,
       accounts,
       repos,
@@ -263,6 +296,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
       version: opts.version ?? '0.0.0',
       authority,
       api: {
+        storage,
         paths,
         profiles,
         accounts,
@@ -341,6 +375,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
       paths,
       service,
       async stop() {
+        storage.dispose();
         await puddlang.dispose();
         stopPush();
         controlInfo = null;

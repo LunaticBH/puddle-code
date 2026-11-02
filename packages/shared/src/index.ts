@@ -42,3 +42,4 @@ export * from './api/notebook-execution.js';
 export * from './api/notebook-intelligence.js';
 export * from './api/notebook-widgets.js';
 export * from './notebook-widget-state.js';
+export * from './api/storage.js';

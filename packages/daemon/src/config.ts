@@ -20,7 +20,7 @@ import type { PuddlePaths } from './paths.js';
  */
 const CONFIG_VERSION = 3;
 
-function read(paths: PuddlePaths): DaemonConfig {
+export function readConfig(paths: PuddlePaths): DaemonConfig {
   let raw: Record<string, unknown> = {};
   try {
     raw = JSON.parse(readFileSync(paths.configFile, 'utf8')) as Record<string, unknown>;
@@ -46,7 +46,7 @@ function write(paths: PuddlePaths, cfg: DaemonConfig): void {
 
 /** Load config.json, filling defaults; writes the file so users can discover the knobs. */
 export function loadConfig(paths: PuddlePaths): DaemonConfig {
-  const cfg = read(paths);
+  const cfg = readConfig(paths);
   write(paths, cfg);
   // A launchd/systemd-supervised daemon inherits a bare PATH; augment it here,
   // at the single load-at-boot site, so every child it later spawns can find
@@ -77,7 +77,7 @@ export function applyAgentPath(agentPath: string): void {
 
 export function saveConfig(paths: PuddlePaths, patch: DaemonConfigPatch): DaemonConfig {
   const merged = daemonConfigSchema.parse({
-    ...read(paths),
+    ...readConfig(paths),
     ...daemonConfigPatchSchema.parse(patch),
   });
   write(paths, merged);

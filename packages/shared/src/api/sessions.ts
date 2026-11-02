@@ -38,6 +38,8 @@ export const sessionSchema = z.object({
   agent_mode: agentModeSchema.optional(),
   /** Live foreground agent in a terminal session; icon hint only, never persisted. */
   detected_agent_type: z.string().nullable().optional(),
+  /** Runtime status is observed in memory and has not yet been saved. */
+  persistence_pending: z.boolean().optional(),
   agent_session_ref: z.string().nullable(),
   /** Durable native-conversation catalogue row; null for terminal sessions. */
   conversation_id: rowId.nullable().optional(),

@@ -1,3 +1,4 @@
+import { StorageBanner } from './StorageBanner';
 import { useEffect } from 'react';
 import { Link, Outlet, useLocation, useParams } from 'react-router';
 import { useQueryClient } from '@tanstack/react-query';
@@ -327,6 +328,7 @@ function ShellBody() {
         </ErrorBoundary>
       </main>
       {/* Bottom-anchored, like the workspace's resume banner. */}
+      <StorageBanner />
       <ConnectionBanner />
       <UpdateToast />
       <CommandPalette

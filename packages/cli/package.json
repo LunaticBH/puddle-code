@@ -1,6 +1,6 @@
 {
   "name": "@puddle-code/cli",
-  "version": "0.3.11",
+  "version": "0.3.12",
   "description": "puddle \u2014 self-hosted orchestrator for CLI coding agents: serves the cockpit UI and connects it to local or SSH hosts.",
   "license": "MIT",
   "homepage": "https://github.com/PerceptronV/puddle-code#readme",

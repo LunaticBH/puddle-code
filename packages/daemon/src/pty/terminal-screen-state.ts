@@ -1,3 +1,4 @@
+import { isStorageFull } from '../storage/errors.js';
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import headless, {
@@ -54,7 +55,12 @@ export class TerminalScreenStateStore {
   private tempSequence = 0;
   private closing = false;
 
-  constructor(private readonly stateDir?: string) {}
+  private retryAt = 0;
+  private retryMs = 1000;
+  constructor(
+    private readonly stateDir?: string,
+    private readonly onHealth?: (degraded: boolean) => void,
+  ) {}
 
   write(stream: string, term: string, data: string): void {
     if (data === '') return;
@@ -214,12 +220,15 @@ export class TerminalScreenStateStore {
 
   private schedulePersist(stream: string, term: string, state: ScreenState): void {
     if (!this.stateDir || state.persistTimer) return;
-    state.persistTimer = setTimeout(() => {
-      state.persistTimer = null;
-      void this.persist(stream, term, state).catch((error: unknown) => {
-        console.warn(`Could not persist terminal state ${stream}/${term}:`, error);
-      });
-    }, PERSIST_AFTER_IDLE_MS);
+    state.persistTimer = setTimeout(
+      () => {
+        state.persistTimer = null;
+        void this.persist(stream, term, state).catch((error: unknown) => {
+          console.warn(`Could not persist terminal state ${stream}/${term}:`, error);
+        });
+      },
+      Math.max(PERSIST_AFTER_IDLE_MS, this.retryAt - Date.now()),
+    );
     state.persistTimer.unref?.();
   }
 
@@ -235,6 +244,10 @@ export class TerminalScreenStateStore {
     }
     this.enqueue(state, async () => {
       if (!state.dirty) return;
+      if (Date.now() < this.retryAt) {
+        if (!this.closing) this.schedulePersist(stream, term, state);
+        return;
+      }
       const file = this.file(stream, term);
       if (!file) return;
       const persisted: PersistedTerminalState = {
@@ -244,10 +257,23 @@ export class TerminalScreenStateStore {
         data: this.serialise(state),
       };
       const temp = `${file}.tmp-${process.pid}-${this.tempSequence++}`;
-      await mkdir(join(stateDir, stream), { recursive: true });
-      await writeFile(temp, JSON.stringify(persisted), { encoding: 'utf8', mode: 0o600 });
-      await rename(temp, file);
-      state.dirty = false;
+      try {
+        await mkdir(join(stateDir, stream), { recursive: true });
+        await writeFile(temp, JSON.stringify(persisted), { encoding: 'utf8', mode: 0o600 });
+        await rename(temp, file);
+        state.dirty = false;
+        this.retryAt = 0;
+        this.retryMs = 1000;
+        this.onHealth?.(false);
+      } catch (error) {
+        this.onHealth?.(true);
+        this.retryAt = Date.now() + this.retryMs;
+        this.retryMs = Math.min(30_000, this.retryMs * 2);
+        if (!this.closing) this.schedulePersist(stream, term, state);
+        if (!isStorageFull(error)) console.warn('Could not save terminal snapshot:', error);
+      } finally {
+        await unlink(temp).catch(() => {});
+      }
     });
     await state.queue;
   }

@@ -1,13 +1,13 @@
 import { homedir, hostname, userInfo } from 'node:os';
 import { Hono } from 'hono';
 import type { HostInfo } from '@puddle/shared';
-import { loadConfig } from '../../config.js';
+import { readConfig } from '../../config.js';
 import type { PuddlePaths } from '../../paths.js';
 
 /** Who and where the daemon is — the UI's host indicator (SPEC §6). */
 export function hostRoutes(deps: { paths: PuddlePaths }): Hono {
   return new Hono().get('/', (c) => {
-    const { displayName } = loadConfig(deps.paths);
+    const { displayName } = readConfig(deps.paths);
     return c.json<HostInfo>({
       username: userInfo().username,
       // .local is mDNS noise on macOS, not identity.

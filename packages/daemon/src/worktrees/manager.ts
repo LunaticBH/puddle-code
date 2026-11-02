@@ -1,3 +1,4 @@
+import type { StorageMonitor } from '../storage/monitor.js';
 import {
   appendFileSync,
   existsSync,
@@ -31,6 +32,7 @@ export class WorktreeManager {
   constructor(
     private readonly deps: {
       paths: PuddlePaths;
+      storage?: StorageMonitor;
       mutex: KeyedMutex;
       repos: RepoStore;
       sessions: SessionStore;
@@ -57,6 +59,11 @@ export class WorktreeManager {
   }): Promise<CreateWorktreeResult> {
     const { repo } = opts;
     return this.runGitMutation(repo.path, async () => {
+      await this.deps.storage?.assertAdmission([
+        this.deps.paths.home,
+        this.deps.paths.worktreesDir,
+        repo.path,
+      ]);
       const baseBranch = opts.baseBranch ?? (await resolveDefaultBaseBranch(repo));
       await this.fetchCoreQuietly(repo);
       const baseRef = (await this.refExists(repo, `refs/remotes/origin/${baseBranch}`))
@@ -87,6 +94,11 @@ export class WorktreeManager {
   attachShared(opts: { repo: Repo; baseBranch?: string }): Promise<CreateWorktreeResult> {
     const { repo } = opts;
     return this.runGitMutation(repo.path, async () => {
+      await this.deps.storage?.assertAdmission([
+        this.deps.paths.home,
+        this.deps.paths.worktreesDir,
+        repo.path,
+      ]);
       const branch = opts.baseBranch ?? (await resolveDefaultBaseBranch(repo));
       await this.fetchCoreQuietly(repo);
 
@@ -155,6 +167,11 @@ export class WorktreeManager {
   }): Promise<CreateWorktreeResult> {
     const { repo } = opts;
     return this.runGitMutation(repo.path, async () => {
+      await this.deps.storage?.assertAdmission([
+        this.deps.paths.home,
+        this.deps.paths.worktreesDir,
+        repo.path,
+      ]);
       const branch = opts.baseBranch ?? (await resolveDefaultBaseBranch(repo));
       await this.fetchCoreQuietly(repo);
       if (!(await this.refExists(repo, `refs/heads/${branch}`))) {
