@@ -1,0 +1,53 @@
+/* PDF.js 6.2 TextLayer supplies positions, fonts and these geometry variables.
+   Keep its CSS viewport independent of the canvas's HiDPI pixel budget. */
+.pdf-text-layer {
+  --scale-round-x: 1px;
+  --scale-round-y: 1px;
+  --min-font-size: 1;
+
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+  transform-origin: 0 0;
+  line-height: 1;
+  text-align: initial;
+  letter-spacing: normal;
+  word-spacing: normal;
+  -webkit-text-size-adjust: none;
+  text-size-adjust: none;
+  -webkit-user-select: text;
+  user-select: text;
+  forced-color-adjust: none;
+}
+
+.pdf-text-layer :is(span, br) {
+  position: absolute;
+  color: transparent;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0 0;
+  font-size: calc(var(--total-scale-factor) * var(--min-font-size) * var(--font-height, 0px));
+  transform: rotate(var(--rotate, 0deg)) scaleX(var(--scale-x, 1))
+    scale(calc(1 / var(--min-font-size)));
+}
+
+.pdf-text-layer[data-main-rotation='90'] {
+  transform: rotate(90deg) translateY(-100%);
+}
+
+.pdf-text-layer[data-main-rotation='180'] {
+  transform: rotate(180deg) translate(-100%, -100%);
+}
+
+.pdf-text-layer[data-main-rotation='270'] {
+  transform: rotate(270deg) translateX(-100%);
+}
+
+.pdf-text-layer ::selection {
+  color: transparent;
+  background: var(--selection);
+}
+
+.pdf-text-layer br::selection {
+  background: transparent;
+}

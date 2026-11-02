@@ -9,4 +9,6 @@ Past releases: see docs/changelogs/.
 
 ## [Unreleased]
 
+### Added
 
+- Allow native text selection and copying in PDF previews, including across pages and after zooming.

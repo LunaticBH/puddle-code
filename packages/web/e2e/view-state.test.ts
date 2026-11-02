@@ -91,7 +91,7 @@ for (const ordinary of [false, true])
     await page.goto(`${origin}/e2e/fixtures/view-state.html${ordinary ? '?ordinary' : ''}`);
     const scroller = page.getByRole('region', { name: 'PDF document' });
     await expect(page.locator('[data-scroll-ready="true"]')).toHaveCount(4);
-    await expect(page.locator('canvas[title]')).toHaveCount(ordinary ? 0 : 4);
+    await expect(page.locator('[data-pdf-page][title]')).toHaveCount(ordinary ? 0 : 4);
     await page.getByRole('button', { name: 'Zoom in', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Zoom 125%; reset to fit width' })).toBeVisible();
     await scroller.evaluate((element) => {

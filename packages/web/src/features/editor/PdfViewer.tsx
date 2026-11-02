@@ -16,6 +16,7 @@ import type {
   RenderTask,
 } from 'pdfjs-dist';
 import { api } from '../../lib/api';
+import { PdfTextLayer } from './PdfTextLayer';
 import { useViewStateKey } from './view-state-context';
 import { ViewStateStore } from './view-state-store';
 import { bindScrollRestoration, type ScrollRestoration } from './scroll-restoration';
@@ -444,7 +445,7 @@ function PdfPage({
     };
   }, [availableWidth, page, pageSize, renderReady]);
 
-  const onClick = (event: ReactMouseEvent<HTMLCanvasElement>) => {
+  const onClick = (event: ReactMouseEvent<HTMLDivElement>) => {
     if ((!event.metaKey && !event.ctrlKey) || !inverseSearch || !pageSize) return;
     const point = pdfPagePoint(
       event.clientX,
@@ -474,16 +475,16 @@ function PdfPage({
       ref={holderRef}
       data-scroll-ready={pageSize !== null}
       data-pdf-page={pageNumber}
-      className="shrink-0 bg-elevated shadow-sm"
+      className="relative shrink-0 bg-elevated shadow-sm"
       style={{ width: availableWidth, height: fittedHeight }}
       aria-label={`PDF page ${pageNumber}`}
+      onClick={onClick}
+      title={inverseSearch ? 'Command-click to open the corresponding TeX source' : undefined}
     >
-      <canvas
-        ref={canvasRef}
-        onClick={onClick}
-        className="block"
-        title={inverseSearch ? 'Command-click to open the corresponding TeX source' : undefined}
-      />
+      <canvas ref={canvasRef} className="block" />
+      {page && pageSize && renderReady && (
+        <PdfTextLayer page={page} scale={availableWidth / pageSize.width} />
+      )}
     </div>
   );
 }
