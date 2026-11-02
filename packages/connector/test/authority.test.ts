@@ -50,6 +50,9 @@ describe('remote surface', () => {
   const id = crypto.randomUUID();
   const request = (method: 'GET' | 'POST' | 'PATCH', path: string) =>
     permittedRequest({ t: 'request', id, method, path });
+  it('denies host-wide storage diagnostics', () => {
+    expect(() => request('GET', '/api/storage')).toThrow();
+  });
   it('denies notebook environment discovery and installation', () => {
     for (const suffix of ['kernels', 'environments', 'status', 'kernel', 'widgets', 'widgets/comm'])
       for (const method of ['GET', 'POST'] as const)

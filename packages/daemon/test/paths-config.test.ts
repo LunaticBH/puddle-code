@@ -1,8 +1,8 @@
-import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { applyAgentPath, loadConfig, saveConfig } from '../src/config.js';
+import { applyAgentPath, loadConfig, readConfig, saveConfig } from '../src/config.js';
 import { ensureHome, resolvePaths } from '../src/paths.js';
 import { ensureToken } from '../src/security/token.js';
 
@@ -47,6 +47,15 @@ describe('resolvePaths', () => {
 });
 
 describe('daemon config', () => {
+  it('reads defaults and existing configuration without creating or rewriting the file', () => {
+    const paths = freshPaths();
+    expect(readConfig(paths).port).toBe(7434);
+    expect(existsSync(paths.configFile)).toBe(false);
+    const content = '{"configVersion":3,"displayName":"Test host"}';
+    writeFileSync(paths.configFile, content);
+    expect(readConfig(paths).displayName).toBe('Test host');
+    expect(readFileSync(paths.configFile, 'utf8')).toBe(content);
+  });
   it('returns defaults when config.json is absent and writes it', () => {
     const paths = freshPaths();
     const cfg = loadConfig(paths);

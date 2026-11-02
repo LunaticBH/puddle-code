@@ -1,5 +1,11 @@
 # The puddle communication protocol
 
+Protocol 25.5 adds local/SSH-only GET `/api/storage` with available space/inodes,
+log and database persistence health, plus optional `Session.persistence_pending`
+for observed runtime status awaiting persistence. New clients gate polling on
+25.5. Remote profile leases and the connector deny host-wide storage paths;
+remote protocol remains 4.
+
 Protocol 25.4 adds local/SSH-only POST `/api/notebooks/widgets` for bounded
 widget snapshots and incremental comm events, and POST `/widgets/comm` for
 explicit widget actions bound to an exact kernel generation. Reconnects only

@@ -1,3 +1,4 @@
+import { Disclosure } from '../../components/ui/disclosure';
 import { useQuery } from '@tanstack/react-query';
 import type { StorageStatus } from '@puddle/shared';
 import { AlertTriangle } from 'lucide-react';
@@ -17,7 +18,7 @@ export function StorageBanner() {
     refetchInterval: 10_000,
     retry: false,
   });
-  if (!data) return null;
+  if (!supported || browserTransport() || !data) return null;
   const volumes = data.volumes.filter((volume) => volume.level !== 'ok');
   if (!data.logs_degraded && !data.database_degraded && volumes.length === 0) return null;
   const critical = volumes.some((volume) => volume.level === 'critical');
@@ -37,16 +38,24 @@ export function StorageBanner() {
             worktrees.
           </p>
         )}
-        {volumes.map((volume) => (
-          <p key={volume.path} className="break-all text-fg-secondary">
-            {volume.level === 'unknown' ? 'Could not check storage' : 'Low storage'} at{' '}
-            {volume.path}
-            {volume.available_bytes !== null &&
-              ` · ${Math.round(volume.available_bytes / 1024 ** 2).toLocaleString()} MiB available`}
-            {volume.available_inodes !== null &&
-              ` · ${volume.available_inodes.toLocaleString()} inodes available`}
-          </p>
-        ))}
+        {volumes.length > 0 && (
+          <Disclosure
+            summary={`${volumes.length} storage ${volumes.length === 1 ? 'location needs' : 'locations need'} attention`}
+          >
+            <div className="max-h-32 overflow-y-auto pl-4">
+              {volumes.map((volume) => (
+                <p key={volume.path} className="break-all text-fg-secondary">
+                  {volume.level === 'unknown' ? 'Could not check storage' : 'Low storage'} at{' '}
+                  {volume.path}
+                  {volume.available_bytes !== null &&
+                    ` · ${Math.round(volume.available_bytes / 1024 ** 2).toLocaleString()} MiB available`}
+                  {volume.available_inodes !== null &&
+                    ` · ${volume.available_inodes.toLocaleString()} inodes available`}
+                </p>
+              ))}
+            </div>
+          </Disclosure>
+        )}
       </div>
     </div>
   );

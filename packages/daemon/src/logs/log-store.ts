@@ -24,6 +24,7 @@ export class LogStore {
   private readonly pending = new Map<string, Buffer>();
   private readonly sizes = new Map<string, number>();
   private pendingBytes = 0;
+  private readonly closed = new Set<string>();
   private flushTimer: NodeJS.Timeout | null = null;
   private retryAt = 0;
   private retryMs = 1000;
@@ -43,13 +44,26 @@ export class LogStore {
 
   append(sessionId: string, term: string, data: string): void {
     const key = `${sessionId}/${term}`;
-    // Flush healthy buffers before discarding history at the memory bound.
-    if (
-      !this.failed &&
-      (this.pending.get(key)?.length ?? 0) + Buffer.byteLength(data) > PER_TERM_BYTES
-    )
-      this.flushAll();
+    this.closed.delete(key);
     const incoming = Buffer.from(data);
+    // Large healthy writes are saved in bounded pieces; only an outage drops history.
+    for (let offset = 0; offset < incoming.length; offset += PER_TERM_BYTES) {
+      if (this.failed) {
+        this.queue(key, incoming.subarray(offset));
+        break;
+      }
+      const chunk = incoming.subarray(offset, offset + PER_TERM_BYTES);
+      if (
+        (this.pending.get(key)?.length ?? 0) + chunk.length > PER_TERM_BYTES ||
+        this.pendingBytes + chunk.length > TOTAL_PENDING_BYTES
+      )
+        this.flushAll();
+      this.queue(key, chunk);
+    }
+    this.schedule();
+  }
+
+  private queue(key: string, incoming: Buffer): void {
     const previous = this.pending.get(key);
     const tail =
       incoming.length >= PER_TERM_BYTES
@@ -64,13 +78,13 @@ export class LogStore {
       if (oldest === undefined) break;
       this.setPending(oldest, null);
     }
-    this.schedule();
   }
 
   close(sessionId: string, term: string): void {
     const key = `${sessionId}/${term}`;
     this.flushAll();
     this.closeFd(key);
+    if (this.pending.has(key)) this.closed.add(key);
     // A failed flush retains only bounded history and retries without retaining a PTY.
   }
 
@@ -166,6 +180,7 @@ export class LogStore {
   private setPending(key: string, data: Buffer | null): void {
     this.pendingBytes -= this.pending.get(key)?.length ?? 0;
     this.pending.delete(key);
+    if (data === null && this.closed.delete(key)) this.closeFd(key);
     if (data !== null) {
       this.pending.set(key, data);
       this.pendingBytes += data.length;

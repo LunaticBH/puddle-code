@@ -118,15 +118,6 @@ export function buildApp(deps: AppDeps): Hono {
 
   if (deps.api) {
     const api = deps.api;
-    app.use('/api/*', async (c, next) => {
-      if (
-        c.req.method !== 'GET' &&
-        c.req.method !== 'HEAD' &&
-        api.storage?.status().database_degraded
-      )
-        throw storageUnavailable();
-      return next();
-    });
     if (api.storage) app.get('/api/storage', (c) => c.json(api.storage!.status()));
     app.route('/api/profiles', profileRoutes(api));
     app.route('/api/accounts', accountRoutes(api));

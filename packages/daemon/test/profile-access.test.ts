@@ -96,6 +96,11 @@ function fixture() {
 }
 
 describe('profile-bound host authority', () => {
+  it('denies host-wide storage diagnostics to remote profile leases', async () => {
+    const f = fixture();
+    expect((await f.req('/api/storage')).status).toBe(403);
+    expect(f.dispatch).not.toHaveBeenCalled();
+  });
   it('denies notebook kernel operations to remote profile leases', async () => {
     const f = fixture();
     for (const [path, method] of [

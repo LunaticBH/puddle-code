@@ -128,7 +128,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
     storage.setDatabaseProbe(() => {
       db.pragma(`user_version = ${schemaVersion}`);
     });
-    await storage.refresh();
+    void storage.refresh().catch((error: unknown) => console.warn('Storage check failed:', error));
     storage.start();
     failedStartup.push(() => storage.dispose());
     const logs = new LogStore(paths.logsDir, config.replayBytes, config.logMaxBytes, (degraded) =>
@@ -156,7 +156,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
     const latex = new LatexProvider({ sessions, repos });
     const notebooks = new NotebookKernels({ sessions, repos });
     failedStartup.push(() => notebooks.dispose());
-    const onboarding = new MarkerFileSync({ repos, events, sessions });
+    const onboarding = new MarkerFileSync({ repos, events, sessions, storage });
     failedStartup.push(() => onboarding.dispose());
     const adapters = new AdapterRegistry(opts.adapters ?? [claudeCode, codex, opencode, geminiCli]);
     // Migration 004 rewrote config-dir paths to id-keyed; rename the dirs before

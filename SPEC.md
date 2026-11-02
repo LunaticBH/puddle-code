@@ -74,6 +74,38 @@ Puddle NEVER mutates or adopts agent config directories it did not create (e.g. 
 
 **Accounts are strictly per-profile.** The API never lists, attaches, or spawns with another profile's accounts; the UI's account picker shows only the active profile's. If a collaborator wants to use "your" underlying agent subscription, they log in again under their own profile, producing an independent config dir. Note this is organisational isolation, not security — everything runs as one OS user, so anyone with shell access can read any directory; the goal is preventing accidental credential sharing and history mixing, not defending against a malicious housemate.
 
+### Storage exhaustion
+
+Terminal logging is best-effort: opening, flushing, rotation and closing cannot
+interrupt live PTY delivery. Unsaved output retains at most 256 KiB per terminal
+and 8 MiB across the daemon, discarding oldest history when full. Retries back off
+from one to thirty seconds; successful partial writes are never duplicated.
+Snapshot failures retain live emulators, clean temporary files and back off too.
+History dropped during an outage cannot be recovered after restart.
+
+SQLite capacity errors return HTTP 507 `storage_full`; failed user operations and
+native conversation switches are never automatically replayed. Background runtime
+status and exit observations stay in a bounded, coalesced queue (4,096 placements),
+with optional `persistence_pending` on session reads until saved. PTY exit cleanup
+still releases runtime ownership. Other failed metadata observations are best-effort;
+SQLite remains the durable source of truth. Database recovery requires a successful
+write probe and saving queued runtime observations. Full-disk boot recovery remains
+separate: initialisation still requires writable authority and database storage.
+
+The daemon asynchronously polls Puddle home, logs, worktrees, temporary storage,
+registered repositories, active placement directories and account directories every
+30 seconds. Available bytes below 1 GiB or available inodes below 10,000 warn; below
+256 MiB or 1,000 inodes blocks new sessions/resumes and worktrees. Filesystems without
+an inode limit omit that metric. Admission rechecks the actual destination paths;
+an unavailable probe refuses admission rather than assuming space is available.
+Checks are advisory: the write error remains authoritative for quotas and races.
+
+Local/SSH cockpits poll GET `/api/storage` (25.5) and show a persistent, borderless
+warning until recovery, including affected paths and available space/inodes. The
+endpoint requires existing browser/host authority and remains denied to remote
+profile leases and the connector because it includes host-wide paths. Configuration
+and host GETs never rewrite configuration. No storage cleanup deletes user work.
+
 ### Local security (mandatory, Phase 1)
 
 Binding to `127.0.0.1` is **not** protection from the web: any website open in the user's browser can attempt `fetch("http://localhost:7433/...")`, and DNS-rebinding can defeat naive same-origin assumptions. For a daemon that can spawn agents with permissions skipped, an unauthenticated localhost API is a remote-code-execution vector via CSRF. Therefore, from Phase 1:
@@ -528,6 +560,7 @@ headless runtime. See [the usage guide](docs/puddlang.md) for mode limitations.
 All REST endpoints are JSON under `/api`. Request/response shapes live as zod schemas in `packages/shared` and are the single source of truth for both daemon and UI.
 
 ```
+Storage    GET  /api/storage                 # local/SSH host storage and persistence health
 Version    GET  /api/version                 # {version, protocol: {major, minor}} — the handshake endpoint (see Protocol versioning below)
 Puddlang   GET  /api/puddlang/:profile/context
            POST /api/puddlang/:profile/runs      # source/input, UUID, accounts/limits; 202 run record

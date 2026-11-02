@@ -1,5 +1,5 @@
 import { RuntimePersistence } from '../storage/runtime-persistence.js';
-import type { StorageMonitor } from '../storage/monitor.js';
+import { storageUnavailable, type StorageMonitor } from '../storage/monitor.js';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { existsSync, statSync } from 'node:fs';
@@ -334,11 +334,16 @@ export class SessionService extends EventEmitter {
         ? Promise.resolve(false)
         : this.sessionRefs.refreshAvailable(session, account, adapter)
     )
-      .catch(() => false)
-      .then(() => {
-        this.bindRuntimeConversation(sessionId);
-        this.persistence.observe(() => this.refreshAgentTitle(sessionId));
-      });
+      .catch((error: unknown) => {
+        this.deps.storage?.noteFailure(error);
+        return false;
+      })
+      .then(() =>
+        this.persistence.observe(() => {
+          this.bindRuntimeConversation(sessionId);
+          this.refreshAgentTitle(sessionId);
+        }),
+      );
   }
 
   /**
@@ -367,7 +372,7 @@ export class SessionService extends EventEmitter {
       return;
     }
     if ((next ?? null) === (session.agent_title ?? null)) return;
-    this.persistence.observe(() => this.deps.sessions.setAgentTitle(sessionId, next));
+    this.deps.sessions.setAgentTitle(sessionId, next);
     this.emit('renamed', {
       session: sessionId,
       title: session.title,
@@ -399,6 +404,7 @@ export class SessionService extends EventEmitter {
       throw ApiError.badRequest('account_required', 'an agent session needs an account_id');
     }
     const account = this.deps.accounts.get(input.account_id);
+    await this.deps.storage?.assertAdmission([account.config_dir]);
     if (account.profile_id !== project.profile_id) {
       throw ApiError.badRequest(
         'foreign_account',
@@ -434,6 +440,7 @@ export class SessionService extends EventEmitter {
       separateBranch,
       separateWorktree,
     });
+    await this.deps.storage?.assertAdmission([worktree.worktreePath]);
     const session = this.deps.sessions.create({
       id: sessionId,
       project_id: project.id,
@@ -634,6 +641,7 @@ export class SessionService extends EventEmitter {
       separateBranch,
       separateWorktree,
     });
+    await this.deps.storage?.assertAdmission([worktree.worktreePath]);
     const session = this.deps.sessions.create({
       id: sessionId,
       project_id: project.id,
@@ -1618,6 +1626,7 @@ export class SessionService extends EventEmitter {
     if (!runtime || !this.runtimes.has(runtime.runtimeId)) return false;
     return this.lifecycleMutex.run('native-conversation-switch', async () => {
       if (!this.runtimes.has(runtime.runtimeId)) return false;
+      if (this.deps.storage?.status().database_degraded) throw storageUnavailable();
       const sourceId = runtime.activeSessionId;
       const source = this.deps.sessions.get(sourceId);
       runtime.lifecycleResource?.control?.lifecycle?.(
@@ -1949,7 +1958,7 @@ export class SessionService extends EventEmitter {
 
   private notifyAgent(session: string, reason: AgentNotification['reason']): void {
     if (this.shuttingDown) return;
-    this.refreshAgentTitle(session);
+    this.persistence.observe(() => this.refreshAgentTitle(session));
     const event: AgentNotification = {
       t: 'agent-notification',
       id: randomUUID(),

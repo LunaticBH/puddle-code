@@ -45,9 +45,12 @@ export class StorageMonitor {
   private checkedAt: string | null = null;
   private readonly degradedLogs = new Set<string>();
   private databaseDegraded = false;
+  private pendingRuntimeCount = 0;
+  private disposed = false;
   private timer: NodeJS.Timeout | null = null;
   private refreshing: Promise<void> | null = null;
   private databaseProbe: (() => void) | null = null;
+  private readonly probing = new Map<string, Promise<Volume>>();
 
   constructor(
     private readonly paths: () => string[],
@@ -61,6 +64,9 @@ export class StorageMonitor {
     if (value) this.degradedLogs.add(source);
     else this.degradedLogs.delete(source);
   }
+  setPendingRuntimeCount(count: number): void {
+    this.pendingRuntimeCount = count;
+  }
   noteFailure(error: unknown): void {
     if (isDatabaseFull(error)) this.databaseDegraded = true;
   }
@@ -69,16 +75,18 @@ export class StorageMonitor {
       checked_at: this.checkedAt,
       volumes: [...this.volumes.values()],
       logs_degraded: this.degradedLogs.size > 0,
-      database_degraded: this.databaseDegraded,
+      database_degraded: this.databaseDegraded || this.pendingRuntimeCount > 0,
     };
   }
   start(): void {
+    this.disposed = false;
     this.timer = setInterval(() => {
       void this.refresh().catch((error: unknown) => console.warn('Storage check failed:', error));
     }, POLL_MS);
     this.timer.unref();
   }
   dispose(): void {
+    this.disposed = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
   }
@@ -93,7 +101,8 @@ export class StorageMonitor {
   private async refreshCore(): Promise<void> {
     const next = new Map<string, Volume>();
     // Sequential probes yield to the event loop without flooding large hosts with I/O.
-    for (const path of new Set(this.paths())) next.set(path, await this.probe(path));
+    for (const path of new Set(this.paths())) next.set(path, await this.inspect(path));
+    if (this.disposed) return;
     this.volumes = next;
     this.checkedAt = new Date().toISOString();
     if (this.databaseDegraded && this.databaseProbe) {
@@ -106,10 +115,37 @@ export class StorageMonitor {
     }
   }
 
+  private async inspect(path: string): Promise<Volume> {
+    let pending = this.probing.get(path);
+    if (!pending) {
+      pending = this.probe(path).finally(() => {
+        this.probing.delete(path);
+      });
+      this.probing.set(path, pending);
+    }
+    let timeout: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        pending,
+        new Promise<Volume>((resolve) => {
+          timeout = setTimeout(
+            () =>
+              resolve({ path, available_bytes: null, available_inodes: null, level: 'unknown' }),
+            3000,
+          );
+        }),
+      ]);
+    } catch {
+      return { path, available_bytes: null, available_inodes: null, level: 'unknown' };
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  }
+
   async assertAdmission(paths: string[]): Promise<void> {
-    if (this.databaseDegraded) throw storageUnavailable();
+    if (this.status().database_degraded) throw storageUnavailable();
     for (const path of new Set(paths)) {
-      const volume = await this.probe(path);
+      const volume = await this.inspect(path);
       this.volumes.set(path, volume);
       this.checkedAt = new Date().toISOString();
       if (volume.level === 'critical') {

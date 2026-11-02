@@ -1,3 +1,4 @@
+import type { StorageMonitor } from '../../src/storage/monitor.js';
 import {
   existsSync,
   mkdirSync,
@@ -224,6 +225,7 @@ export interface Fixture {
 export function fixture(
   opts: {
     quietMs?: number;
+    storage?: StorageMonitor;
     share?: boolean;
     titleRefreshMs?: number;
     shellHooks?: ShellHooks;
@@ -261,6 +263,7 @@ export function fixture(
   const scanner = new PortScanner({ ptys });
   const worktrees = new WorktreeManager({
     paths,
+    storage: opts.storage,
     mutex: new KeyedMutex(),
     repos: stores.repos,
     sessions: stores.sessions,
@@ -296,6 +299,8 @@ export function fixture(
   });
   const service = new SessionService({
     ...stores,
+    storage: opts.storage,
+    storagePaths: [paths.home, paths.logsDir, paths.worktreesDir],
     worktrees,
     ptys,
     adapters,

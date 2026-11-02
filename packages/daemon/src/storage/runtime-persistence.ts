@@ -30,6 +30,7 @@ export class RuntimePersistence {
 
   forget(id: string): void {
     this.pending.delete(id);
+    this.storage?.setPendingRuntimeCount(this.pending.size);
   }
 
   state(id: string): PendingState | undefined {
@@ -41,11 +42,13 @@ export class RuntimePersistence {
       this.sessions.setStatus(id, state.status);
       if (state.exitCode !== undefined) this.events.record(id, 'exited', { code: state.exitCode });
       this.pending.delete(id);
+      this.storage?.setPendingRuntimeCount(this.pending.size);
       return true;
     } catch (error) {
       if (!isStorageFull(error)) throw error;
       this.storage?.noteFailure(error);
       if (this.pending.has(id) || this.pending.size < MAX_PENDING) this.pending.set(id, state);
+      this.storage?.setPendingRuntimeCount(this.pending.size);
       // Admission is stopped on database exhaustion, so normally only already-live
       // runtimes can enter this map. The hard cap also bounds pathological hosts.
       return false;

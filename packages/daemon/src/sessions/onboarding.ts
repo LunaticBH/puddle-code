@@ -1,3 +1,4 @@
+import type { StorageMonitor } from '../storage/monitor.js';
 import { isStorageFull } from '../storage/errors.js';
 import { existsSync, readFileSync, watch, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
@@ -77,7 +78,12 @@ export class MarkerFileSync {
   private readonly timers = new Map<string, NodeJS.Timeout>();
 
   constructor(
-    private readonly deps: { repos: RepoStore; events: EventStore; sessions: SessionStore },
+    private readonly deps: {
+      repos: RepoStore;
+      events: EventStore;
+      sessions: SessionStore;
+      storage?: StorageMonitor;
+    },
   ) {}
 
   watch(sessionId: string, repoId: number, worktreePath: string): void {
@@ -116,6 +122,7 @@ export class MarkerFileSync {
           this.sync(sessionId, repoId, dir);
         } catch (error) {
           if (!isStorageFull(error)) throw error;
+          this.deps.storage?.noteFailure(error);
         }
       }, 300),
     );
