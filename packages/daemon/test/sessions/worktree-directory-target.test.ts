@@ -1,5 +1,5 @@
 import { writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, parse } from 'node:path';
 import { Hono } from 'hono';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { diffResponseSchema, gitStatusResponseSchema, treeResponseSchema } from '@puddle/shared';
@@ -99,8 +99,10 @@ describe('directory target', () => {
     const rel = await app.request(`/api/worktrees/${NO_SESSION}/tree?path=&root=nope`);
     expect(rel.status).toBe(400);
     expect(errorCode(await rel.json())).toBe('invalid_root');
+    // An absolute path that names nothing; on Windows `/nope` is drive-relative, so qualify it.
+    const missing = join(parse(fx.repoPath).root, 'nope', 'nowhere');
     const gone = await app.request(
-      `/api/worktrees/${NO_SESSION}/tree?path=&root=${encodeURIComponent('/nope/nowhere')}`,
+      `/api/worktrees/${NO_SESSION}/tree?path=&root=${encodeURIComponent(missing)}`,
     );
     expect(gone.status).toBe(404);
   });

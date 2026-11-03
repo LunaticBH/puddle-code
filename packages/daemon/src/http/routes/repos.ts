@@ -1,5 +1,4 @@
 import { realpathSync } from 'node:fs';
-import { isAbsolute } from 'node:path';
 import { Hono } from 'hono';
 import {
   createRepoRequestSchema,
@@ -10,17 +9,39 @@ import {
 } from '@puddle/shared';
 import type { RepoStore } from '../../db/stores/repos.js';
 import type { SessionStore } from '../../db/stores/sessions.js';
-import { git } from '../../git/exec.js';
+import { git, GitError } from '../../git/exec.js';
 import { resolveDefaultBaseBranch } from '../../git/base-branch.js';
+import { canonicalHostPath, isNativeAbsolute, sameHostPath } from '../../host-path.js';
+import type { MarkerFileSync } from '../../sessions/onboarding.js';
 import type { WorktreeManager } from '../../worktrees/manager.js';
 import { ApiError } from '../errors.js';
 import { expandTilde } from '../tilde.js';
 import { idParam, parseBody } from '../validate.js';
 
+/**
+ * Git's safe.directory refusal, reported as such on Windows instead of "not a
+ * git repository": repositories on another drive, a USB disk or a share, or
+ * created by an elevated process, commonly belong to another account there.
+ * Git's own message carries the `safe.directory` command that trusts it.
+ */
+export function unsafeRepository(
+  error: unknown,
+  platform: NodeJS.Platform = process.platform,
+): ApiError | null {
+  if (platform !== 'win32' || !(error instanceof GitError)) return null;
+  if (!/dubious ownership/i.test(error.stderr)) return null;
+  return ApiError.badRequest('unsafe_repository', error.stderr.trim());
+}
+
 export interface RepoRouteDeps {
   repos: RepoStore;
   sessions: SessionStore;
   worktrees: WorktreeManager;
+  /**
+   * Releases the daemon's own watcher inside a worktree before Windows prunes
+   * it: a watched directory cannot be removed there. Optional for narrow tests.
+   */
+  onboarding?: Pick<MarkerFileSync, 'unwatch'>;
 }
 
 export function repoRoutes(deps: RepoRouteDeps): Hono {
@@ -34,18 +55,24 @@ export function repoRoutes(deps: RepoRouteDeps): Hono {
     )
     .post('/', async (c) => {
       const body = await parseBody(c, createRepoRequestSchema);
-      const path = expandTilde(body.path);
-      if (!isAbsolute(path)) {
+      const typed = expandTilde(body.path);
+      if (!isNativeAbsolute(typed)) {
         throw ApiError.badRequest('relative_path', 'repo path must be absolute (or start with ~)');
       }
       try {
-        await git(['rev-parse', '--git-dir'], { cwd: path });
-      } catch {
-        throw ApiError.badRequest('not_a_git_repo', `${path} is not an existing git repository`);
+        await git(['rev-parse', '--git-dir'], { cwd: typed });
+      } catch (error) {
+        throw (
+          unsafeRepository(error) ??
+          ApiError.badRequest('not_a_git_repo', `${typed} is not an existing git repository`)
+        );
       }
+      // Windows registers the canonical spelling (decision 11), so `c:/x/repo`
+      // and `C:\x\repo\` are one repository; POSIX keeps the typed path.
+      const path = canonicalHostPath(typed);
       // Idempotent: registering an already-known path returns the existing
       // repo (the UI can't always tell — ~ paths expand only on the host).
-      const existing = deps.repos.list().find((r) => r.path === path);
+      const existing = deps.repos.list().find((r) => sameHostPath(r.path, path));
       if (existing) return c.json(existing);
       const repo = deps.repos.create({
         path,
@@ -113,9 +140,15 @@ export function repoRoutes(deps: RepoRouteDeps): Hono {
           return p;
         }
       };
+      // Windows: canonical spellings compared without case, so a session whose
+      // stored path differs from git's listing still counts as using it.
+      const same =
+        process.platform === 'win32'
+          ? (a: string, b: string) => sameHostPath(canonicalHostPath(a), canonicalHostPath(b))
+          : (a: string, b: string) => real(a) === real(b);
 
       const worktrees = await deps.worktrees.listWorktrees(repo);
-      const target = worktrees.find((w) => w.path === path || real(w.path) === real(path));
+      const target = worktrees.find((w) => w.path === path || same(w.path, path));
       if (!target) throw ApiError.notFound('worktree', path);
       if (target.is_primary) {
         throw ApiError.conflict('worktree_primary', 'the repository clone cannot be pruned');
@@ -128,7 +161,7 @@ export function repoRoutes(deps: RepoRouteDeps): Hono {
       const LIVE = new Set(['starting', 'running', 'waiting_input']);
       const busy = deps.sessions
         .listActiveByRepo(repo.id)
-        .filter((s) => LIVE.has(s.status) && real(s.worktree_path) === real(target.path));
+        .filter((s) => LIVE.has(s.status) && same(s.worktree_path, target.path));
       if (busy.length > 0) {
         throw ApiError.conflict(
           'worktree_busy',
@@ -144,6 +177,13 @@ export function repoRoutes(deps: RepoRouteDeps): Hono {
         );
       }
 
+      // Windows refuses to remove a directory the daemon itself still watches
+      // (the stopped sessions' onboarding markers); nothing is left to watch.
+      if (process.platform === 'win32') {
+        for (const s of deps.sessions.listActiveByRepo(repo.id)) {
+          if (same(s.worktree_path, target.path)) deps.onboarding?.unwatch(s.id);
+        }
+      }
       await deps.worktrees.remove({ repo, worktreePath: target.path, force: false });
       return c.json<RepoWorktreesResponse>({
         worktrees: await deps.worktrees.listWorktreeStatuses(repo),

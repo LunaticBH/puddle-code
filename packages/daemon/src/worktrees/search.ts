@@ -107,7 +107,11 @@ async function contentMatches(
     if (first === -1 || second === -1) continue;
     const path = record.slice(0, first);
     const line = Number(record.slice(first + 1, second));
-    const text = record.slice(second + 1);
+    const matched = record.slice(second + 1);
+    // Git for Windows checks files out with CRLF (core.autocrlf), and grep
+    // keeps the carriage return on every matched line.
+    const text =
+      process.platform === 'win32' && matched.endsWith('\r') ? matched.slice(0, -1) : matched;
     if (!Number.isFinite(line)) continue;
 
     let entry = byPath.get(path);

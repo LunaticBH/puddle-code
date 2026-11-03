@@ -8,6 +8,8 @@ import {
   readFileSync,
   statSync,
   writeFileSync,
+  type Dirent,
+  type Stats,
 } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -22,11 +24,14 @@ import {
   type TreeResponse,
   type UploadResponse,
 } from '@puddle/shared';
+import { wireRelative } from '../../../host-path.js';
 import { ApiError } from '../../errors.js';
 import { parseBody } from '../../validate.js';
 import {
+  assertStorableName,
   browseRoot,
   containedPath,
+  containedWritePath,
   resolveWorktree,
   type WorktreeDeps,
 } from './worktree-shared.js';
@@ -49,6 +54,14 @@ const SNIFF_BYTES = 8 * 1024;
 
 function contentDisposition(filename: string): string {
   return `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`;
+}
+
+/** A multipart filename as a `/`-joined relative path with `''`, `.` and `..` segments dropped. */
+function uploadName(raw: string, separator: string | RegExp): string {
+  return raw
+    .split(separator)
+    .filter((seg) => seg !== '' && seg !== '.' && seg !== '..')
+    .join('/');
 }
 
 /**
@@ -76,6 +89,46 @@ function describeEntry(dir: string, name: string): TreeEntry {
   }
 }
 
+/**
+ * Windows denies even `lstat` on files the system holds open (a drive root's
+ * `pagefile.sys`, `hiberfil.sys`, `DumpStack.log.tmp`), which would fail the
+ * whole listing. Such an entry is described from its directory record alone,
+ * without a size.
+ */
+function describeWindowsEntry(dir: string, entry: Dirent): TreeEntry {
+  try {
+    return describeEntry(dir, entry.name);
+  } catch {
+    return {
+      name: entry.name,
+      type: entry.isDirectory() ? 'dir' : 'file',
+      size: null,
+      symlink: false,
+    };
+  }
+}
+
+function listEntries(dir: string): TreeEntry[] {
+  if (process.platform === 'win32') {
+    return readdirSync(dir, { withFileTypes: true })
+      .filter((entry) => entry.name !== '.git')
+      .map((entry) => describeWindowsEntry(dir, entry));
+  }
+  return readdirSync(dir)
+    .filter((name) => name !== '.git')
+    .map((name) => describeEntry(dir, name));
+}
+
+/** `lstat`, or null for a Windows entry the system holds open (see `describeWindowsEntry`). */
+function zipStat(abs: string): Stats | null {
+  if (process.platform !== 'win32') return lstatSync(abs);
+  try {
+    return lstatSync(abs);
+  } catch {
+    return null;
+  }
+}
+
 /** Recursively list zip-worthy files under `dir`, skipping `.git` and symlinks; `prefix` is the in-zip path so far. */
 function collectZipEntries(dir: string, prefix: string): Array<{ abs: string; rel: string }> {
   const out: Array<{ abs: string; rel: string }> = [];
@@ -83,8 +136,8 @@ function collectZipEntries(dir: string, prefix: string): Array<{ abs: string; re
     if (entry.name === '.git') continue;
     const abs = join(dir, entry.name);
     const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
-    const lst = lstatSync(abs);
-    if (lst.isSymbolicLink()) continue;
+    const lst = zipStat(abs);
+    if (!lst || lst.isSymbolicLink()) continue;
     if (lst.isDirectory()) out.push(...collectZipEntries(abs, rel));
     else if (lst.isFile()) out.push({ abs, rel });
   }
@@ -106,14 +159,11 @@ export function worktreeFileRoutes(deps: WorktreeDeps): Hono {
       if (!statSync(dir).isDirectory()) {
         throw ApiError.badRequest('not_a_directory', `${rel || '.'} is not a directory`);
       }
-      const entries = readdirSync(dir)
-        .filter((name) => name !== '.git')
-        .map((name) => describeEntry(dir, name))
-        .sort((a, b) => {
-          if (a.type === 'dir' && b.type !== 'dir') return -1;
-          if (a.type !== 'dir' && b.type === 'dir') return 1;
-          return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
-        });
+      const entries = listEntries(dir).sort((a, b) => {
+        if (a.type === 'dir' && b.type !== 'dir') return -1;
+        if (a.type !== 'dir' && b.type === 'dir') return 1;
+        return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+      });
       return c.json<TreeResponse>({ path: rel, entries });
     })
 
@@ -148,7 +198,7 @@ export function worktreeFileRoutes(deps: WorktreeDeps): Hono {
       // GET read. The fs mutation routes take it too, since 12.3.
       const root = browseRoot(c, resolveWorktree(deps, c).root);
       const rel = c.req.query('path') ?? '';
-      const target = containedPath(root, rel);
+      const target = containedWritePath(root, rel);
       const body = await parseBody(c, putFileRequestSchema);
 
       const parent = dirname(target);
@@ -205,6 +255,18 @@ export function worktreeFileRoutes(deps: WorktreeDeps): Hono {
         throw ApiError.badRequest('nothing_uploaded', 'no files were present in the upload');
       }
 
+      // Windows also splits on `\` (legal inside a POSIX name, so it would
+      // otherwise smuggle `..` past the filter) and refuses the whole batch
+      // before writing anything when a name cannot be stored there.
+      const windows = process.platform === 'win32';
+      const segments = windows ? /[\\/]/ : '/';
+      if (windows) {
+        for (const file of files) {
+          const name = uploadName(file.name, segments);
+          if (name) assertStorableName(name);
+        }
+      }
+
       const uploaded: UploadResponse['files'] = [];
       for (const file of files) {
         // A multipart filename may carry a dir-relative path (folder drag-in:
@@ -212,12 +274,9 @@ export function worktreeFileRoutes(deps: WorktreeDeps): Hono {
         // path under the drop target). Sanitise per segment — `''`, `.` and
         // `..` are dropped, so `../../evil.txt` is neutralised to `evil.txt`
         // and lands inside `dir` — then contain the joined path as before.
-        const name = file.name
-          .split('/')
-          .filter((seg) => seg !== '' && seg !== '.' && seg !== '..')
-          .join('/');
+        const name = uploadName(file.name, segments);
         if (!name) continue;
-        const relPath = rel ? `${rel}/${name}` : name;
+        const relPath = wireRelative(rel ? `${rel}/${name}` : name);
         const dest = containedPath(root, relPath);
         mkdirSync(dirname(dest), { recursive: true });
         const bytes = Buffer.from(await file.arrayBuffer());

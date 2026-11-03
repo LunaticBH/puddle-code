@@ -348,6 +348,19 @@ describe('GET /api/worktrees/:sid/search', () => {
     expect(alpha.matches[0]!.text).toContain('authenticate');
   });
 
+  it.runIf(process.platform === 'win32')(
+    'drops the carriage return of CRLF lines from matches on Windows',
+    async () => {
+      writeFileSync(join(worktree, 'src', 'crlf.txt'), 'first crlfneedle line\r\nsecond\r\n');
+      const body = searchResponseSchema.parse(
+        await (await search(sid, { q: 'crlfneedle' })).json(),
+      );
+      expect(body.content.find((f) => f.path === 'src/crlf.txt')?.matches).toEqual([
+        { line: 1, text: 'first crlfneedle line' },
+      ]);
+    },
+  );
+
   it('matches file names (untracked files included)', async () => {
     const res = await search(sid, { q: 'alpha' });
     const body = searchResponseSchema.parse(await res.json());
@@ -616,6 +629,8 @@ describe('GET /api/sessions/:id — git_summary', () => {
   });
 
   it('is null once the worktree dir is removed', async () => {
+    // Windows cannot delete a directory that the live agent uses as its cwd.
+    if (process.platform === 'win32') await fx.service.kill(sid);
     rmSync(worktree, { recursive: true, force: true });
     const res = await app.request(`/api/sessions/${sid}`);
     expect(res.status).toBe(200);
@@ -643,6 +658,8 @@ describe('worktree-git: shared error conditions', () => {
   it('409s every endpoint once the worktree is gone from disk', async () => {
     const { sid, worktree } = await newSession('worktree-missing target');
     const sha = sh(worktree, 'rev-parse', 'HEAD');
+    // Windows cannot delete a directory that the live agent uses as its cwd.
+    if (process.platform === 'win32') await fx.service.kill(sid);
     rmSync(worktree, { recursive: true, force: true });
 
     expect((await diff(sid)).status).toBe(409);

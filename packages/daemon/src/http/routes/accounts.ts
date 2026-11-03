@@ -1,5 +1,4 @@
 import { existsSync, mkdirSync, statSync } from 'node:fs';
-import { isAbsolute } from 'node:path';
 import { Hono } from 'hono';
 import {
   createAccountRequestSchema,
@@ -16,6 +15,7 @@ import type { ProfileStore } from '../../db/stores/profiles.js';
 import type { SessionStore } from '../../db/stores/sessions.js';
 import type { ProjectStore } from '../../db/stores/projects.js';
 import type { RemovalStore } from '../../db/stores/removals.js';
+import { isNativeAbsolute } from '../../host-path.js';
 import { ApiError } from '../errors.js';
 import { removeDirWithin } from '../fs-cleanup.js';
 import { expandTilde } from '../tilde.js';
@@ -81,7 +81,7 @@ export function accountRoutes(deps: AccountRouteDeps): Hono {
           );
         }
         const source = expandTilde(body.import_dir);
-        if (!isAbsolute(source) || !existsSync(source) || !statSync(source).isDirectory()) {
+        if (!isNativeAbsolute(source) || !existsSync(source) || !statSync(source).isDirectory()) {
           throw ApiError.badRequest(
             'import_dir_invalid',
             `'${body.import_dir}' is not a directory on this host`,
