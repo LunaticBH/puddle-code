@@ -27,7 +27,9 @@ export type PasteImageResponse = z.infer<typeof pasteImageResponseSchema>;
 /**
  * GET /api/worktrees/:sid/resolve?path=…&line=… — terminal file-link
  * validation (SPEC §7). Since 15.2 the answer covers the whole daemon host,
- * not just the worktree, and directories resolve too.
+ * not just the worktree, and directories resolve too. Relative answers use
+ * `/` on every host; absolute ones are the host's canonical native spelling
+ * (`C:\Users\a\repo` on Windows, docs/windows.md decision 11).
  */
 export const resolvePathResponseSchema = z.object({
   /**

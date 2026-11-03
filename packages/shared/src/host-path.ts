@@ -96,6 +96,29 @@ export function toRootRelative(root: string, absolute: string): string | null {
   return relativeSegments(root, absolute)?.join('/') ?? null;
 }
 
+/** Device names Windows reserves in every directory, with or without an extension. */
+const WIN32_RESERVED_NAME = /^(?:con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³])(?:\..*)?$/i;
+// eslint-disable-next-line no-control-regex -- control characters are exactly what Windows refuses.
+const WIN32_FORBIDDEN_CHARACTER = /[<>:"|?*\u0000-\u001f]/;
+
+/**
+ * Why Windows cannot store `name` as one file or directory name, or null when
+ * it can: reserved device names (`CON`, `nul.txt`, `COM1`), the characters
+ * `<>:"|?*` and control characters (a `:` would also address an alternate
+ * data stream), and a trailing dot or space, which Windows strips. Node's
+ * `\\?\` paths would create such names anyway, leaving entries that Explorer,
+ * cmd and Git cannot handle. `.` and `..` are navigation, not names.
+ */
+export function windowsNameProblem(name: string): string | null {
+  if (name === '.' || name === '..') return null;
+  if (WIN32_FORBIDDEN_CHARACTER.test(name)) {
+    return 'Windows names cannot contain < > : " | ? * or control characters';
+  }
+  if (/[. ]$/.test(name)) return 'Windows names cannot end in a dot or a space';
+  if (WIN32_RESERVED_NAME.test(name)) return `'${name}' is a reserved device name on Windows`;
+  return null;
+}
+
 function relativeSegments(root: string, candidate: string): string[] | null {
   const style = hostPathStyle(root);
   if (style !== hostPathStyle(candidate)) return null;

@@ -10,6 +10,7 @@ import {
   isInsideHostPath,
   normaliseHostPath,
   toRootRelative,
+  windowsNameProblem,
 } from '../src/index.js';
 
 const POSIX_PATHS = [
@@ -237,5 +238,32 @@ describe('Windows host paths', () => {
     expect(toRootRelative('C:\\', 'C:\\Users\\a')).toBe('Users/a');
     expect(toRootRelative('C:\\repo', 'C:\\repo-copy')).toBeNull();
     expect(toRootRelative('\\\\server\\share\\d', '\\\\server\\share\\d\\e\\f')).toBe('e/f');
+  });
+});
+
+describe('names Windows cannot store', () => {
+  it('rejects reserved device names with or without an extension', () => {
+    for (const name of ['CON', 'con', 'Prn', 'aux.md', 'NUL', 'nul.tar.gz', 'COM1', 'lpt9.txt']) {
+      expect(windowsNameProblem(name), name).toMatch(/reserved device name/);
+    }
+    expect(windowsNameProblem('COM¹')).toMatch(/reserved device name/);
+  });
+
+  it('rejects forbidden characters, stream names and trailing dots or spaces', () => {
+    for (const name of ['a<b', 'a>b', 'f.txt:hidden', 'D:foo', 'say"hi"', 'a|b', 'why?', 'a*']) {
+      expect(windowsNameProblem(name), name).toMatch(/cannot contain/);
+    }
+    expect(windowsNameProblem('tab\there')).toMatch(/cannot contain/);
+    for (const name of ['trailing.', 'trailing ', 'dots...']) {
+      expect(windowsNameProblem(name), name).toMatch(/dot or a space/);
+    }
+  });
+
+  it('accepts ordinary names, including ones that merely start like a device', () => {
+    for (const name of ['.', '..', 'console.log', 'nul-device', 'COMET', 'com10', '.env']) {
+      expect(windowsNameProblem(name), name).toBeNull();
+    }
+    expect(windowsNameProblem('a b.txt')).toBeNull();
+    expect(windowsNameProblem('[ab].txt')).toBeNull();
   });
 });
