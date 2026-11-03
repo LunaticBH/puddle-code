@@ -12,7 +12,8 @@ import { claudeDriver } from '../../src/agents/claude-code/headless.js';
 import { codexDriver } from '../../src/agents/codex/headless.js';
 import { geminiDriver } from '../../src/agents/gemini-cli/headless.js';
 import { openCodeDriver } from '../../src/agents/opencode/headless.js';
-import { fakeAdapter, fixture, waitFor } from '../helpers/daemon-fixtures.js';
+import { fixture, waitFor } from '../helpers/daemon-fixtures.js';
+import { nodeFakeAdapter } from './node-fake-agent.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -146,7 +147,12 @@ describe('native structured agent protocols', () => {
   for (const item of fixtures) {
     it(`${item.name} extracts its exact result and resumes the same native conversation`, () => {
       const driver = item.driver(context);
-      expect(Object.values(driver.env).every((path) => path.startsWith('/account'))).toBe(true);
+      // join() spells the OpenCode XDG roots natively, with backslashes on Windows.
+      expect(
+        Object.values(driver.env).every((path) =>
+          path.replaceAll('\\', '/').startsWith('/account'),
+        ),
+      ).toBe(true);
       const decode = driver.decoder();
       const events = item.records.map((record) => decode(record));
       expect(events.some((event) => event.ref === ref)).toBe(true);
@@ -292,7 +298,7 @@ describe('headless terminal ownership', () => {
   it('fails headless launch explicitly without opening an interactive fallback', async () => {
     const f = fixture({
       adapter: {
-        ...fakeAdapter(),
+        ...nodeFakeAdapter(),
         scriptedTurns: true,
         prepareHeadlessLaunch: async () => {
           throw new Error('Unsupported native version');
@@ -317,7 +323,7 @@ describe('headless terminal ownership', () => {
     let resumed: string | undefined;
     const f = fixture({
       adapter: {
-        ...fakeAdapter(),
+        ...nodeFakeAdapter(),
         scriptedTurns: true,
         hasConversation: () => true,
         prepareHeadlessLaunch: async (ctx) => {

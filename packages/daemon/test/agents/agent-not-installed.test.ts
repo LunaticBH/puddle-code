@@ -7,6 +7,7 @@ import { clearBinaryCache } from '../../src/agents/binary.js';
 import { startDaemon, type RunningDaemon } from '../helpers/authorised-daemon.js';
 import { fixture, fakeAdapter } from '../helpers/daemon-fixtures.js';
 import { initRepo } from '../helpers/git-fixtures.js';
+import { nodeFakeAdapter } from './node-fake-agent.js';
 
 const ABSENT = 'puddle-nonexistent-agent';
 
@@ -118,7 +119,7 @@ describe('uninstalled agent binary — the logged-in flag', () => {
 
   it('still creates a session normally when the binary is present', async () => {
     clearBinaryCache();
-    const f = fixture();
+    const f = fixture({ adapter: nodeFakeAdapter() });
     f.stores.accounts.setLoggedIn(f.ids.account, true);
     const session = await f.service.create({
       project_id: f.ids.project,
