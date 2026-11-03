@@ -1,7 +1,7 @@
-import { execPath } from 'node:process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { installGeminiTurnHooks } from './control.js';
+import { geminiHookCommand } from './hook-command.js';
 
 const HELPER_FILE = 'puddle-signal.mjs';
 
@@ -45,7 +45,10 @@ interface HookGroup {
 }
 
 /** Additive SessionStart/SessionEnd hooks, verified for Gemini CLI 0.53.x. */
-export function installGeminiLifecycleHooks(configDir: string): void {
+export function installGeminiLifecycleHooks(
+  configDir: string,
+  platform: NodeJS.Platform = process.platform,
+): void {
   const dir = join(configDir, '.gemini');
   mkdirSync(dir, { recursive: true });
   const helperPath = join(dir, HELPER_FILE);
@@ -79,7 +82,7 @@ export function installGeminiLifecycleHooks(configDir: string): void {
           {
             name: `puddle-${signal}`,
             type: 'command',
-            command: `${JSON.stringify(execPath)} ${JSON.stringify(helperPath)} ${signal}`,
+            command: geminiHookCommand(helperPath, [signal], platform),
           },
         ],
       } satisfies HookGroup,
@@ -87,5 +90,5 @@ export function installGeminiLifecycleHooks(configDir: string): void {
   }
   settings['hooks'] = hooks;
   writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
-  installGeminiTurnHooks(configDir);
+  installGeminiTurnHooks(configDir, platform);
 }

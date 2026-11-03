@@ -1,6 +1,7 @@
-import { execPath } from 'node:process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import type { Environment } from '@puddle/shared/node/platform';
+import { claudeStatusLineCommand, claudeStatusLineShell, runsHelper } from './hook-command.js';
 
 /**
  * Live per-session usage capture for claude-code, via the documented
@@ -62,9 +63,15 @@ export interface ClaudeLiveUsage {
 
 /**
  * Installs the helper and points settings.json at it — but never clobbers a
- * status line the user (or an imported account) already configured.
+ * status line the user (or an imported account) already configured. On
+ * Windows Puddle's own line is rewritten on every install: its quoting
+ * follows whether Claude will find Git Bash, which can change between boots.
  */
-export function installStatusLine(configDir: string): void {
+export function installStatusLine(
+  configDir: string,
+  platform: NodeJS.Platform = process.platform,
+  env: Environment = process.env,
+): void {
   writeFileSync(join(configDir, HELPER_FILE), HELPER_SOURCE, { mode: 0o700 });
   const settingsFile = join(configDir, 'settings.json');
   let settings: Record<string, unknown> = {};
@@ -75,12 +82,15 @@ export function installStatusLine(configDir: string): void {
       // A corrupt settings file is replaced by one carrying only our line.
     }
   }
-  if (settings['statusLine'] !== undefined) return; // respect an existing one
+  const existing = settings['statusLine'];
+  const ours = platform === 'win32' && runsHelper(existing, HELPER_FILE);
+  if (existing !== undefined && !ours) return; // respect an existing one
   settings['statusLine'] = {
     type: 'command',
-    // The daemon's pinned node runs claude on this same host, so its path is
-    // valid for the status-line subprocess too.
-    command: `${JSON.stringify(execPath)} ${JSON.stringify(join(configDir, HELPER_FILE))}`,
+    command: claudeStatusLineCommand(
+      join(configDir, HELPER_FILE),
+      claudeStatusLineShell(platform, env),
+    ),
   };
   writeFileSync(settingsFile, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
 }
