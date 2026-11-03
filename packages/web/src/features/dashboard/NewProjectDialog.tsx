@@ -1,7 +1,13 @@
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { CornerLeftUp, Folder, FolderGit2 } from 'lucide-react';
-import type { ProjectColour } from '@puddle/shared';
+import {
+  hostBasename,
+  hostPathStyle,
+  hostSeparator,
+  isAbsoluteHostPath,
+  type ProjectColour,
+} from '@puddle/shared';
 import { ColourPicker } from '../../components/colour-picker';
 import { appearanceColourClass } from '../../lib/appearance/appearance-colours';
 import {
@@ -22,8 +28,18 @@ import {
   useDaemonVersion,
   useDirSuggestions,
   useHostInfo,
+  useHostPathStyle,
   useRepos,
 } from '../../lib/queries/queries';
+import {
+  hostPathKey,
+  isHostPathish,
+  isHostRoot,
+  leadingTilde,
+  nativeWindowsPath,
+  sameHostPath,
+} from '../../lib/host-path';
+import { parentDir } from '../explorer/explorer-paths';
 import { ABBREV_MAX, deriveAbbrev, normaliseAbbrev } from '../../lib/project-abbrev';
 import {
   dynamicBaseBranchSupported,
@@ -31,20 +47,17 @@ import {
 } from '../../lib/transport/protocol-support';
 import { useDebouncedValue } from '../../lib/hooks/use-debounced-value';
 
-/** '/a/b/' → '/a/b'; keeps the root slash. */
+/** '/a/b/' → '/a/b'; keeps the root slash. A Windows path becomes native: `c:/a/` → `C:\a`. */
 function normalisePath(path: string): string {
+  if (hostPathStyle(path.trim()) === 'win32') return nativeWindowsPath(path.trim());
   const trimmed = path.trim().replace(/\/+$/, '');
   return trimmed === '' ? '/' : trimmed;
 }
 
-function isPathish(value: string): boolean {
-  return value.startsWith('/') || value.startsWith('~');
-}
-
-function parentDir(dir: string): string {
-  const cut = dir.replace(/\/+$/, '');
-  const idx = cut.lastIndexOf('/');
-  return idx <= 0 ? '/' : cut.slice(0, idx);
+/** The directory's own name, which a chosen repository's project is named after. */
+function directoryName(dir: string): string {
+  if (hostPathStyle(dir) === 'win32') return hostBasename(dir);
+  return dir.split('/').filter(Boolean).pop() ?? '';
 }
 
 /**
@@ -68,14 +81,16 @@ function DirBrowser({
   onNavigate: (dir: string) => void;
   onChoose: (dir: string) => void;
 }) {
-  const entries = useDirSuggestions(dir.endsWith('/') ? dir : `${dir}/`);
+  // A trailing separator lists the directory itself; a Windows host's is `\`.
+  const separator = hostSeparator(hostPathStyle(dir));
+  const entries = useDirSuggestions(dir.endsWith(separator) ? dir : `${dir}${separator}`);
   return (
     <div className="flex flex-col gap-1">
       <div className="flex min-w-0 items-center gap-1.5">
         <button
           type="button"
           onClick={() => onNavigate(parentDir(dir))}
-          disabled={dir === '/'}
+          disabled={isHostRoot(dir)}
           title="Parent directory"
           className="shrink-0 rounded-sm p-1 text-fg-gold transition-colors hover:bg-elevated hover:text-fg disabled:pointer-events-none disabled:opacity-40"
         >
@@ -149,6 +164,7 @@ export function NewProjectDialog({
   const createProject = useCreateProject();
   const navigate = useNavigate();
   const host = useHostInfo();
+  const style = useHostPathStyle();
 
   const [path, setPath] = useState('');
   const [name, setName] = useState('');
@@ -169,9 +185,9 @@ export function NewProjectDialog({
     // parent stepping stays plain string maths), else the daemon user's home.
     const typed = path.trim();
     const seeded =
-      isPathish(typed) && home !== undefined
-        ? normalisePath(typed.replace(/^~(?=\/|$)/, home))
-        : isPathish(typed) && typed.startsWith('/')
+      isHostPathish(typed, style) && home !== undefined
+        ? normalisePath(typed.replace(leadingTilde(style), home))
+        : isHostPathish(typed, style) && isAbsoluteHostPath(typed)
           ? normalisePath(typed)
           : (home ?? '/');
     navigateBrowser(seeded);
@@ -194,7 +210,7 @@ export function NewProjectDialog({
   const chooseDir = (dir: string) => {
     setPath(dir);
     setBrowseDir(null);
-    applyName(dir.split('/').filter(Boolean).pop() ?? '');
+    applyName(directoryName(dir));
     setNameTouched(true);
   };
 
@@ -203,27 +219,31 @@ export function NewProjectDialog({
 
   // Before any typing, offer the already-registered repos.
   const hints = useMemo<Array<Hint & { is_git: boolean }>>(() => {
-    if (!isPathish(path)) {
+    if (!isHostPathish(path, style)) {
       return (repos.data ?? []).map((repo) => ({
         value: repo.path,
         badge: 'registered',
         is_git: true,
       }));
     }
-    const registered = new Set((repos.data ?? []).map((repo) => repo.path));
+    const registered = new Set((repos.data ?? []).map((repo) => hostPathKey(repo.path)));
     return (suggestions.data?.entries ?? []).map((entry) => ({
       value: entry.path,
       label: entry.name,
-      badge: registered.has(entry.path) ? 'registered' : entry.is_git ? 'git' : undefined,
+      badge: registered.has(hostPathKey(entry.path))
+        ? 'registered'
+        : entry.is_git
+          ? 'git'
+          : undefined,
       is_git: entry.is_git,
     }));
-  }, [path, repos.data, suggestions.data]);
+  }, [path, style, repos.data, suggestions.data]);
 
   const submit = async () => {
     setError(null);
     try {
       const repoPath = normalisePath(path);
-      const existing = repos.data?.find((repo) => repo.path === repoPath);
+      const existing = repos.data?.find((repo) => sameHostPath(repo.path, repoPath));
       const repoId =
         existing?.id ??
         (
@@ -249,7 +269,7 @@ export function NewProjectDialog({
     }
   };
 
-  const ready = name.trim() !== '' && isPathish(path.trim());
+  const ready = name.trim() !== '' && isHostPathish(path.trim(), style);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -280,13 +300,13 @@ export function NewProjectDialog({
             </div>
             <HintInput
               id="repo-path"
-              placeholder="~/src/my-repo"
+              placeholder={style === 'win32' ? '~\\src\\my-repo' : '~/src/my-repo'}
               value={path}
               onValueChange={setPath}
               onChoose={(hint) => {
                 const chosen = hint as Hint & { is_git: boolean };
                 if (!nameTouched && chosen.is_git) {
-                  applyName(hint.value.split('/').filter(Boolean).pop() ?? '');
+                  applyName(directoryName(hint.value));
                 }
               }}
               hints={hints}

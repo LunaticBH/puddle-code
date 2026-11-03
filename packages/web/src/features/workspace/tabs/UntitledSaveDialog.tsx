@@ -12,6 +12,8 @@ import { Button } from '../../../components/ui/button';
 import { Input } from '../../../components/ui/input';
 import { Label } from '../../../components/ui/label';
 import { ApiError, api } from '../../../lib/transport/api';
+import { typedRootRelativePath } from '../../../lib/host-path';
+import { useHostPathStyle } from '../../../lib/queries/queries';
 import { deleteUntitled } from '../../../lib/queries/untitled-queries';
 import { rootParam } from '../../../lib/queries/worktree-queries';
 import {
@@ -53,6 +55,7 @@ export function UntitledSaveDialog({
   const [path, setPath] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const style = useHostPathStyle();
   useEffect(() => {
     if (request) {
       setPath(request.name);
@@ -62,7 +65,7 @@ export function UntitledSaveDialog({
 
   const submit = async () => {
     if (!request || !targetSession) return;
-    const rel = path.trim().replace(/^\/+/, '').replace(/\/+$/, '');
+    const rel = typedRootRelativePath(path, style);
     if (rel === '') {
       setError('Give the file a path.');
       return;

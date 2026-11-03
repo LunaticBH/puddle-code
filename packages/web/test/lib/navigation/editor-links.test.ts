@@ -64,6 +64,26 @@ describe('editorDeepLink', () => {
       'cursor://vscode-remote/ssh-remote+alice@devbox:2222/proj',
     );
   });
+
+  it('turns a Windows host path into the /C:/… form VS Code expects', () => {
+    expect(editorDeepLink('vscode', 'C:\\Users\\alice\\proj', null)).toBe(
+      'vscode://file/C:/Users/alice/proj',
+    );
+    expect(editorDeepLink('cursor', 'D:\\', null)).toBe('cursor://file/D:/');
+    // Segments are still escaped; the drive colon is not.
+    expect(editorDeepLink('vscode', 'C:\\Users\\al ice\\a#b', null)).toBe(
+      'vscode://file/C:/Users/al%20ice/a%23b',
+    );
+    expect(editorDeepLink('vscode', 'C:\\proj', 'alice@winbox')).toBe(
+      'vscode://vscode-remote/ssh-remote+alice@winbox/C:/proj',
+    );
+  });
+
+  it('keeps a UNC share as a //server/share path', () => {
+    expect(editorDeepLink('vscode', '\\\\server\\share\\proj', null)).toBe(
+      'vscode://file//server/share/proj',
+    );
+  });
 });
 
 describe('resolveEditorHost', () => {

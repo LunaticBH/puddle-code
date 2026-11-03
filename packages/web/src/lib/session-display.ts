@@ -1,5 +1,5 @@
 import type { Session } from '@puddle/shared';
-import { DEFAULT_TAB_TITLE_TEMPLATE } from '@puddle/shared';
+import { DEFAULT_TAB_TITLE_TEMPLATE, hostBasename, hostPathStyle } from '@puddle/shared';
 
 /** The fields a tab-title template can draw on. A full `Session` satisfies it. */
 export type TitleSession = Pick<
@@ -30,7 +30,9 @@ export function sessionDisplayName(
 /** The em-dash `${separator}` glyph, shown only between two non-empty neighbours. */
 const SEPARATOR = ' — ';
 
+/** The worktree directory's name; a Windows host's path splits on `\` too. */
 function basename(path: string): string {
+  if (hostPathStyle(path) === 'win32') return hostBasename(path);
   return path.replace(/\/+$/, '').split('/').pop() ?? '';
 }
 

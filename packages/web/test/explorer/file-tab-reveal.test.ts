@@ -74,6 +74,26 @@ describe('file-tab reveal target', () => {
     ).toEqual({ directory: '/', path: 'README.md', browseRoot: '/' });
   });
 
+  it('reveals a Windows host’s external file inside the visible browse root', () => {
+    expect(
+      fileTabRevealTarget(
+        { kind: 'external', session: 's1', root: 'C:\\Users\\me', path: 'notes/todo.md' },
+        'C:\\worktrees\\main',
+        'C:\\Users',
+      ),
+    ).toEqual({ directory: 'C:\\Users', path: 'me/notes/todo.md' });
+  });
+
+  it('rebases onto a native Windows browse root, never a mixed-separator one', () => {
+    expect(
+      fileTabRevealTarget(
+        { kind: 'external', session: 's1', root: 'D:\\data', path: 'raw/b.csv' },
+        'C:\\worktrees\\main',
+        'C:\\worktrees\\main',
+      ),
+    ).toEqual({ directory: 'D:\\data\\raw', path: 'b.csv', browseRoot: 'D:\\data\\raw' });
+  });
+
   it('does not mistake a matching path prefix for containment', () => {
     expect(
       fileTabRevealTarget(

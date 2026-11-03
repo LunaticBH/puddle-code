@@ -13,7 +13,7 @@ import {
   getHotkeyHandler,
 } from '../../lib/navigation/hotkeys';
 import { daemonAnswersColourQueries } from '../../lib/transport/protocol-support';
-import { useDaemonVersion, useProfileSettings } from '../../lib/queries/queries';
+import { useDaemonVersion, useHostPathStyle, useProfileSettings } from '../../lib/queries/queries';
 import { useCurrentProfileId } from '../profile/profile-store';
 import { FindWidget } from '../find/FindWidget';
 import { isValidFindPattern } from '../find/find-matches';
@@ -46,6 +46,7 @@ import {
   type TerminalScrollPosition,
 } from './scroll/scroll-position';
 import { registerFileLinks, type FileLinkTarget } from './links/file-links';
+import { windowsPtyOptions } from './windows-pty';
 import {
   consumeTerminalModifiers,
   pasteTerminalClipboard,
@@ -213,6 +214,12 @@ export function Terminal({
     useProfileSettings(profileId ?? undefined).data?.terminalAppShortcuts !== false;
   const appShortcutsRef = useRef(appShortcuts);
   appShortcutsRef.current = appShortcuts;
+  // The HOST's path style (POSIX until `/api/host` answers): it picks the
+  // file-link patterns and xterm's ConPTY mode. A ref, so the live terminal
+  // follows a host-info answer that lands after it mounted.
+  const hostStyle = useHostPathStyle();
+  const hostStyleRef = useRef(hostStyle);
+  hostStyleRef.current = hostStyle;
   const find = useFindControls({
     // A terminal owns its key event before it bubbles to the window; the
     // custom xterm handler below opens this same control.
@@ -356,6 +363,7 @@ export function Terminal({
       // the dialogue opened nothing (fixed 2026-08-05). Route them through the
       // same open path as the URL provider below: no dialogue, real URL.
       linkHandler: { activate: (_event, uri) => openUri(uri) },
+      ...windowsPtyOptions(hostStyleRef.current),
     });
     preserveXtermScrollUp(xterm);
     hasReplayRef.current = false;
@@ -391,7 +399,12 @@ export function Terminal({
     // no worktree to resolve against) and only when a handler is wired.
     const fileLinks =
       onOpenFileRef.current && !sessionless
-        ? registerFileLinks(xterm, stream, (target) => onOpenFileRef.current?.(target))
+        ? registerFileLinks(
+            xterm,
+            stream,
+            (target) => onOpenFileRef.current?.(target),
+            () => hostStyleRef.current,
+          )
         : null;
 
     const clipboard = terminalClipboard({
@@ -725,6 +738,15 @@ export function Terminal({
     xterm.options.scrollback = settings.terminalScrollback;
     refit();
   }, [settings.terminalFontSize, settings.terminalScrollback, refit]);
+
+  // A terminal mounted before `/api/host` answered was built for a POSIX
+  // host; a Windows host's ConPTY mode joins the live instance once known.
+  // A host never changes under a running daemon, so nothing is ever unset.
+  useEffect(() => {
+    const xterm = xtermRef.current;
+    const { windowsPty } = windowsPtyOptions(hostStyle);
+    if (xterm && windowsPty) xterm.options.windowsPty = windowsPty;
+  }, [hostStyle]);
 
   // A FRESH PTY under an attached viewer (a resume, or an account migration —
   // "stop the process, repoint the account, resume", SPEC §5) needs the same

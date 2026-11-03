@@ -1,3 +1,5 @@
+import type { HostPathStyle } from '@puddle/shared';
+
 /** One path-shaped token found in a line, with offsets into the logical text. */
 export interface PathCandidate {
   path: string;
@@ -20,16 +22,27 @@ export interface PathCandidate {
 const PATH_RE =
   /(?:^|[\s"'`([<])((?:(?:\/|\.{1,2}\/|~\/)(?:[\w.+@~-]+\/)*[\w.+@~-]+|(?:[\w.+@~-]+\/)+[\w.+@~-]*|[\w.+@~-]+\.[A-Za-z]\w{0,11}))(?::(\d{1,6})(?::(\d{1,6}))?)?/dg;
 
+// A Windows host's tools print native paths, so its pattern is used ONLY when
+// the host is win32 and POSIX hosts keep exactly the candidates above. Either
+// separator joins segments; prefixes add a drive (`C:\`, `C:/`), a UNC share
+// (`\\server\share`) and `.\`/`~\`, and the drive colon is consumed by the
+// prefix before the `:line:col` suffix is tried. A position may also follow
+// in tsc/MSVC form, `file(12,5)` or `file(12)`, captured in groups 4 and 5.
+const WIN32_PATH_RE =
+  /(?:^|[\s"'`([<])(@?(?:(?:[A-Za-z]:[\\/]|\\\\|\.{1,2}[\\/]|~[\\/]|[\\/])(?:[\w.+@~-]+[\\/])*[\w.+@~-]+|(?:[\w.+@~-]+[\\/])+[\w.+@~-]*|[\w.+@~-]+\.[A-Za-z]\w{0,11}))(?::(\d{1,6})(?::(\d{1,6}))?|\((\d{1,6})(?:,(\d{1,6}))?\))?/dg;
+
 const TRAILING_PUNCT = new Set(['.', ',', ';', ':', ')', ']', "'", '"']);
 
 /**
  * Extracts every path-shaped candidate from one logical terminal line. Pure and
  * exported for unit tests. Offsets are into `text` so a caller can translate
- * them back to per-row buffer coordinates.
+ * them back to per-row buffer coordinates. `style` is the HOST's path style
+ * (`GET /api/host`'s platform), not the browser's.
  */
-export function findPathCandidates(text: string): PathCandidate[] {
+export function findPathCandidates(text: string, style: HostPathStyle = 'posix'): PathCandidate[] {
   const out: PathCandidate[] = [];
-  const re = new RegExp(PATH_RE.source, PATH_RE.flags);
+  const pattern = style === 'win32' ? WIN32_PATH_RE : PATH_RE;
+  const re = new RegExp(pattern.source, pattern.flags);
   let m: RegExpExecArray | null;
   while ((m = re.exec(text))) {
     const indices = m.indices;
@@ -52,6 +65,13 @@ export function findPathCandidates(text: string): PathCandidate[] {
     }
     if (path.length === 0) continue;
 
+    // A Windows `file(12,5)` position: the underline takes in the closing paren.
+    if (m[4] !== undefined) {
+      const line = Number.parseInt(m[4], 10);
+      const column = m[5] !== undefined ? Number.parseInt(m[5], 10) : undefined;
+      out.push({ path, line, column, start: pathStart, end: m.index + m[0].length });
+      continue;
+    }
     const line = m[2] !== undefined ? Number.parseInt(m[2], 10) : undefined;
     const column = m[3] !== undefined ? Number.parseInt(m[3], 10) : undefined;
     // Underline the whole `path:line:col` token, not just the path.

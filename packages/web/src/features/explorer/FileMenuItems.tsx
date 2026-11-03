@@ -1,5 +1,18 @@
 import { ContextMenuItem, ContextMenuSeparator } from '../../components/ui/context-menu';
+import { CLIENT_PLATFORM } from '../../lib/client-platform';
+import { formatPrimaryShortcut } from '../../lib/navigation/hotkeys';
 import { RevealInFileManagerItem } from './RevealInFileManagerItem';
+
+// The explorer's fixed keys (not rebindable; its handler takes ⌘ or Ctrl),
+// labelled in the client's notation: `⌥⌘C` on a Mac, `Ctrl+Alt+C` elsewhere.
+const KEYS = {
+  cut: formatPrimaryShortcut('meta+KeyX'),
+  copy: formatPrimaryShortcut('meta+KeyC'),
+  paste: formatPrimaryShortcut('meta+KeyV'),
+  copyPath: formatPrimaryShortcut('alt+meta+KeyC'),
+  copyRelativePath: formatPrimaryShortcut('alt+shift+meta+KeyC'),
+  delete: CLIENT_PLATFORM === 'mac' ? '⌘⌫' : 'Delete',
+};
 
 /** A short right-aligned keyboard-shortcut hint inside a file menu row. */
 export function Shortcut({ children }: { children: React.ReactNode }) {
@@ -47,22 +60,22 @@ export function FileMenuItems({
       {!readOnly && (
         <>
           <ContextMenuItem onSelect={onCut}>
-            Cut <Shortcut>⌘X</Shortcut>
+            Cut <Shortcut>{KEYS.cut}</Shortcut>
           </ContextMenuItem>
           <ContextMenuItem onSelect={onCopy}>
-            Copy <Shortcut>⌘C</Shortcut>
+            Copy <Shortcut>{KEYS.copy}</Shortcut>
           </ContextMenuItem>
           <ContextMenuItem disabled={!canPaste} onSelect={onPaste}>
-            Paste <Shortcut>⌘V</Shortcut>
+            Paste <Shortcut>{KEYS.paste}</Shortcut>
           </ContextMenuItem>
           <ContextMenuSeparator />
         </>
       )}
       <ContextMenuItem onSelect={onCopyPath}>
-        Copy Path <Shortcut>⌥⌘C</Shortcut>
+        Copy Path <Shortcut>{KEYS.copyPath}</Shortcut>
       </ContextMenuItem>
       <ContextMenuItem onSelect={onCopyRelativePath}>
-        Copy Relative Path <Shortcut>⌥⇧⌘C</Shortcut>
+        Copy Relative Path <Shortcut>{KEYS.copyRelativePath}</Shortcut>
       </ContextMenuItem>
       {onReveal && <ContextMenuItem onSelect={onReveal}>Reveal in Filetree</ContextMenuItem>}
       <RevealInFileManagerItem path={absolutePath} />
@@ -76,7 +89,7 @@ export function FileMenuItems({
             Rename… <Shortcut>F2</Shortcut>
           </ContextMenuItem>
           <ContextMenuItem onSelect={onDelete}>
-            Delete <Shortcut>⌘⌫</Shortcut>
+            Delete <Shortcut>{KEYS.delete}</Shortcut>
           </ContextMenuItem>
           <ContextMenuSeparator />
         </>

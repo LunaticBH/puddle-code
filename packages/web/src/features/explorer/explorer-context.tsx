@@ -11,6 +11,7 @@ import {
 import { useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import type { CompilationFileTarget, GitStatus, Session, TreeResponse } from '@puddle/shared';
+import { sameHostPath } from '../../lib/host-path';
 import { useDaemonVersion, useHostInfo } from '../../lib/queries/queries';
 import { clearPendingReveal, onReveal } from '../../lib/navigation/reveal-in-tree';
 import { isSecondClick, type ClickStamp } from '../../lib/second-click';
@@ -40,7 +41,7 @@ import {
   ancestorDirs,
   basename,
   buildVisibleRows,
-  joinPath,
+  copyablePath,
   pruneNested,
   rangeBetween,
   type VisibleRow,
@@ -314,7 +315,9 @@ export function ExplorerProvider({
     () =>
       onReveal((request) => {
         if (
-          request.directory !== undefined ? request.directory !== rootPath : request.root !== root
+          request.directory !== undefined
+            ? !sameHostPath(request.directory, rootPath)
+            : request.root !== root
         )
           return;
         clearPendingReveal();
@@ -565,7 +568,7 @@ export function ExplorerProvider({
 
   const copyPathToClipboard = useCallback(
     (paths: string[], relative: boolean) => {
-      const text = paths.map((p) => (relative ? p : joinPath(rootPath, p))).join('\n');
+      const text = paths.map((p) => copyablePath(rootPath, p, relative)).join('\n');
       void navigator.clipboard.writeText(text);
       const label = relative ? 'Relative path' : 'Path';
       toast.success(

@@ -134,6 +134,17 @@ describe('editorTabLabel', () => {
       '/worktrees/two/README.md — main',
     );
   });
+
+  it('labels a Windows host’s colliding roots with native separators', () => {
+    const tabs: OpenTab[] = [
+      { session: 's1', path: 'docs/README.md', root: 'C:\\repos\\one' },
+      { session: 's1', path: 'docs/README.md', root: 'C:\\repos\\two' },
+    ];
+    const branches = new Map([['s1', 'main']]);
+    expect(editorTabLabel('docs/README.md', 's1', tabs, branches, 'C:\\repos\\one')).toBe(
+      'C:\\repos\\one\\docs\\README.md',
+    );
+  });
 });
 
 describe('SavedStateMap', () => {

@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from 'react';
+import { CLIENT_PLATFORM, type ClientPlatform } from '../client-platform';
 import { desktopBridge } from '../desktop';
 
 /**
@@ -18,7 +19,8 @@ import { desktopBridge } from '../desktop';
  * Two default sets (SPEC §11): the web defaults avoid combos browser chrome
  * would swallow; the DESKTOP shell — no chrome competing for keys — forks the
  * few where a native gesture is more intuitive (`desktopBinding`). Only the
- * defaults fork: a per-profile override applies in both shells.
+ * defaults fork: a per-profile override applies in both shells. A Windows
+ * client reads either set with Ctrl for ⌘ (`shellDefaultBinding`).
  */
 export interface HotkeyAction {
   id: string;
@@ -191,15 +193,46 @@ const ACTION_BY_ID = new Map(HOTKEY_ACTIONS.map((a) => [a.id, a]));
  */
 const IS_DESKTOP = typeof window !== 'undefined' && desktopBridge() !== undefined;
 
-/** The shell's default binding for an action: the desktop fork when in the shell, else the web-safe one. */
-export function shellDefaultBinding(action: HotkeyAction, desktop: boolean = IS_DESKTOP): string {
-  return desktop && action.desktopBinding ? action.desktopBinding : action.defaultBinding;
+const MODIFIER_ORDER = ['ctrl', 'alt', 'shift', 'meta'];
+
+/** A binding written for ⌘ moved onto Ctrl, keeping the canonical modifier order. */
+function metaAsCtrl(binding: string): string {
+  const parts = binding.split('+');
+  const code = parts.pop() ?? '';
+  const mods = new Set(parts.map((m) => (m === 'meta' ? 'ctrl' : m)));
+  return [...MODIFIER_ORDER.filter((m) => mods.has(m)), code].join('+');
 }
 
-/** The canonical binding a keydown maps to, or null for a bare modifier press. */
-export function eventBinding(e: KeyboardEvent): string | null {
+/**
+ * The shell's default binding for an action: the desktop fork when in the
+ * shell, else the web-safe one. On a Windows client every `meta` becomes
+ * `ctrl`: Windows reserves the Windows key's combinations (Win+K, Win+S,
+ * Win+Alt+…) for itself, so a default written for ⌘ would never reach the
+ * page. Mac and Linux clients keep the defaults exactly as written, and a
+ * profile override is always taken literally.
+ */
+export function shellDefaultBinding(
+  action: HotkeyAction,
+  desktop: boolean = IS_DESKTOP,
+  client: ClientPlatform = CLIENT_PLATFORM,
+): string {
+  const binding = desktop && action.desktopBinding ? action.desktopBinding : action.defaultBinding;
+  return client === 'windows' ? metaAsCtrl(binding) : binding;
+}
+
+/**
+ * The canonical binding a keydown maps to, or null for a bare modifier press.
+ * Off a Mac, AltGr is a character key, not a modifier: Windows reports it as
+ * Ctrl+Alt, so AltGr+E typing `€` on a German layout must not fire a Ctrl+Alt+E
+ * shortcut.
+ */
+export function eventBinding(
+  e: KeyboardEvent,
+  client: ClientPlatform = CLIENT_PLATFORM,
+): string | null {
   const code = e.code;
   if (!code || /^(Control|Alt|Shift|Meta)(Left|Right)$/.test(code)) return null;
+  if (client !== 'mac' && e.getModifierState?.('AltGraph')) return null;
   const parts: string[] = [];
   if (e.ctrlKey) parts.push('ctrl');
   if (e.altKey) parts.push('alt');
@@ -232,13 +265,38 @@ function codeLabel(code: string): string {
   return CODE_LABEL[code] ?? code;
 }
 
-/** A binding string as its Mac glyphs, e.g. `meta+shift+KeyE` → `⌘⇧E`. */
-export function formatBinding(binding: string): string {
+/** Key names where a Mac glyph would mean nothing to a Windows or Linux user. */
+const TEXT_CODE_LABEL: Record<string, string> = { Space: 'Space', Enter: 'Enter', Tab: 'Tab' };
+
+/**
+ * A binding string in the client's own notation: Mac glyphs on a Mac
+ * (`shift+meta+KeyE` → `⇧⌘E`), and spelled-out keys elsewhere
+ * (`ctrl+alt+KeyW` → `Ctrl+Alt+W`, with `meta` named `Win` on Windows and
+ * `Super` on Linux).
+ */
+export function formatBinding(binding: string, client: ClientPlatform = CLIENT_PLATFORM): string {
   if (!binding) return '—';
   const parts = binding.split('+');
   const code = parts.pop() ?? '';
-  const mods = parts.map((m) => SYMBOL[m] ?? m).join('');
-  return mods + codeLabel(code);
+  if (client === 'mac') return parts.map((m) => SYMBOL[m] ?? m).join('') + codeLabel(code);
+  const names: Record<string, string> = {
+    ctrl: 'Ctrl',
+    alt: 'Alt',
+    shift: 'Shift',
+    meta: client === 'windows' ? 'Win' : 'Super',
+  };
+  return [...parts.map((m) => names[m] ?? m), TEXT_CODE_LABEL[code] ?? codeLabel(code)].join('+');
+}
+
+/**
+ * The label of a FIXED shortcut written for ⌘ (the explorer's ⌘C, ⌥⌘C, …),
+ * whose handlers accept Ctrl as well: ⌘ glyphs on a Mac, Ctrl elsewhere.
+ */
+export function formatPrimaryShortcut(
+  binding: string,
+  client: ClientPlatform = CLIENT_PLATFORM,
+): string {
+  return formatBinding(client === 'mac' ? binding : metaAsCtrl(binding), client);
 }
 
 // --- runtime handler registry (components register on mount) ---
@@ -291,13 +349,14 @@ export function actionForBinding(binding: string): string | undefined {
 }
 
 /**
- * An action's effective binding as Mac glyphs (`⌘K`), re-rendering when the
- * profile rebinds it. Every place that NAMES a shortcut in UI copy — the top
- * bar's palette hint, an empty pane, an empty session list, the homescreen, the
- * draft-save prompts — reads it from here rather than hard-coding the default,
- * so a rebind is honest everywhere at once (SPEC §11). Actions deliberately
- * left out of the registry (filetree ops, terminal line-edits) still spell
- * their fixed keys literally; those cannot be rebound.
+ * An action's effective binding in the client's notation (`⌘K`, `Ctrl+K`),
+ * re-rendering when the profile rebinds it. Every place that NAMES a shortcut
+ * in UI copy — the top bar's palette hint, an empty pane, an empty session
+ * list, the homescreen, the draft-save prompts — reads it from here rather
+ * than hard-coding the default, so a rebind is honest everywhere at once
+ * (SPEC §11). Actions deliberately left out of the registry (filetree ops,
+ * terminal line-edits) still spell their fixed keys (`formatPrimaryShortcut`);
+ * those cannot be rebound.
  */
 export function useHotkeyLabel(id: string): string {
   return formatBinding(useHotkeyBindings()[id] ?? '');

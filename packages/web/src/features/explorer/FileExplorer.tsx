@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import { hostBasename, hostPathStyle } from '@puddle/shared';
 import { Button } from '../../components/ui/button';
 import {
   ContextMenu,
@@ -47,6 +48,9 @@ export function FileExplorer() {
 function ExplorerBody() {
   const ex = useExplorer();
   const rootRef = useRef<HTMLDivElement>(null);
+  // The root is absolute, so a Windows host's needs Windows separator rules.
+  const rootName =
+    hostPathStyle(ex.rootPath) === 'win32' ? hostBasename(ex.rootPath) : basename(ex.rootPath);
 
   // Keep the keyboard-focused row scrolled into view during arrow navigation.
   useEffect(() => {
@@ -128,7 +132,7 @@ function ExplorerBody() {
         {/* Names what it will actually zip: the worktree, or the directory
             being browsed above it. */}
         <ContextMenuItem onSelect={() => ex.download([''])}>
-          Download {basename(ex.rootPath) || 'folder'}
+          Download {rootName || 'folder'}
         </ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>

@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { resolvePathResponseSchema, type ResolvePathResponse } from '@puddle/shared';
 import { api } from '../../lib/transport/api';
+import { hostStyleForPlatform } from '../../lib/host-path';
+import { useHostInfo } from '../../lib/queries/queries';
 import { Button } from '../../components/ui/button';
 import {
   Dialog,
@@ -27,6 +29,11 @@ export function PhonePathDialog({
   close(): void;
   open(result: ResolvePathResponse): void;
 }) {
+  const host = useHostInfo().data;
+  const windowsHost = hostStyleForPlatform(host?.platform) === 'win32';
+  // With no browse root, a relative path resolves against `/`; that names only
+  // the current drive on a Windows host, whose home is the natural base.
+  const base = root ?? (windowsHost ? host?.home : undefined) ?? '/';
   const [draft, setDraft] = useState(path);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -61,7 +68,7 @@ export function PhonePathDialog({
             setBusy(true);
             setError('');
             try {
-              const query = new URLSearchParams({ path: draft.trim(), root: root ?? '/' });
+              const query = new URLSearchParams({ path: draft.trim(), root: base });
               const result = resolvePathResponseSchema.parse(
                 await api('GET', `/api/worktrees/${target}/resolve?${query}`),
               );
@@ -80,7 +87,9 @@ export function PhonePathDialog({
             id="phone-path"
             autoFocus
             value={draft}
-            placeholder="/path/to/file or ~/directory"
+            placeholder={
+              windowsHost ? 'C:\\path\\to\\file or ~\\directory' : '/path/to/file or ~/directory'
+            }
             onChange={(event) => setDraft(event.target.value)}
           />
           {error && (

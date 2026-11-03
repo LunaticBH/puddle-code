@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import type { CompilationFileTarget, Session } from '@puddle/shared';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../../../components/ui/tooltip';
+import { sameHostPath } from '../../../lib/host-path';
 import { useDaemonVersion } from '../../../lib/queries/queries';
 import { onReveal } from '../../../lib/navigation/reveal-in-tree';
 import { cn } from '../../../lib/utils';
@@ -230,7 +231,7 @@ export function NavigatorSidebar({
         const targetDirectory = targetRoot ?? session?.worktree_path;
         const aimedAtTarget =
           request.directory !== undefined
-            ? request.directory === targetDirectory
+            ? targetDirectory !== undefined && sameHostPath(request.directory, targetDirectory)
             : request.root === targetRoot;
         if (browse !== null && aimedAtTarget) setBrowse(null);
       }),

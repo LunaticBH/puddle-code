@@ -3,14 +3,17 @@ import type { TreeResponse } from '@puddle/shared';
 import {
   basename,
   buildVisibleRows,
+  copyablePath,
   decodeDragPaths,
   dirOf,
   encodeDragPaths,
   isInside,
   joinPath,
   joinAbsolutePath,
+  parentDir,
   pruneNested,
   rangeBetween,
+  relativePathWithinAbsoluteRoot,
 } from '../../src/features/explorer/explorer-paths';
 
 describe('path helpers', () => {
@@ -27,6 +30,49 @@ describe('path helpers', () => {
     expect(joinAbsolutePath('/tmp/root/', 'nested/file.ts')).toBe('/tmp/root/nested/file.ts');
     expect(joinAbsolutePath('/', 'README.md')).toBe('/README.md');
     expect(joinAbsolutePath('/tmp/root', '')).toBe('/tmp/root');
+  });
+
+  it('joins a Windows root with native separators throughout', () => {
+    expect(joinAbsolutePath('C:\\repo', 'src/a.ts')).toBe('C:\\repo\\src\\a.ts');
+    expect(joinAbsolutePath('C:\\repo\\', 'src/a.ts')).toBe('C:\\repo\\src\\a.ts');
+    expect(joinAbsolutePath('C:\\', 'README.md')).toBe('C:\\README.md');
+    expect(joinAbsolutePath('\\\\server\\share', 'docs/x.md')).toBe(
+      '\\\\server\\share\\docs\\x.md',
+    );
+    expect(joinAbsolutePath('C:\\repo', '')).toBe('C:\\repo');
+  });
+
+  it('parentDir walks POSIX paths up to `/`', () => {
+    expect(parentDir('/home/alice/repo')).toBe('/home/alice');
+    expect(parentDir('/home/alice/repo/')).toBe('/home/alice');
+    expect(parentDir('/home')).toBe('/');
+    expect(parentDir('/')).toBe('/');
+  });
+
+  it('parentDir stops at a Windows drive root or UNC share', () => {
+    expect(parentDir('C:\\Users\\alice\\repo')).toBe('C:\\Users\\alice');
+    expect(parentDir('C:\\Users')).toBe('C:\\');
+    expect(parentDir('C:\\')).toBe('C:\\');
+    expect(parentDir('C:/Users/alice')).toBe('C:\\Users');
+    expect(parentDir('\\\\server\\share\\dir')).toBe('\\\\server\\share\\');
+    expect(parentDir('\\\\server\\share\\')).toBe('\\\\server\\share\\');
+  });
+
+  it('copyablePath gives native absolute paths and `/` relative ones', () => {
+    expect(copyablePath('/home/a/repo', 'src/a.ts', false)).toBe('/home/a/repo/src/a.ts');
+    // POSIX keeps its historical root-row form.
+    expect(copyablePath('/home/a/repo', '', false)).toBe('/home/a/repo/');
+    expect(copyablePath('C:\\repo', 'src/a.ts', false)).toBe('C:\\repo\\src\\a.ts');
+    expect(copyablePath('C:\\repo', '', false)).toBe('C:\\repo');
+    expect(copyablePath('C:\\repo', 'src/a.ts', true)).toBe('src/a.ts');
+  });
+
+  it('relativePathWithinAbsoluteRoot accepts Windows paths case-insensitively', () => {
+    expect(relativePathWithinAbsoluteRoot('C:\\repo', 'c:\\Repo\\src\\a.ts')).toBe('src/a.ts');
+    expect(relativePathWithinAbsoluteRoot('C:\\', 'C:\\Users\\a')).toBe('Users/a');
+    expect(relativePathWithinAbsoluteRoot('C:\\repo', 'C:\\repo')).toBe('');
+    expect(relativePathWithinAbsoluteRoot('C:\\repo', 'C:\\repo-copy\\a.ts')).toBeNull();
+    expect(relativePathWithinAbsoluteRoot('/repo', '/Repo/a.ts')).toBeNull();
   });
 
   it('isInside guards a folder against moving into its own subtree', () => {

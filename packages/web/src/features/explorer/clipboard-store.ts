@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import type { HostInfo } from '@puddle/shared';
+import { sameHostPath } from '../../lib/host-path';
 
 const STORAGE_KEY = 'puddle.explorerClipboard.v1';
 
@@ -89,9 +90,13 @@ export function hostIdentity(host: HostInfo | undefined): string | undefined {
   return host ? `${host.username}\0${host.hostname}\0${host.home}` : undefined;
 }
 
-/** Session ids may differ while their effective worktree directory is identical. */
+/**
+ * Session ids may differ while their effective worktree directory is
+ * identical. Directories compare as host paths: exactly on POSIX, and on a
+ * Windows host regardless of case or separator.
+ */
 export function sameFiletree(a: ExplorerClipboardTarget, b: ExplorerClipboardTarget): boolean {
-  return a.directory === b.directory;
+  return sameHostPath(a.directory, b.directory);
 }
 
 /**

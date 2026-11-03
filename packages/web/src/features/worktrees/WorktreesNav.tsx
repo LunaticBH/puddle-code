@@ -1,6 +1,12 @@
 import { useMemo, useState } from 'react';
 import { GitBranch, Trash2 } from 'lucide-react';
-import type { OrphanBranch, Session, WorktreeInfo } from '@puddle/shared';
+import {
+  hostBasename,
+  hostPathStyle,
+  type OrphanBranch,
+  type Session,
+  type WorktreeInfo,
+} from '@puddle/shared';
 import { HoverMarquee } from '../../components/hover-marquee';
 import { Button } from '../../components/ui/button';
 import {
@@ -12,6 +18,7 @@ import {
   DialogTitle,
 } from '../../components/ui/dialog';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../../components/ui/tooltip';
+import { hostPathKey } from '../../lib/host-path';
 import { useDeleteBranch, usePruneWorktree, useRepoWorktrees } from '../../lib/queries/queries';
 import { cn } from '../../lib/utils';
 
@@ -23,6 +30,7 @@ const LIVE = new Set(['starting', 'running', 'waiting_input']);
 const ROW_MARQUEE = 'group-hover:[transform:translateX(var(--tail))]';
 
 function basename(path: string): string {
+  if (hostPathStyle(path) === 'win32') return hostBasename(path) || path;
   return path.split('/').filter(Boolean).pop() ?? path;
 }
 
@@ -112,11 +120,15 @@ export function WorktreesNav({
   const [error, setError] = useState<string | null>(null);
   const pending = prune.isPending || deleteBranch.isPending;
 
-  // Live sessions per worktree directory — running agents block a prune.
+  // Live sessions per worktree directory — running agents block a prune. Keyed
+  // by `hostPathKey`: on a Windows host git lists `C:/…/wt` where a session
+  // records `C:\…\wt` (exact strings on POSIX).
   const liveByPath = useMemo(() => {
     const m = new Map<string, number>();
     for (const s of sessions) {
-      if (LIVE.has(s.status)) m.set(s.worktree_path, (m.get(s.worktree_path) ?? 0) + 1);
+      if (!LIVE.has(s.status)) continue;
+      const key = hostPathKey(s.worktree_path);
+      m.set(key, (m.get(key) ?? 0) + 1);
     }
     return m;
   }, [sessions]);
@@ -173,7 +185,7 @@ export function WorktreesNav({
             <HoverMarquee text={branch} hoverClass={ROW_MARQUEE} />
           </div>
           {wts.map((wt) => {
-            const live = liveByPath.get(wt.path) ?? 0;
+            const live = liveByPath.get(hostPathKey(wt.path)) ?? 0;
             const blockReason = wt.is_primary
               ? 'the repository clone'
               : wt.dirty

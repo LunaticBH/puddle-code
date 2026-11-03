@@ -1,4 +1,4 @@
-import type { TreeResponse } from '@puddle/shared';
+import { hostDirname, hostJoin, hostPathStyle, type TreeResponse } from '@puddle/shared';
 
 /**
  * Pure, DOM-free helpers for the file explorer (SPEC §8): worktree-relative
@@ -44,29 +44,49 @@ export function ancestorDirs(path: string): string[] {
   return out;
 }
 
-/** Join a directory and a name into a worktree-relative path. */
-/** Parent of an ABSOLUTE directory path; '/' is its own parent. */
+/**
+ * Parent of an ABSOLUTE host directory path; '/' is its own parent, and so is
+ * a Windows drive root (`C:\`) or UNC share: browsing stops there
+ * (docs/windows.md, decision 11).
+ */
 export function parentDir(dir: string): string {
+  if (hostPathStyle(dir) === 'win32') return hostDirname(dir);
   const cut = dir.replace(/\/+$/, '');
   const idx = cut.lastIndexOf('/');
   return idx <= 0 ? '/' : cut.slice(0, idx);
 }
 
+/** Join a directory and a name into a worktree-relative path. */
 export function joinPath(dir: string, name: string): string {
   return dir === '' ? name : `${dir}/${name}`;
 }
 
-/** Join an absolute directory to one of the explorer's root-relative paths. */
+/**
+ * Join an absolute directory to one of the explorer's root-relative paths. A
+ * Windows root gets native separators throughout (`C:\repo\src\a.ts`), so the
+ * result matches the daemon's canonical form for the same file.
+ */
 export function joinAbsolutePath(root: string, path: string): string {
   if (path === '') return root;
+  if (hostPathStyle(root) === 'win32') return hostJoin(root, path);
   return `${root.replace(/\/+$/, '')}/${path}`;
 }
 
 /**
+ * What "Copy Path" (absolute) or "Copy Relative Path" writes for a row.
+ * Relative paths stay `/`-separated on every host; a Windows host's absolute
+ * path is native, and its root row is the root itself (`C:\repo`).
+ */
+export function copyablePath(root: string, path: string, relative: boolean): string {
+  if (relative) return path;
+  return hostPathStyle(root) === 'win32' ? joinAbsolutePath(root, path) : joinPath(root, path);
+}
+
+/**
  * Return `path` relative to an absolute `root` when it is already represented
- * by that tree. Segment boundaries matter: `/repo-copy` is not inside `/repo`.
- * Daemon paths use `/`, but accepting `\` here keeps reveals sound for a
- * browser connected to a Windows host as well.
+ * by that tree, as a `/`-separated root-relative path. Segment boundaries
+ * matter: `/repo-copy` is not inside `/repo`. A Windows host's native `\`
+ * paths are accepted and compared case-insensitively.
  */
 export function relativePathWithinAbsoluteRoot(root: string, path: string): string | null {
   const normalise = (value: string) => {

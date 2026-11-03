@@ -90,6 +90,25 @@ describe('device-local explorer clipboard', () => {
     );
   });
 
+  it('treats one Windows directory as one filetree whatever its spelling', async () => {
+    const { sameFiletree } = await import('../../src/features/explorer/clipboard-store');
+    const source = { sid: 'one', directory: 'C:\\repo-a', host: 'host-a' };
+
+    expect(sameFiletree(source, { sid: 'two', directory: 'c:/Repo-A/', host: 'host-a' })).toBe(
+      true,
+    );
+    expect(sameFiletree(source, { sid: 'two', directory: 'C:\\repo-b', host: 'host-a' })).toBe(
+      false,
+    );
+    // POSIX directories still compare exactly.
+    expect(
+      sameFiletree(
+        { sid: 'one', directory: '/repo', host: 'h' },
+        { sid: 'two', directory: '/Repo', host: 'h' },
+      ),
+    ).toBe(false);
+  });
+
   it('ignores malformed persisted state', async () => {
     localStorage.setItem(KEY, JSON.stringify({ mode: 'cut', paths: 'not-an-array' }));
     vi.resetModules();

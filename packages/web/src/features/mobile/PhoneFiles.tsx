@@ -9,7 +9,8 @@ import {
   Monitor,
   RefreshCw,
 } from 'lucide-react';
-import { fileResponseSchema, treeResponseSchema } from '@puddle/shared';
+import { fileResponseSchema, hostJoin, hostPathStyle, treeResponseSchema } from '@puddle/shared';
+import { sameHostPath } from '../../lib/host-path';
 import { useDaemonVersion } from '../../lib/queries/queries';
 import { previewKind } from '../editor/previews/preview-kind';
 import { mediaKind } from '../editor/previews/media-kind';
@@ -53,7 +54,9 @@ export function PhoneFiles({
   const effectiveRoot = root ?? worktree;
   const relativePath = file ?? directory;
   const currentPath = relativePath
-    ? `${effectiveRoot?.replace(/\/$/, '') ?? ''}/${relativePath}`
+    ? effectiveRoot !== undefined && hostPathStyle(effectiveRoot) === 'win32'
+      ? hostJoin(effectiveRoot, relativePath) // native `C:\wt\src`, not `C:\wt/src`
+      : `${effectiveRoot?.replace(/\/$/, '') ?? ''}/${relativePath}`
     : (effectiveRoot ?? '');
   const rootOverride = root ?? (session ? undefined : worktree);
   const target = session ?? NO_SESSION;
@@ -258,7 +261,12 @@ export function PhoneFiles({
             reset();
             if (result.kind === 'dir') {
               if (result.relative_path !== undefined) setDirectory(result.relative_path);
-              else setRoot(result.path === worktree ? null : result.path);
+              else
+                setRoot(
+                  worktree !== undefined && sameHostPath(result.path, worktree)
+                    ? null
+                    : result.path,
+                );
             } else {
               if (result.root) setRoot(result.root);
               openFile(result.path);
