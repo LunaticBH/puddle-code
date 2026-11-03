@@ -18,17 +18,20 @@ export function InlineLabelEdit({
   initial,
   maxLength,
   className,
+  fitContent = false,
   onCommit,
   onCancel,
 }: {
   initial: string;
   maxLength?: number;
   className?: string;
+  /** Match the rendered text width, updating the surrounding layout while typing. */
+  fitContent?: boolean;
   onCommit: (value: string) => void;
   onCancel: () => void;
 }) {
   const [value, setValue] = useState(initial);
-  return (
+  const input = (
     <input
       autoFocus
       value={value}
@@ -41,8 +44,20 @@ export function InlineLabelEdit({
         if (e.key === 'Enter') onCommit(value);
         else if (e.key === 'Escape') onCancel();
       }}
-      className={cn('bg-transparent outline-none', className)}
+      className={cn(
+        'bg-transparent outline-none',
+        fitContent ? 'col-start-1 row-start-1 w-0 min-w-full p-0' : className,
+      )}
     />
+  );
+  if (!fitContent) return input;
+  return (
+    <span className={cn('inline-grid min-w-px', className)}>
+      <span aria-hidden="true" className="invisible col-start-1 row-start-1 whitespace-pre">
+        {value || '\u200b'}
+      </span>
+      {input}
+    </span>
   );
 }
 

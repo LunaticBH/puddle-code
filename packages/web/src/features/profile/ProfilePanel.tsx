@@ -3,11 +3,10 @@ import { KeyRound, Plus, Settings2 } from 'lucide-react';
 import { toastError } from '../../lib/transport/errors';
 import type { Account } from '@puddle/shared';
 import { InlineLabelEdit, editOnDoubleClick } from '../../components/inline-label-edit';
-import { Button } from '../../components/ui/button';
+import { Button, buttonVariants } from '../../components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../../components/ui/popover';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../../components/ui/tooltip';
 import { openSettings } from '../../lib/navigation/hash-route';
-import { cn } from '../../lib/utils';
 import {
   useAccountUsage,
   useAccounts,
@@ -185,14 +184,18 @@ export function ProfilePanel() {
   };
 
   // The trigger's own row, minus the popover, while the name is being typed.
+  const triggerClassName = 'font-sans compact:h-7 compact:px-1.5';
   if (renaming && currentProfile) {
     return (
-      <div className="flex h-8 items-center gap-2 px-3">
+      <div
+        className={buttonVariants({ variant: 'ghost', size: 'sm', className: triggerClassName })}
+      >
         <ProfileGlyph icon={currentProfile.icon} colour={currentProfile.icon_colour} />
         <InlineLabelEdit
           initial={currentProfile.name}
           maxLength={100}
-          className={cn('w-32 text-sm', profileColourClass(currentProfile.icon_colour))}
+          fitContent
+          className={profileColourClass(currentProfile.icon_colour)}
           onCommit={commitName}
           onCancel={() => setRenaming(false)}
         />
@@ -207,7 +210,7 @@ export function ProfilePanel() {
           <TooltipTrigger asChild>
             <PopoverTrigger asChild>
               {/* compact: tighter padding, matching the icon buttons beside it (§12). */}
-              <Button variant="ghost" size="sm" className="font-sans compact:h-7 compact:px-1.5">
+              <Button variant="ghost" size="sm" className={triggerClassName}>
                 <ProfileGlyph icon={currentProfile?.icon} colour={currentProfile?.icon_colour} />
                 <span
                   className={profileColourClass(currentProfile?.icon_colour)}
