@@ -93,13 +93,41 @@ describe('the detached Windows supervisor', () => {
     expect(await requestDaemonShutdown(home)).toBe('stopping');
   });
 
-  it('treats an older or starting daemon as refusing, never as absent', async () => {
+  it('tells an older daemon from a starting or silent one, and neither from an absent one', async () => {
     const home = mkdtempSync(join(tmpdir(), 'puddle-windows-daemon-'));
     await control(home, { t: 'error', code: 'invalid_control' });
-    expect(await requestDaemonShutdown(home)).toBe('refused');
+    expect(await requestDaemonShutdown(home)).toBe('unsupported');
+    const starting = mkdtempSync(join(tmpdir(), 'puddle-windows-daemon-'));
+    await control(starting, { t: 'error', code: 'unavailable' });
+    expect(await requestDaemonShutdown(starting)).toBe('unavailable');
     const silent = mkdtempSync(join(tmpdir(), 'puddle-windows-daemon-'));
     await control(silent, null);
-    expect(await requestDaemonShutdown(silent, 300)).toBe('refused');
+    expect(await requestDaemonShutdown(silent, 300)).toBe('unavailable');
+  });
+
+  it('waits for a starting daemon to accept the shutdown rather than terminating it', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'puddle-windows-daemon-'));
+    let requests = 0;
+    const server = await listenPrivate(ipcPath(home, 'host'), (socket) => {
+      socket.on('error', () => {});
+      socket.on('data', () => {
+        requests++;
+        if (requests < 3) {
+          socket.end(JSON.stringify({ t: 'error', code: 'unavailable' }) + '\n');
+          return;
+        }
+        socket.end(JSON.stringify({ t: 'shutting_down' }) + '\n');
+        server.close();
+      });
+    });
+    servers.push(server);
+    const lines: string[] = [];
+    await stopWindowsDaemon(home, {
+      list: async () => [],
+      logger: { info: (line) => lines.push(line), warn: (line) => lines.push(line) },
+    });
+    expect(requests).toBe(3);
+    expect(lines).toEqual(['stopping puddled on this machine']);
   });
 
   it('waits for a stopping daemon to release its endpoint, then forgets its pid', async () => {
@@ -137,7 +165,7 @@ describe('the detached Windows supervisor', () => {
       const wedged = spawn(process.execPath, [entry], { stdio: 'ignore', windowsHide: true });
       await new Promise((resolve) => wedged.once('spawn', resolve));
       try {
-        await stopWindowsDaemon(home, { terminateGraceMs: 10_000 });
+        await stopWindowsDaemon(home, { startingGraceMs: 1000, terminateGraceMs: 10_000 });
         expect(isPidAlive(wedged.pid!, 'win32')).toBe(false);
       } finally {
         wedged.kill();

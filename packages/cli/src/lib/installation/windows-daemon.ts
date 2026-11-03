@@ -42,6 +42,8 @@ import { CliError, type Logger, silentLogger } from '../types.js';
 /** Rotated at spawn: nothing else trims a detached daemon's output. */
 const LOG_ROTATE_BYTES = 10 * 1024 * 1024;
 const SHUTDOWN_GRACE_MS = 15_000;
+/** How long a starting daemon may take to serve its pipe before it is terminated. */
+const STARTING_GRACE_MS = 15_000;
 const TERMINATE_GRACE_MS = 5_000;
 
 /**
@@ -149,13 +151,13 @@ export function controlPipePresent(home: string): Promise<boolean> {
   });
 }
 
-export type ShutdownOutcome = 'stopping' | 'refused' | 'absent';
-
 /**
- * Ask the home's daemon to stop over its private control pipe. `refused`
- * covers a pre-25.7 daemon (`invalid_control`), one still starting
- * (`unavailable`) and one that does not answer.
+ * `unsupported`: a pre-25.7 daemon (`invalid_control`). `unavailable`: one
+ * still starting (`unavailable`), or one that does not answer.
  */
+export type ShutdownOutcome = 'stopping' | 'unsupported' | 'unavailable' | 'absent';
+
+/** Ask the home's daemon to stop over its private control pipe. */
 export function requestDaemonShutdown(home: string, timeoutMs = 5000): Promise<ShutdownOutcome> {
   return new Promise((resolve) => {
     const socket = connect(ipcPath(home, 'host'));
@@ -166,18 +168,23 @@ export function requestDaemonShutdown(home: string, timeoutMs = 5000): Promise<S
       socket.destroy();
       resolve(outcome);
     };
-    socket.setTimeout(timeoutMs, () => settle('refused'));
+    socket.setTimeout(timeoutMs, () => settle('unavailable'));
     socket.once('error', (err: NodeJS.ErrnoException) =>
-      settle(err.code === 'ENOENT' ? 'absent' : 'refused'),
+      settle(err.code === 'ENOENT' ? 'absent' : 'unavailable'),
     );
-    socket.once('close', () => settle('refused'));
+    socket.once('close', () => settle('unavailable'));
     jsonLines(
       socket,
       (value) => {
         const message = controlResponseSchema.safeParse(value);
-        settle(message.success && message.data.t === 'shutting_down' ? 'stopping' : 'refused');
+        if (!message.success) return settle('unavailable');
+        const reply = message.data;
+        if (reply.t === 'shutting_down') return settle('stopping');
+        settle(
+          reply.t === 'error' && reply.code === 'invalid_control' ? 'unsupported' : 'unavailable',
+        );
       },
-      () => settle('refused'),
+      () => settle('unavailable'),
     );
     socket.once('connect', () => socket.write(JSON.stringify({ t: 'shutdown' }) + '\n'));
   });
@@ -217,23 +224,33 @@ export interface StopOptions {
   /** Seams for tests. */
   list?: () => Promise<readonly WindowsProcess[]>;
   graceMs?: number;
+  startingGraceMs?: number;
   terminateGraceMs?: number;
 }
 
 /**
- * Stop whatever daemon serves this home: graceful shutdown first, then
- * termination of identity-checked processes only. Resolves once the control
- * pipe is gone (which the daemon holds until its database is closed) and
- * every matching process has exited; throws if one cannot be stopped.
+ * Stop whatever daemon serves this home: graceful shutdown first — waiting
+ * for one that is still starting to be able to answer — then termination
+ * of identity-checked processes only. Resolves once the control pipe is gone
+ * (the daemon holds it until its database is closed) and every matching
+ * process has exited; throws if one cannot be stopped.
  */
 export async function stopWindowsDaemon(home: string, opts: StopOptions = {}): Promise<void> {
   const logger = opts.logger ?? silentLogger;
   const list = opts.list ?? listWindowsProcesses;
-  const outcome = await requestDaemonShutdown(home);
-  // A daemon that is stopping, or wedged before it served its pipe, is still
-  // found by its command line.
-  let pids = await homeDaemonPids(home, list).catch(() => [] as number[]);
-  if (outcome === 'absent' && pids.length === 0) return clearPidFile(home);
+  const starting = Date.now() + (opts.startingGraceMs ?? STARTING_GRACE_MS);
+  let outcome: ShutdownOutcome;
+  // A daemon that is stopping, starting, or wedged before it served its pipe
+  // is still found by its command line.
+  let pids: number[];
+  for (;;) {
+    outcome = await requestDaemonShutdown(home);
+    pids = await homeDaemonPids(home, list).catch(() => [] as number[]);
+    if (outcome === 'absent' && pids.length === 0) return clearPidFile(home);
+    const answerable = outcome === 'unavailable' || (outcome === 'absent' && pids.length > 0);
+    if (!answerable || Date.now() >= starting) break;
+    await sleep(500);
+  }
   if (outcome === 'stopping') {
     logger.info('stopping puddled on this machine');
     if (await stopped(home, pids, opts.graceMs ?? SHUTDOWN_GRACE_MS)) return clearPidFile(home);
