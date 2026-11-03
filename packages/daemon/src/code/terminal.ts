@@ -1,4 +1,4 @@
-import { basename, relative, sep } from 'node:path';
+import { basename, isAbsolute, relative, sep } from 'node:path';
 import { realpathSync } from 'node:fs';
 import type { CompilationFileTarget, Session } from '@puddle/shared';
 import type { CompilationRunOptions } from '../compilation/provider.js';
@@ -57,8 +57,9 @@ export function createCodeTerminalLauncher(
         separate_worktree: false,
         join_worktree: worktree,
         // External source roots may lie outside the placement. Execute there
-        // once, but retain the ordinary worktree-relative resume contract.
-        ...(cwd !== '..' && !cwd.startsWith(`..${sep}`) ? { cwd } : {}),
+        // once, but retain the ordinary worktree-relative resume contract. On
+        // Windows a root on another drive has no relative path at all.
+        ...(cwd !== '..' && !cwd.startsWith(`..${sep}`) && !isAbsolute(cwd) ? { cwd } : {}),
       },
       command,
     );

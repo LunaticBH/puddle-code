@@ -1,8 +1,10 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { delimiter, basename, dirname, extname, join } from 'node:path';
+import { getEnv } from '@puddle/shared/node/platform';
 import { ApiError } from '../http/errors.js';
 import { commandTemplate, expandCommandTemplate } from '../compilation/command-template.js';
+import { withEnvironment } from '../compilation/environment.js';
 import { boundedLatexOutput, LatexBuildFailure, parseLatexDiagnostics } from './diagnostics.js';
 import {
   LatexCommandError,
@@ -99,16 +101,16 @@ export async function compileLatex(options: CompileOptions): Promise<LatexBuildR
     if (existsSync(stale)) unlinkSync(stale);
   }
   const sourceDirectory = dirname(options.source.absolute);
-  const env = {
-    ...process.env,
+  const inherited = (name: string) => getEnv(process.env, name) ?? '';
+  const env = withEnvironment({
     PATH: options.toolchain.searchPath,
     // A belt-and-braces fallback for TeX distributions that ignore an engine's
     // explicit output-directory option for a niche auxiliary file.
     TEXMFOUTPUT: options.buildDir,
-    TEXINPUTS: `${sourceDirectory}//${delimiter}${process.env.TEXINPUTS ?? ''}`,
-    BIBINPUTS: `${sourceDirectory}${delimiter}${process.env.BIBINPUTS ?? ''}`,
-    BSTINPUTS: `${sourceDirectory}${delimiter}${process.env.BSTINPUTS ?? ''}`,
-  };
+    TEXINPUTS: `${sourceDirectory}//${delimiter}${inherited('TEXINPUTS')}`,
+    BIBINPUTS: `${sourceDirectory}${delimiter}${inherited('BIBINPUTS')}`,
+    BSTINPUTS: `${sourceDirectory}${delimiter}${inherited('BSTINPUTS')}`,
+  });
   writeFileSync(logPath, `Puddle LaTeX build: ${new Date().toISOString()}\n`);
 
   const run = async (file: string, args: string[], cwd: string): Promise<LatexCommandResult> => {

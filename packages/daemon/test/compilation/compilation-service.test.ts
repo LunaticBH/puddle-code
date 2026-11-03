@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { CompilationService, type CompilationEvent } from '../../src/compilation/service.js';
+import { DependencyWatcher } from '../../src/compilation/dependency-watcher.js';
 import type { CompilationProvider } from '../../src/compilation/provider.js';
 import { ApiError } from '../../src/http/errors.js';
 
@@ -215,5 +216,22 @@ describe('CompilationService', () => {
     await waitFor(() => runs === 2);
     await waitFor(() => service.status({ source }).state === 'succeeded');
     service.dispose();
+  });
+});
+
+describe('DependencyWatcher', () => {
+  it('matches a dependency spelt in another case on Windows', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'puddle-watch-case-'));
+    writeFileSync(join(directory, 'Main.tex'), 'one\n');
+    let changes = 0;
+    const watcher = new DependencyWatcher(() => (changes += 1), 'win32');
+    // A TeX recorder file may name an input in a different case than its directory entry.
+    watcher.replace([join(directory, 'main.tex')]);
+    writeFileSync(join(directory, 'Main.tex'), 'two, longer\n');
+    try {
+      await waitFor(() => changes > 0);
+    } finally {
+      watcher.close();
+    }
   });
 });

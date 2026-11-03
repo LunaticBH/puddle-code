@@ -1,13 +1,22 @@
-import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { compilationCapabilitiesResponseSchema, type Session } from '@puddle/shared';
+import { isPidAlive } from '@puddle/shared/node/platform';
 import { CodeProvider, createCodeProviders } from '../../src/code/provider.js';
-import { findCodeExecutable } from '../../src/code/discovery.js';
-import { CODE_RECIPES } from '../../src/code/recipes.js';
+import { codeSearchDirectories, findCodeExecutable } from '../../src/code/discovery.js';
+import { CODE_RECIPES, managedBinaryName, recipeExecutables } from '../../src/code/recipes.js';
 import { CompilationService } from '../../src/compilation/service.js';
-import { runCompilationCommand } from '../../src/compilation/process.js';
+import { compilationSpawn, runCompilationCommand } from '../../src/compilation/process.js';
 import { commandTemplate } from '../../src/compilation/command-template.js';
 import type { CodeTerminalLauncher } from '../../src/code/terminal.js';
 import type { RepoStore } from '../../src/db/stores/repos.js';
@@ -25,8 +34,20 @@ function recipe(id: string) {
   return CODE_RECIPES.find((recipe) => recipe.id === id)!;
 }
 const options = { mode: 'on_demand', command: null } as const;
-afterEach(() => {
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+afterEach(async () => {
+  for (const root of roots.splice(0)) {
+    // Windows keeps a working directory busy until a stopped command has gone,
+    // which taskkill completes shortly after the command's promise settles.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        rmSync(root, { recursive: true, force: true });
+        break;
+      } catch (error) {
+        if (process.platform !== 'win32' || attempt >= 50) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+  }
 });
 
 describe('code providers', () => {
@@ -138,6 +159,28 @@ describe('code providers', () => {
     },
   );
 
+  it.runIf(process.platform === 'win32')(
+    'refuses a batch-file command cmd.exe cannot carry before opening a terminal',
+    async () => {
+      const root = directory();
+      writeFileSync(join(root, 'main.js'), '');
+      writeFileSync(join(root, 'run.bat'), '@echo off\r\n');
+      const launchTerminal = vi.fn<CodeTerminalLauncher>();
+      const provider = new CodeProvider(recipe('javascript'), {
+        ...deps,
+        discover: () => process.execPath,
+        launchTerminal,
+      });
+      await expect(
+        provider.run(
+          { session: NO_SESSION, root, path: 'main.js' },
+          { ...options, command: `${commandTemplate(join(root, 'run.bat'), ['{{source}}'])} 100%` },
+        ),
+      ).rejects.toMatchObject({ code: 'invalid_compilation_command' });
+      expect(launchTerminal).not.toHaveBeenCalled();
+    },
+  );
+
   it('fails without a terminal launcher instead of capturing programme output', async () => {
     const root = directory();
     writeFileSync(join(root, 'main.js'), 'console.log(1);');
@@ -181,13 +224,134 @@ describe('code providers', () => {
 });
 
 describe('code tool discovery and process bounds', () => {
-  it('finds compiler alternatives while ignoring non-executable files', () => {
+  // Execute bits do not exist on Windows; the PATHEXT rules below replace them.
+  it.skipIf(process.platform === 'win32')(
+    'finds compiler alternatives while ignoring non-executable files',
+    () => {
+      const bin = directory();
+      writeFileSync(join(bin, 'cc'), 'not executable');
+      writeFileSync(join(bin, 'clang'), '#!/bin/sh\nexit 0\n');
+      chmodSync(join(bin, 'clang'), 0o700);
+      expect(findCodeExecutable(['cc', 'clang', 'gcc'], [bin])).toBe(join(bin, 'clang'));
+      expect(findCodeExecutable(['python3'], [bin])).toBeNull();
+    },
+  );
+
+  it('completes Windows names through PATHEXT and skips extensionless files and WSL', () => {
     const bin = directory();
-    writeFileSync(join(bin, 'cc'), 'not executable');
-    writeFileSync(join(bin, 'clang'), '#!/bin/sh\nexit 0\n');
-    chmodSync(join(bin, 'clang'), 0o700);
-    expect(findCodeExecutable(['cc', 'clang', 'gcc'], [bin])).toBe(join(bin, 'clang'));
-    expect(findCodeExecutable(['python3'], [bin])).toBeNull();
+    const system32 = join(directory(), 'System32');
+    mkdirSync(system32);
+    // npm installs an extensionless sh script beside each .cmd shim.
+    writeFileSync(join(bin, 'cc'), '#!/bin/sh\n');
+    writeFileSync(join(bin, 'tsx'), '#!/bin/sh\n');
+    writeFileSync(join(bin, 'tsx.cmd'), '@echo off\r\n');
+    writeFileSync(join(bin, 'gcc.exe'), '');
+    writeFileSync(join(system32, 'bash.exe'), '');
+    const find = (names: string[], dirs: string[]) => findCodeExecutable(names, dirs, 'win32');
+    expect(find(['cc', 'gcc'], [bin])).toBe(join(bin, 'gcc.exe'));
+    expect(find(['tsx'], [bin])).toBe(join(bin, 'tsx.cmd'));
+    expect(find(['python3'], [bin])).toBeNull();
+    expect(find(['bash'], [system32])).toBeNull();
+    writeFileSync(join(bin, 'bash.exe'), '');
+    expect(find(['bash'], [system32, bin])).toBe(join(bin, 'bash.exe'));
+  });
+
+  it('searches the Windows PATH safely, then venv Scripts and installer locations', () => {
+    const home = directory();
+    const tools = directory();
+    const localAppData = directory();
+    mkdirSync(join(localAppData, 'Programs', 'Python', 'Python312'), { recursive: true });
+    mkdirSync(join(localAppData, 'Programs', 'Python', 'Launcher'), { recursive: true });
+    const dirs = codeSearchDirectories(
+      {
+        // Unexpanded, relative and drive-relative entries resolve against the cwd.
+        Path: [`"${tools}"`, '%NVM_HOME%', 'relative\\bin', '\\rooted\\bin', ''].join(';'),
+        VIRTUAL_ENV: join(home, '.venv'),
+        APPDATA: join(home, 'Roaming'),
+        LOCALAPPDATA: localAppData,
+      },
+      home,
+      'win32',
+    );
+    expect(dirs.slice(0, 2)).toEqual([tools, join(home, '.venv', 'Scripts')]);
+    expect(dirs).toEqual(
+      expect.arrayContaining([
+        join(home, '.cargo', 'bin'),
+        join(home, 'Roaming', 'npm'),
+        join(localAppData, 'Microsoft', 'WinGet', 'Links'),
+        join(localAppData, 'Programs', 'Python', 'Python312'),
+        join(localAppData, 'Programs', 'Python', 'Python312', 'Scripts'),
+      ]),
+    );
+    expect(dirs.some((dir) => /%|relative|rooted/.test(dir))).toBe(false);
+    expect(dirs.some((dir) => dir.includes('Launcher'))).toBe(false);
+    expect(dirs).not.toContain('/usr/bin');
+  });
+
+  it('chooses Windows executable names and an .exe managed binary on Windows', () => {
+    expect(recipeExecutables(recipe('python'), 'win32')).toEqual(['python', 'py', 'python3']);
+    expect(recipeExecutables(recipe('c'), 'win32')).not.toContain('cc');
+    expect(recipeExecutables(recipe('c'), 'linux')).toEqual(recipe('c').executables);
+    expect(recipeExecutables(recipe('go'), 'win32')).toEqual(['go']);
+    expect(managedBinaryName('win32')).toBe('programme.exe');
+    expect(managedBinaryName('linux')).toBe('programme');
+  });
+
+  it('starts commands as a POSIX process group, or hidden with shims unwrapped on Windows', () => {
+    const bin = directory();
+    writeFileSync(join(bin, 'node.exe'), '');
+    writeFileSync(
+      join(bin, 'tool.cmd'),
+      [
+        '@ECHO off',
+        'GOTO start',
+        ':find_dp0',
+        'SET dp0=%~dp0',
+        'EXIT /b',
+        ':start',
+        'SETLOCAL',
+        'CALL :find_dp0',
+        'IF EXIST "%dp0%\\node.exe" (',
+        '  SET "_prog=%dp0%\\node.exe"',
+        ') ELSE (',
+        '  SET "_prog=node"',
+        '  SET PATHEXT=%PATHEXT:;.JS;=;%',
+        ')',
+        'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\tool.js" %*',
+      ].join('\r\n'),
+    );
+    const command = { file: join(bin, 'tool.cmd'), args: ['a b'], cwd: bin };
+    expect(compilationSpawn(command, 'linux')).toEqual({
+      file: command.file,
+      args: ['a b'],
+      options: { cwd: bin, env: undefined, detached: true, stdio: ['ignore', 'pipe', 'pipe'] },
+    });
+    const windows = compilationSpawn(command, 'win32');
+    expect(windows).toMatchObject({
+      file: join(bin, 'node.exe'),
+      args: [join(bin, 'tool.js'), 'a b'],
+      options: { windowsHide: true },
+    });
+    expect(windows.options.detached).toBeUndefined();
+  });
+
+  it('stops the whole process tree when a command times out', async () => {
+    const cwd = directory();
+    const pidFile = join(cwd, 'grandchild.pid');
+    const error = await runCompilationCommand({
+      file: process.execPath,
+      args: [
+        '-e',
+        `const child = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+         require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(child.pid));
+         setInterval(() => {}, 1000);`,
+      ],
+      cwd,
+      timeoutMs: 1_500,
+    }).catch((caught: unknown) => caught);
+    expect(String(error)).toMatch(/exceeded 1500 ms/);
+    const grandchild = Number(readFileSync(pidFile, 'utf8'));
+    await expect.poll(() => isPidAlive(grandchild), { timeout: 10_000 }).toBe(false);
   });
 
   it('bounds runtime and captured output', async () => {

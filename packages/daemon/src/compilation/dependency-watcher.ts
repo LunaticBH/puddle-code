@@ -14,7 +14,15 @@ export class DependencyWatcher {
   private polling = false;
   private generation = 0;
 
-  constructor(private readonly onChange: () => void) {}
+  /**
+   * Windows file names compare case-insensitively, so a dependency spelt
+   * differently from its directory entry (as a TeX recorder file may report
+   * it) still matches the name fs.watch reports.
+   */
+  constructor(
+    private readonly onChange: () => void,
+    private readonly platform: NodeJS.Platform = process.platform,
+  ) {}
 
   replace(dependencies: readonly string[]): void {
     this.close();
@@ -24,13 +32,13 @@ export class DependencyWatcher {
     for (const dependency of unique) {
       const directory = dirname(dependency);
       const names = byDirectory.get(directory) ?? new Set<string>();
-      names.add(basename(dependency));
+      names.add(this.comparable(basename(dependency)));
       byDirectory.set(directory, names);
     }
     for (const [directory, names] of byDirectory) {
       try {
         const watcher = watch(directory, (_event, filename) => {
-          if (filename !== null && !names.has(filename.toString())) return;
+          if (filename !== null && !names.has(this.comparable(filename.toString()))) return;
           this.schedule(generation);
         });
         watcher.on('error', () => watcher.close());
@@ -46,6 +54,10 @@ export class DependencyWatcher {
     this.signatures = new Map(unique.map((path) => [path, syncSignature(path)]));
     this.pollTimer = setInterval(() => void this.poll(generation), POLL_INTERVAL_MS);
     this.pollTimer.unref();
+  }
+
+  private comparable(name: string): string {
+    return this.platform === 'win32' ? name.toLowerCase() : name;
   }
 
   close(): void {

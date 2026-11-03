@@ -27,6 +27,30 @@ describe('compilation command templates', () => {
     });
   });
 
+  it('keeps Windows backslashes literal and prefers double quotes on Windows', () => {
+    expect(
+      parseCommandTemplate('C:\\Tools\\gcc.exe "C:\\Program Files\\out\\" {{source}}', 'win32'),
+    ).toEqual(['C:\\Tools\\gcc.exe', 'C:\\Program Files\\out\\', '{{source}}']);
+    const words = ['-outdir={{output_dir}}', 'say "hi"', `it's "both"`, ''];
+    const template = commandTemplate('C:\\Program Files\\MiKTeX\\latexmk.exe', words, 'win32');
+    expect(template).toBe(
+      `"C:\\Program Files\\MiKTeX\\latexmk.exe" -outdir={{output_dir}} 'say "hi"' ` +
+        `"it's "'"'"both"'"'"" ""`,
+    );
+    expect(parseCommandTemplate(template, 'win32')).toEqual([
+      'C:\\Program Files\\MiKTeX\\latexmk.exe',
+      ...words,
+    ]);
+    expect(commandTemplate('C:\\Python312\\python.exe', ['-u'], 'win32')).toBe(
+      'C:\\Python312\\python.exe -u',
+    );
+    // POSIX keeps sh escaping.
+    expect(parseCommandTemplate('a\\ b C:\\x', 'linux')).toEqual(['a b', 'C:x']);
+    expect(() => parseCommandTemplate('gcc main.c && main.exe', 'win32')).toThrow(
+      /without a shell/,
+    );
+  });
+
   it('rejects shell composition and unknown placeholders', () => {
     expect(() => parseCommandTemplate('latexmk main.tex && open main.pdf')).toThrow(
       /without a shell/,

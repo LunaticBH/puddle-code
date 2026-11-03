@@ -2,6 +2,7 @@ import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
+  readlinkSync,
   rmSync,
   realpathSync,
   symlinkSync,
@@ -10,18 +11,27 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { expect, it, onTestFinished, vi } from 'vitest';
-import { NotebookEnvironments } from '../../src/notebooks/environments.js';
+import { getEnv } from '@puddle/shared/node/platform';
+import { launcherInterpreters, NotebookEnvironments } from '../../src/notebooks/environments.js';
 import { CompilationCommandError, type CompilationCommand } from '../../src/compilation/process.js';
-import { NotebookKernels } from '../../src/notebooks/kernels.js';
+import { NotebookKernels, programName } from '../../src/notebooks/kernels.js';
+import {
+  isWindowsPython,
+  launcherPython,
+  pythonEnvironment,
+} from '../../src/notebooks/python-env.js';
 import type { SessionStore } from '../../src/db/stores/sessions.js';
 import type { RepoStore } from '../../src/db/stores/repos.js';
 import { NO_SESSION } from '../../src/http/routes/worktrees/worktree-shared.js';
 
-function fixture() {
+const windows = process.platform === 'win32';
+
+/** Fake interpreters in each platform's environment layout; the runner never starts them. */
+function fixture(platform: NodeJS.Platform = process.platform) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'puddle-python-')));
   onTestFinished(() => rmSync(root, { recursive: true, force: true }));
   const python = (relative: string) => {
-    const path = join(root, relative, 'bin/python');
+    const path = join(root, relative, platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, '#!/bin/sh\nexit 0\n');
     chmodSync(path, 0o700);
@@ -61,17 +71,137 @@ it('discovers project venvs, Conda/Mamba environments and custom Conda locations
   expect(runner).toHaveBeenCalledTimes(calls);
 });
 
-it('resolves user paths without collapsing venv symlinks or interpreting shell syntax', async () => {
-  const f = fixture();
-  const base = f.python('base');
-  const venv = join(f.root, 'project/.venv/bin/python');
-  mkdirSync(dirname(venv), { recursive: true });
-  symlinkSync(base, venv);
-  const environments = new NotebookEnvironments(f.root, { PATH: '' });
+// POSIX venvs link their interpreter; Windows venvs copy a launcher (covered below).
+it.skipIf(windows)(
+  'resolves user paths without collapsing venv symlinks or interpreting shell syntax',
+  async () => {
+    const f = fixture();
+    const base = f.python('base');
+    const venv = join(f.root, 'project/.venv/bin/python');
+    mkdirSync(dirname(venv), { recursive: true });
+    symlinkSync(base, venv);
+    const environments = new NotebookEnvironments(f.root, { PATH: '' });
+    expect(await environments.resolvePython('.venv', join(f.root, 'project'))).toBe(venv);
+    expect(await environments.resolvePython('~/project/.venv', f.root)).toBe(venv);
+    expect(await environments.resolvePython(venv, f.root)).toBe(venv);
+    await expect(environments.resolvePython('$(touch wrong)', f.root)).rejects.toThrow();
+  },
+);
+
+it('resolves Windows venvs, Conda prefixes and home paths in the Windows layout', async () => {
+  const f = fixture('win32');
+  const venv = f.python('project/.venv');
+  const conda = join(f.root, 'miniconda3', 'python.exe');
+  mkdirSync(dirname(conda));
+  writeFileSync(conda, '');
+  writeFileSync(join(f.root, 'project', 'python'), '#!/bin/sh\n');
+  const environments = new NotebookEnvironments(f.root, { PATH: '' }, undefined, 'win32');
   expect(await environments.resolvePython('.venv', join(f.root, 'project'))).toBe(venv);
   expect(await environments.resolvePython('~/project/.venv', f.root)).toBe(venv);
+  // A backslash separates only on a Windows host.
+  if (windows) expect(await environments.resolvePython('~\\project\\.venv', f.root)).toBe(venv);
+  expect(await environments.resolvePython('~/miniconda3', f.root)).toBe(conda);
   expect(await environments.resolvePython(venv, f.root)).toBe(venv);
+  // Windows cannot start an extensionless file.
+  await expect(environments.resolvePython('project/python', f.root)).rejects.toThrow();
   await expect(environments.resolvePython('$(touch wrong)', f.root)).rejects.toThrow();
+});
+
+it('lists the interpreters the Windows py launcher reports', () => {
+  expect(
+    launcherInterpreters(
+      [
+        ' -V:3.12 *        C:\\Python312\\python.exe',
+        ' -V:ContinuumAnalytics/Anaconda39-64 C:\\Users\\a b\\anaconda3\\python.exe',
+        ' -3.10-64         C:\\Users\\a\\AppData\\Local\\Programs\\Python\\Python310\\python.exe',
+        'No Installed Pythons Found!',
+      ].join('\r\n'),
+    ),
+  ).toEqual([
+    'C:\\Python312\\python.exe',
+    'C:\\Users\\a b\\anaconda3\\python.exe',
+    'C:\\Users\\a\\AppData\\Local\\Programs\\Python\\Python310\\python.exe',
+  ]);
+});
+
+it('runs Windows interpreters with UTF-8 stdio and their Conda prefix activated', () => {
+  const f = fixture('win32');
+  const prefix = join(f.root, 'anaconda3');
+  mkdirSync(join(prefix, 'conda-meta'), { recursive: true });
+  const base = join(prefix, 'python.exe');
+  writeFileSync(base, '');
+  const venv = f.python('project/.venv');
+  writeFileSync(join(f.root, 'project/.venv/pyvenv.cfg'), `home = ${prefix}\nversion = 3.12.1\n`);
+  const plain = f.python('plain');
+  expect(pythonEnvironment(base, { PATH: '/usr/bin' }, 'linux')).toBeUndefined();
+  const activated = pythonEnvironment(venv, { Path: 'C:\\Windows' }, 'win32')!;
+  expect(activated).toMatchObject({ PYTHONIOENCODING: 'utf-8' });
+  expect(activated.PATH).toBeUndefined();
+  expect(activated.Path!.split(';')).toEqual([
+    prefix,
+    join(prefix, 'Library', 'mingw-w64', 'bin'),
+    join(prefix, 'Library', 'usr', 'bin'),
+    join(prefix, 'Library', 'bin'),
+    join(prefix, 'Scripts'),
+    join(prefix, 'bin'),
+    'C:\\Windows',
+  ]);
+  expect(pythonEnvironment(plain, { Path: 'C:\\Windows' }, 'win32')!.Path).toBe('C:\\Windows');
+});
+
+it('finds the interpreter behind Windows console-script launchers', () => {
+  const f = fixture('win32');
+  const scripts = join(f.root, 'tools', 'Scripts');
+  mkdirSync(scripts, { recursive: true });
+  const python = join(f.root, 'Python 3.12', 'python.exe');
+  mkdirSync(dirname(python));
+  writeFileSync(python, '');
+  // pip/distlib: the shebang precedes the appended zip archive.
+  const distlib = join(scripts, 'jupyter-nbconvert.exe');
+  writeFileSync(
+    distlib,
+    Buffer.concat([
+      Buffer.from('MZ launcher stub\0#!not this one\0'),
+      Buffer.from(`#!"${python}"\n\r\nPK\x03\x04archive`, 'latin1'),
+    ]),
+  );
+  expect(launcherPython(distlib)).toBe(python);
+  // Conda/setuptools: `<name>-script.py` beside an exe, the interpreter one level up.
+  const conda = join(f.root, 'anaconda3');
+  mkdirSync(join(conda, 'Scripts'), { recursive: true });
+  writeFileSync(join(conda, 'python.exe'), '');
+  writeFileSync(join(conda, 'Scripts', 'jupyter.exe'), 'MZ');
+  writeFileSync(join(conda, 'Scripts', 'jupyter-script.py'), '# -*- coding: utf-8 -*-\n');
+  expect(launcherPython(join(conda, 'Scripts', 'jupyter.exe'))).toBe(join(conda, 'python.exe'));
+  // A venv keeps python.exe beside its scripts.
+  const venv = f.python('venv');
+  writeFileSync(join(dirname(venv), 'jupyter.exe'), 'MZ');
+  expect(launcherPython(join(dirname(venv), 'jupyter.exe'))).toBe(venv);
+  expect(launcherPython(join(f.root, 'missing.exe'))).toBeNull();
+});
+
+it('classifies Windows notebook commands without case or .exe', () => {
+  expect(programName('C:\\venv\\Scripts\\Jupyter-NBConvert.EXE', 'win32')).toBe(
+    'jupyter-nbconvert',
+  );
+  expect(programName('/usr/bin/Python3', 'linux')).toBe('Python3');
+});
+
+it.runIf(windows)('skips the Microsoft Store python.exe redirector stub', () => {
+  const stub = join(
+    getEnv(process.env, 'LOCALAPPDATA') ?? '',
+    'Microsoft',
+    'WindowsApps',
+    'python.exe',
+  );
+  let target: string;
+  try {
+    target = readlinkSync(stub);
+  } catch {
+    return; // No App Installer alias on this host.
+  }
+  expect(isWindowsPython(stub)).toBe(!/AppInstallerPythonRedirector\.exe$/i.test(target));
+  expect(isWindowsPython(process.execPath)).toBe(true);
 });
 
 it('installs only missing packages in the exact environment and verifies the result', async () => {

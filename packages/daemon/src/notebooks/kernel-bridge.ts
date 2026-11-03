@@ -8,7 +8,9 @@ import {
   notebookIntelligenceResponseSchema,
   notebookWidgetMessageSchema,
 } from '@puddle/shared';
+import { killProcessTree } from '@puddle/shared/node/platform';
 import { NOTEBOOK_BRIDGE } from './bridge.js';
+import { pythonEnvironment } from './python-env.js';
 
 export const messageSchema = z.object({
   event: z
@@ -63,10 +65,11 @@ export class KernelBridge {
     onExit?: (error: string) => void,
     exactPython = false,
   ) {
+    const env = pythonEnvironment(python);
     this.child = spawn(
       python,
       ['-u', '-c', NOTEBOOK_BRIDGE, ...(exactPython ? ['--puddle-python'] : [])],
-      { stdio: ['pipe', 'pipe', 'pipe'] },
+      { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, ...(env ? { env } : {}) },
     );
     const child = this.child;
     this.ready = new Promise((resolve, reject) => {
@@ -159,7 +162,10 @@ export class KernelBridge {
     this.closePromise = new Promise((resolve) => {
       const timer = setTimeout(() => {
         this.killKernel();
-        this.child.kill('SIGKILL');
+        if (process.platform === 'win32' && this.child.pid !== undefined) {
+          // The bridge's tree, which includes any kernel it still owns.
+          void killProcessTree(this.child.pid);
+        } else this.child.kill('SIGKILL');
       }, 3000);
       this.child.once('exit', () => {
         clearTimeout(timer);
@@ -172,6 +178,12 @@ export class KernelBridge {
 
   private killKernel(): void {
     if (!this.pid) return;
+    if (process.platform === 'win32') {
+      // No process groups: stop the kernel and anything it started as a tree.
+      void killProcessTree(this.pid);
+      this.pid = null;
+      return;
+    }
     try {
       process.kill(-this.pid, 'SIGKILL');
     } catch {

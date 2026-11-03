@@ -120,7 +120,16 @@ it.skipIf(!findCodeExecutable(['jupyter-nbconvert']))(
     await kernels.executeCells({
       source,
       cells: [
-        { id: 'interrupt', source: 'print("waiting", flush=True)\ntime.sleep(60)' },
+        {
+          id: 'interrupt',
+          // ipykernel interrupts Windows kernels with _thread.interrupt_main(),
+          // which takes effect only once a blocking time.sleep() returns.
+          source: `print("waiting", flush=True)\n${
+            process.platform === 'win32'
+              ? 'for _ in range(1200): time.sleep(0.05)'
+              : 'time.sleep(60)'
+          }`,
+        },
         { id: 'never', source: 'value = 0' },
       ],
     });

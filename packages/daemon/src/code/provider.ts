@@ -1,15 +1,21 @@
 import type { NotebookKernels } from '../notebooks/kernels.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, realpathSync, statSync } from 'node:fs';
-import { copyFile, mkdir, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, delimiter, dirname, join } from 'node:path';
 import type { CompilationFileTarget } from '@puddle/shared';
+import {
+  renameWithRetry,
+  resolveSpawn,
+  UnsafeCmdArgumentError,
+} from '@puddle/shared/node/platform';
 import type {
   CompilationProvider,
   CompilationProviderResult,
   CompilationRunOptions,
 } from '../compilation/provider.js';
 import { expandCommandTemplate } from '../compilation/command-template.js';
+import { withEnvironment } from '../compilation/environment.js';
 import {
   CompilationCommandError,
   runCompilationCommand,
@@ -23,7 +29,13 @@ import {
   type WorktreeDeps,
 } from '../http/routes/worktrees/worktree-shared.js';
 import { codeSearchDirectories, findCodeExecutable } from './discovery.js';
-import { CODE_RECIPES, recipeCommand, type CodeRecipe } from './recipes.js';
+import {
+  CODE_RECIPES,
+  managedBinaryName,
+  recipeCommand,
+  recipeExecutables,
+  type CodeRecipe,
+} from './recipes.js';
 import type { CodeTerminalLauncher } from './terminal.js';
 
 interface CodeProviderDeps extends WorktreeDeps {
@@ -64,7 +76,7 @@ export class CodeProvider implements CompilationProvider {
   }
 
   capability() {
-    const executor = (this.deps.discover ?? findCodeExecutable)(this.recipe.executables);
+    const executor = (this.deps.discover ?? findCodeExecutable)(recipeExecutables(this.recipe));
     // Environment selection can supply Python even without a global nbconvert.
     if (this.recipe.notebook && this.deps.notebooks)
       return { available: true, executor: executor ?? 'jupyter-nbconvert' };
@@ -103,7 +115,7 @@ export class CodeProvider implements CompilationProvider {
     expandCommandTemplate(command, {
       source: '/source/file',
       output_dir: '/source/.puddle/run',
-      ...(this.recipe.compiled ? { binary: '/source/.puddle/run/programme' } : {}),
+      ...(this.recipe.compiled ? { binary: `/source/.puddle/run/${managedBinaryName()}` } : {}),
     });
     const required = this.recipe.compiled
       ? '{{binary}}'
@@ -153,7 +165,7 @@ export class CodeProvider implements CompilationProvider {
       const runs = join(buildRoot, 'runs');
       const runDir = join(runs, `${Date.now()}-${randomUUID()}`);
       const current = join(buildRoot, 'current');
-      const binary = join(runDir, 'programme');
+      const binary = join(runDir, managedBinaryName());
       const template = options.command ?? recipeCommand(this.recipe, executor);
       this.validateCommand(request, template);
       const command = expandCommandTemplate(template, {
@@ -161,19 +173,22 @@ export class CodeProvider implements CompilationProvider {
         output_dir: runDir,
         binary,
       });
+      const searchPath = codeSearchDirectories().join(delimiter);
       const context = {
         cwd: dirname(absolute),
-        env: { ...process.env, PATH: codeSearchDirectories().join(delimiter) },
+        env: withEnvironment({ PATH: searchPath }),
         ...(this.deps.timeoutMs !== undefined ? { timeoutMs: this.deps.timeoutMs } : {}),
       };
       await mkdir(runDir, { recursive: true, mode: 0o700 });
       let output = '';
       try {
         if (this.terminal && this.deps.launchTerminal) {
+          const commands = [command, ...(this.recipe.compiled ? [{ file: binary, args: [] }] : [])];
+          assertSpawnable(commands, context.env);
           const launched = await this.deps.launchTerminal(request, options, {
             cwd: context.cwd,
-            env: { PATH: context.env.PATH },
-            commands: [command, ...(this.recipe.compiled ? [{ file: binary, args: [] }] : [])],
+            env: { PATH: searchPath },
+            commands,
           });
           const activeRun = realpathSync(runDir);
           this.activeRuns.add(activeRun);
@@ -221,7 +236,8 @@ export class CodeProvider implements CompilationProvider {
         const next = join(current, `${artifactName}.next-${randomUUID()}`);
         try {
           await copyFile(product, next);
-          await rename(next, join(current, artifactName));
+          // An editor reading the previous result briefly blocks its replacement on Windows.
+          await renameWithRetry(next, join(current, artifactName));
         } finally {
           await rm(next, { force: true });
         }
@@ -272,7 +288,12 @@ export class CodeProvider implements CompilationProvider {
       )
       .sort((a, b) => b.name.localeCompare(a.name))
       .slice(5)) {
-      await rm(join(runs, entry.name), { recursive: true, force: true });
+      await rm(join(runs, entry.name), {
+        recursive: true,
+        force: true,
+        // A programme that just exited may hold its files for a moment on Windows.
+        ...(process.platform === 'win32' ? { maxRetries: 3, retryDelay: 100 } : {}),
+      });
     }
   }
 
@@ -289,6 +310,27 @@ export class CodeProvider implements CompilationProvider {
     if (!existsSync(absolute) || !statSync(absolute).isFile())
       throw ApiError.notFound('code source', request.path);
     return { root, absolute };
+  }
+}
+
+/**
+ * Windows runs a batch file other than an npm shim through cmd.exe, which
+ * cannot carry some arguments faithfully. Refuse such a command before a
+ * terminal session exists rather than failing its spawn.
+ */
+function assertSpawnable(
+  commands: ReadonlyArray<{ file: string; args: string[] }>,
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+): void {
+  if (platform !== 'win32') return;
+  for (const { file, args } of commands) {
+    try {
+      resolveSpawn(file, args, { platform, env });
+    } catch (error) {
+      if (!(error instanceof UnsafeCmdArgumentError)) throw error;
+      throw ApiError.badRequest('invalid_compilation_command', error.message);
+    }
   }
 }
 
