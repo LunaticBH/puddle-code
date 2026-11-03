@@ -14,6 +14,7 @@ import type { RepoStore } from '../db/stores/repos.js';
 import type { SessionStore } from '../db/stores/sessions.js';
 import { git } from '../git/exec.js';
 import { gitMutexKey } from '../git/mutex.js';
+import { canonicalHostPath, sameHostPath } from '../host-path.js';
 import type { WorktreeManager } from '../worktrees/manager.js';
 
 const WATCH_DEBOUNCE_MS = 250;
@@ -350,8 +351,8 @@ export class ConversationCatalogue extends EventEmitter {
       }
       if (repoKey !== commonKey) continue;
       const canonicalPath = this.realOf(worktreePath);
-      const exposed = (await this.deps.worktrees.listWorktrees(repo)).find(
-        (worktree) => this.realOf(worktree.path) === canonicalPath,
+      const exposed = (await this.deps.worktrees.listWorktrees(repo)).find((worktree) =>
+        sameHostPath(this.realOf(worktree.path), canonicalPath),
       );
       if (!exposed?.branch) return null;
       return {
@@ -364,7 +365,9 @@ export class ConversationCatalogue extends EventEmitter {
     return null;
   }
 
+  /** Git prints `C:/…` on Windows: there the canonical host spelling is compared instead. */
   private realOf(path: string): string {
+    if (process.platform === 'win32') return canonicalHostPath(path);
     try {
       return realpathSync(path);
     } catch {
