@@ -1,6 +1,6 @@
-import { execPath } from 'node:process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { claudeHook, runsHelper, type ClaudeCommandHook } from './hook-command.js';
 
 /**
  * Hook-driven status signals for claude-code (SPEC §4/§5): the reliable
@@ -89,7 +89,7 @@ const HOOK_EVENTS: HookEvent[] = [
 
 interface HookGroup {
   matcher?: string;
-  hooks: Array<{ type: string; command: string }>;
+  hooks: ClaudeCommandHook[];
 }
 
 /**
@@ -98,7 +98,10 @@ interface HookGroup {
  * groups whose commands reference our helper are replaced; everything else in
  * the file (including foreign hooks on the same events) is preserved.
  */
-export function installStatusHooks(configDir: string): void {
+export function installStatusHooks(
+  configDir: string,
+  platform: NodeJS.Platform = process.platform,
+): void {
   const helperPath = join(configDir, HELPER_FILE);
   writeFileSync(helperPath, HELPER_SOURCE, { mode: 0o700 });
 
@@ -116,11 +119,6 @@ export function installStatusHooks(configDir: string): void {
       ? (settings['hooks'] as Record<string, unknown>)
       : {};
 
-  // The daemon's pinned node runs claude on this same host, so its path is
-  // valid for the hook subprocess too (mirrors claude-statusline.ts).
-  const command = (mode: string, value: string) =>
-    `${JSON.stringify(execPath)} ${JSON.stringify(helperPath)} ${mode} ${value}`;
-
   // Collate our groups per event FIRST — an event can carry several matchers
   // (Notification), and filtering per entry would strip the sibling just added.
   const byEvent = new Map<string, HookGroup[]>();
@@ -128,15 +126,13 @@ export function installStatusHooks(configDir: string): void {
     const { event, mode, value } = hook;
     const ours: HookGroup = {
       ...('matcher' in hook && hook.matcher !== undefined ? { matcher: hook.matcher } : {}),
-      hooks: [{ type: 'command', command: command(mode, value) }],
+      hooks: [claudeHook(helperPath, [mode, value], platform)],
     };
     byEvent.set(event, [...(byEvent.get(event) ?? []), ours]);
   }
   for (const [event, oursList] of byEvent) {
     const groups: HookGroup[] = Array.isArray(hooks[event]) ? (hooks[event] as HookGroup[]) : [];
-    const foreign = groups.filter(
-      (g) => !(g?.hooks ?? []).some((h) => h?.command?.includes(HELPER_FILE)),
-    );
+    const foreign = groups.filter((g) => !(g?.hooks ?? []).some((h) => runsHelper(h, HELPER_FILE)));
     hooks[event] = [...foreign, ...oursList];
   }
 

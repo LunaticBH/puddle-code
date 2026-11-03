@@ -1,9 +1,7 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import type { Account } from '@puddle/shared';
+import { setEnv } from '@puddle/shared/node/platform';
 import type { SubscriptionUsageWindow } from '../adapter.js';
-
-const execFileAsync = promisify(execFile);
+import { execAgent } from '../agent-process.js';
 
 /**
  * Subscription rate-limit usage — the "session / weekly" windows Claude
@@ -59,8 +57,28 @@ interface CacheEntry {
 const cache = new Map<number, CacheEntry>();
 const inFlight = new Map<number, Promise<SubscriptionUsageWindow[] | null>>();
 
-function scrubbedEnv(configDir: string): Record<string, string | undefined> {
-  const env: Record<string, string | undefined> = { ...process.env };
+/** Exported for tests. Windows environment names are case-insensitive, so they match any spelling. */
+export function scrubbedEnv(
+  configDir: string,
+  platform: NodeJS.Platform = process.platform,
+  base: Record<string, string | undefined> = process.env,
+): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = { ...base };
+  if (platform === 'win32') {
+    for (const key of Object.keys(env)) {
+      const name = key.toUpperCase();
+      if (
+        name === 'ANTHROPIC_API_KEY' ||
+        name === 'ANTHROPIC_AUTH_TOKEN' ||
+        name === 'CLAUDECODE' ||
+        name.startsWith('CLAUDE_CODE_')
+      ) {
+        delete env[key];
+      }
+    }
+    setEnv(env, 'CLAUDE_CONFIG_DIR', configDir, platform);
+    return env;
+  }
   delete env['ANTHROPIC_API_KEY'];
   delete env['ANTHROPIC_AUTH_TOKEN'];
   for (const key of Object.keys(env)) {
@@ -81,7 +99,7 @@ export async function fetchSubscriptionUsage(
   const fetch = (async () => {
     let windows: SubscriptionUsageWindow[] | null;
     try {
-      const { stdout } = await execFileAsync('claude', ['-p', '/usage'], {
+      const { stdout } = await execAgent('claude', ['-p', '/usage'], {
         env: scrubbedEnv(account.config_dir),
         timeout: 30_000,
       });

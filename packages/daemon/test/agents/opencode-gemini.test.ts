@@ -27,10 +27,10 @@ describe('opencode adapter', () => {
     // relocates nothing, so all four XDG roots must be redirected.
     const env = opencode.env(account('/cfg', 'opencode'));
     expect(env).toEqual({
-      XDG_CONFIG_HOME: '/cfg/config',
-      XDG_DATA_HOME: '/cfg/data',
-      XDG_CACHE_HOME: '/cfg/cache',
-      XDG_STATE_HOME: '/cfg/state',
+      XDG_CONFIG_HOME: join('/cfg', 'config'),
+      XDG_DATA_HOME: join('/cfg', 'data'),
+      XDG_CACHE_HOME: join('/cfg', 'cache'),
+      XDG_STATE_HOME: join('/cfg', 'state'),
     });
     expect(env['OPENCODE_CONFIG_DIR']).toBeUndefined();
   });
@@ -334,4 +334,21 @@ describe('gemini-cli adapter', () => {
       expect.objectContaining({ ref: 'sess-1', cwd: '/wt' }),
     ]);
   });
+
+  it.runIf(process.platform === 'win32')(
+    'finds a Windows project under the lower-cased key Gemini records',
+    () => {
+      const cfg = mkdtempSync(join(tmpdir(), 'gm-cfg-'));
+      const dir = join(cfg, '.gemini');
+      mkdirSync(join(dir, 'tmp', 'puddle', 'chats'), { recursive: true });
+      writeFileSync(
+        join(dir, 'projects.json'),
+        JSON.stringify({ projects: { 'c:\\users\\a\\wt': 'puddle' } }),
+      );
+      writeFileSync(join(dir, 'tmp', 'puddle', 'chats', 'sess-1.json'), '{}');
+      expect(geminiCli.discoverSessionRef?.('C:\\Users\\A\\wt', account(cfg, 'gemini-cli'))).toBe(
+        'sess-1',
+      );
+    },
+  );
 });

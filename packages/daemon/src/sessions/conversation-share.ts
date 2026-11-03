@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import {
   existsSync,
   lstatSync,
@@ -9,7 +10,8 @@ import {
   symlinkSync,
 } from 'node:fs';
 import { basename, dirname, join, sep } from 'node:path';
-import type { Account } from '@puddle/shared';
+import { isInsideHostPath, type Account } from '@puddle/shared';
+import { sameHostPath } from '../host-path.js';
 import type { AdapterRegistry } from '../agents/registry.js';
 import type { ConversationShareHooks } from '../agents/adapter.js';
 import type { AccountStore } from '../db/stores/accounts.js';
@@ -33,6 +35,8 @@ export interface ConversationShareDeps {
   paths: PuddlePaths;
   mutex: KeyedMutex;
   events: EventStore;
+  /** Selects directory junctions and Windows sharing-violation handling; the host's by default. */
+  platform?: NodeJS.Platform;
 }
 
 /**
@@ -45,9 +49,19 @@ export interface ConversationShareDeps {
  * concurrent adopt/backfill/reconcile/archive passes never race on the tree.
  *
  * All public methods are idempotent and re-runnable.
+ *
+ * Windows links with directory junctions, which need no privilege, where a
+ * directory symlink needs Developer Mode or elevation (docs/windows.md,
+ * decision 12). An entry that cannot be linked keeps its own directory and
+ * is never shared by copying; a store dir a live agent holds a file open in
+ * is left in place and retried on a later pass.
  */
 export class ConversationShare {
   constructor(private readonly deps: ConversationShareDeps) {}
+
+  private get platform(): NodeJS.Platform {
+    return this.deps.platform ?? process.platform;
+  }
 
   private hooksFor(agentType: string): ConversationShareHooks | null {
     let adapter;
@@ -93,18 +107,24 @@ export class ConversationShare {
         key,
       );
       mkdirSync(dirname(canonical), { recursive: true });
-      if (existsSync(canonical)) {
-        // Another account adopted this key first — fold this dir's files in.
-        mergeDirInto(storeDir, canonical);
+      if (this.platform === 'win32') {
+        const outcome = junctionInPlaceOf(storeDir, canonical);
+        // Busy: retry on a later flip. Unlinkable: sharing stays off for it.
+        if (outcome !== 'linked') return outcome === 'unlinkable';
       } else {
-        renameSync(storeDir, canonical);
+        if (existsSync(canonical)) {
+          // Another account adopted this key first — fold this dir's files in.
+          mergeDirInto(storeDir, canonical);
+        } else {
+          renameSync(storeDir, canonical);
+        }
+        symlinkSync(canonical, storeDir); // absolute target
       }
-      symlinkSync(canonical, storeDir); // absolute target
 
       // Mirror into every OTHER account of the profile.
       for (const sibling of this.siblings(account, agentType)) {
         if (sibling.id === account.id) continue;
-        mirrorLink(hooks.storeParent(sibling), key, canonical);
+        mirrorLink(hooks.storeParent(sibling), key, canonical, this.platform);
       }
       this.deps.events.record(session.id, 'conversation_adopted', { key });
       return true;
@@ -126,7 +146,7 @@ export class ConversationShare {
       for (const key of readdirSync(storeRoot)) {
         const canonical = join(storeRoot, key);
         if (!isDir(canonical)) continue;
-        mirrorLink(hooks.storeParent(account), key, canonical);
+        mirrorLink(hooks.storeParent(account), key, canonical, this.platform);
       }
     });
   }
@@ -158,12 +178,13 @@ export class ConversationShare {
         for (const account of accounts) {
           const parent = hooks.storeParent(account);
           // Repair or create a link for every live canonical key.
-          for (const key of keys) mirrorLink(parent, key, join(storeRoot, key));
+          for (const key of keys) mirrorLink(parent, key, join(storeRoot, key), this.platform);
           // Remove links whose canonical target is gone.
           if (!existsSync(parent)) continue;
           for (const entry of readdirSync(parent)) {
             const link = join(parent, entry);
-            if (isSymlink(link) && !existsSync(link)) rmSync(link, { force: true });
+            const stale = this.platform === 'win32' && STAGED_LINK.test(entry);
+            if (isSymlink(link) && (stale || !existsSync(link))) rmSync(link, { force: true });
           }
         }
       });
@@ -212,7 +233,11 @@ export class ConversationShare {
         // `target` is realpath'd (e.g. /private/var on macOS), so compare
         // against the realpath'd store root before removing the mirror links.
         const realStoreRoot = existsSync(storeRoot) ? realpathSync(storeRoot) : storeRoot;
-        const adopted = target.startsWith(realStoreRoot + sep);
+        const adopted =
+          this.platform === 'win32'
+            ? isInsideHostPath(realStoreRoot, target) &&
+              !sameHostPath(realStoreRoot, target, this.platform)
+            : target.startsWith(realStoreRoot + sep);
         rmSync(target, { recursive: true, force: true });
         if (adopted) {
           const key = basename(target);
@@ -266,9 +291,15 @@ function mergeDirInto(src: string, dst: string): void {
 /**
  * Ensure `<parent>/<key>` is an absolute symlink to `canonical`: create it if
  * absent, repoint a wrong symlink, or merge a real dir's files into canonical
- * and replace it with the link.
+ * and replace it with the link. Windows makes junctions, and an entry that
+ * cannot be linked or is in use keeps its own dir.
  */
-function mirrorLink(parent: string, key: string, canonical: string): void {
+function mirrorLink(
+  parent: string,
+  key: string,
+  canonical: string,
+  platform: NodeJS.Platform,
+): void {
   const link = join(parent, key);
   let stat;
   try {
@@ -278,7 +309,8 @@ function mirrorLink(parent: string, key: string, canonical: string): void {
   }
   if (!stat) {
     mkdirSync(parent, { recursive: true });
-    symlinkSync(canonical, link);
+    if (platform === 'win32') createJunction(canonical, link);
+    else symlinkSync(canonical, link);
     return;
   }
   if (stat.isSymbolicLink()) {
@@ -288,15 +320,121 @@ function mirrorLink(parent: string, key: string, canonical: string): void {
     } catch {
       points = null; // dangling
     }
-    if (points !== canonical) {
+    const correct =
+      points !== null &&
+      (platform === 'win32' ? sameHostPath(points, canonical, platform) : points === canonical);
+    if (!correct) {
       rmSync(link, { force: true });
-      symlinkSync(canonical, link);
+      if (platform === 'win32') createJunction(canonical, link);
+      else symlinkSync(canonical, link);
     }
     return;
   }
   // A real dir of the same key (e.g. an imported account) — fold it in.
+  if (platform === 'win32') {
+    junctionInPlaceOf(link, canonical);
+    return;
+  }
   mergeDirInto(link, canonical);
   symlinkSync(canonical, link);
+}
+
+// --- Windows -----------------------------------------------------------------
+
+/** A junction staged beside its final name; one left behind by a crash is removed at boot. */
+const STAGED_LINK = /^\..+\.puddle-link-[0-9a-f]{8}$/;
+
+/** Sharing violations: a file in the tree is open without FILE_SHARE_DELETE, or the tree is in use. */
+const BUSY = new Set(['EPERM', 'EBUSY', 'EACCES']);
+
+/** Store dirs already reported busy, so a retry on every status flip logs once. */
+const reportedBusy = new Set<string>();
+
+type JunctionOutcome = 'linked' | 'busy' | 'unlinkable';
+
+/** A junction at `link` to `canonical`; false, with the reason logged, when none can be made. */
+function createJunction(canonical: string, link: string): boolean {
+  try {
+    symlinkSync(canonical, link, 'junction');
+    return true;
+  } catch (error) {
+    console.warn(
+      `conversation sharing is off for ${link}: cannot create a junction (${errorCode(error)})`,
+    );
+    return false;
+  }
+}
+
+/**
+ * Replaces the real store dir `dir` with a junction to `canonical`, moving its
+ * entries there. The junction is created first under a staging name, so a
+ * volume that cannot hold one leaves `dir` untouched. A file a live agent
+ * holds open fails the move: whatever had moved goes back, and the caller
+ * retries later. Nothing is ever copied.
+ */
+function junctionInPlaceOf(dir: string, canonical: string): JunctionOutcome {
+  const staged = join(
+    dirname(dir),
+    `.${basename(dir)}.puddle-link-${randomBytes(4).toString('hex')}`,
+  );
+  if (!createJunction(canonical, staged)) return 'unlinkable';
+  let undo: () => void;
+  try {
+    undo = moveStoreDir(dir, canonical);
+  } catch (error) {
+    rmSync(staged, { force: true });
+    if (!BUSY.has(errorCode(error))) throw error;
+    if (!reportedBusy.has(dir)) {
+      reportedBusy.add(dir);
+      console.warn(
+        `conversation store ${dir} is in use (${errorCode(error)}); adoption will retry`,
+      );
+    }
+    return 'busy';
+  }
+  try {
+    renameSync(staged, dir);
+  } catch (error) {
+    undo();
+    rmSync(staged, { force: true });
+    if (!BUSY.has(errorCode(error))) throw error;
+    return 'busy';
+  }
+  reportedBusy.delete(dir);
+  return 'linked';
+}
+
+/**
+ * Moves `dir` to `canonical` whole, or merges its entries into an existing
+ * one (keeping canonical's copy of a duplicate), and returns how to put the
+ * moved entries back. Any failure restores what had moved before rethrowing.
+ */
+function moveStoreDir(dir: string, canonical: string): () => void {
+  if (!existsSync(canonical)) {
+    renameSync(dir, canonical);
+    return () => renameSync(canonical, dir);
+  }
+  const moved: string[] = [];
+  const undo = () => {
+    mkdirSync(dir, { recursive: true });
+    for (const name of moved.reverse()) renameSync(join(canonical, name), join(dir, name));
+  };
+  try {
+    for (const name of readdirSync(dir)) {
+      if (existsSync(join(canonical, name))) continue; // a duplicate, removed with `dir`
+      renameSync(join(dir, name), join(canonical, name));
+      moved.push(name);
+    }
+    rmSync(dir, { recursive: true, force: true });
+  } catch (error) {
+    undo();
+    throw error;
+  }
+  return undo;
+}
+
+function errorCode(error: unknown): string {
+  return (error as NodeJS.ErrnoException).code ?? String(error);
 }
 
 /** Find the canonical store dir under `storeRoot` that holds `ref`, or null. */

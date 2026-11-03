@@ -5,6 +5,7 @@ import { readFile, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { AgentAdapter } from '../adapter.js';
 import { matchesAgentProcess } from '../process-match.js';
+import { sameNativeCwd } from '../native-cwd.js';
 import { installGeminiLifecycleHooks } from './hooks.js';
 import { lifecycleVersionAtLeast } from '../lifecycle-version.js';
 
@@ -43,7 +44,13 @@ const GEMINI_DIR = '.gemini';
  *   CLI. Unauthenticated runs fail with "Please set an Auth method in your
  *   <home>/.gemini/settings.json …".
  * - Projects are keyed in `<home>/.gemini/projects.json` (absolute cwd → short
- *   name) with per-project `history/<name>/` and `tmp/<name>/` dirs.
+ *   name) with per-project `history/<name>/` and `tmp/<name>/` dirs. On
+ *   Windows the keys are lower-cased (ProjectRegistry.normalizePath, read in
+ *   gemini-cli's main branch 2026-11), so they are matched by sameNativeCwd.
+ * - On Windows state also lives under `GEMINI_CLI_HOME` (default
+ *   `%USERPROFILE%\.gemini`), as its homedir() override is platform-neutral,
+ *   and hooks run through PowerShell; see hook-command.ts. Unverified live:
+ *   no Gemini CLI was installed on the port machine.
  * - Additive SessionStart/SessionEnd hooks carry native identity without
  *   replacing user hooks. Fixtures pin their configuration shape; repeat the
  *   logged-in lifecycle acceptance when upgrading beyond 0.53.1.
@@ -180,7 +187,9 @@ function chatsDir(configDir: string, worktreePath: string): string | null {
   try {
     const raw = readFileSync(join(dir, 'projects.json'), 'utf8');
     const map = (JSON.parse(raw) as { projects?: Record<string, string> }).projects ?? {};
-    name = map[worktreePath];
+    name =
+      map[worktreePath] ??
+      Object.entries(map).find(([cwd]) => sameNativeCwd(cwd, worktreePath))?.[1];
   } catch {
     return null;
   }

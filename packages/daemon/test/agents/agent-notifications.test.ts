@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { agentNotificationSchema, type AgentNotification } from '@puddle/shared';
 import { ProfileAccess } from '../../src/security/profile-access.js';
-import { fixture, fakeAdapter, waitFor } from '../helpers/daemon-fixtures.js';
+import { fixture, waitFor } from '../helpers/daemon-fixtures.js';
+import { nodeFakeAdapter } from './node-fake-agent.js';
 
 describe('agent notification events', () => {
   it('reports waiting and a clean process exit, but keeps deliberate stops quiet', async () => {
-    const f = fixture();
+    const f = fixture({ adapter: nodeFakeAdapter() });
     const events: AgentNotification[] = [];
     f.service.on('agent-notification', (event: AgentNotification) => events.push(event));
     const session = await f.service.create({
@@ -31,7 +32,7 @@ describe('agent notification events', () => {
   it('captures the named conversation and bounded last reply on its exact placement', async () => {
     const f = fixture({
       adapter: {
-        ...fakeAdapter(),
+        ...nodeFakeAdapter(),
         notificationOutput: async () =>
           '\u001b[32mFixed the notification routing.\u001b[0m\nVerified desktop and mobile clicks. ' +
           'More detail. '.repeat(30),

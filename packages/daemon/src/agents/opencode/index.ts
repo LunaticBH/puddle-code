@@ -1,22 +1,16 @@
 import { prepareOpenCodeInteractive } from './control.js';
 import { prepareOpenCodeHeadless } from './headless.js';
-import { execFile } from 'node:child_process';
 import { mkdirSync, readFileSync, type Dirent } from 'node:fs';
 import { readFile, readdir, stat } from 'node:fs/promises';
-import { join } from 'node:path';
-import { promisify } from 'node:util';
+import { basename, join } from 'node:path';
 import type { AgentAdapter } from '../adapter.js';
+import { agentEnv, execAgent } from '../agent-process.js';
 import { matchesAgentProcess } from '../process-match.js';
+import { sameNativeCwd } from '../native-cwd.js';
 import { installOpenCodePlugin } from './plugin.js';
 import { lifecycleVersionAtLeast } from '../lifecycle-version.js';
+import { CACHE_HOME, CONFIG_HOME, DATA_HOME, STATE_HOME, xdgEnv } from './xdg.js';
 
-const execFileAsync = promisify(execFile);
-
-/** Subdirectories of the account config dir that back opencode's XDG roots. */
-const CONFIG_HOME = 'config';
-const DATA_HOME = 'data';
-const CACHE_HOME = 'cache';
-const STATE_HOME = 'state';
 const SESSION_START_WINDOW_MS = 5 * 60 * 1000;
 const METADATA_CONCURRENCY = 32;
 
@@ -55,6 +49,12 @@ const METADATA_CONCURRENCY = 32;
  *   events. A session carrying parentID is a child and never changes the live
  *   Puddle placement; keep the real-agent cases in docs/acceptance pinned when
  *   upgrading beyond 1.18.10.
+ *
+ * - Windows (from opencode's source, dev branch 2026-11; not run live, as no
+ *   OpenCode was installed on the port machine): the XDG roots come from
+ *   `XDG_*_HOME` with `~/.config`, `~/.local/share`, `~/.cache` and
+ *   `~/.local/state` fallbacks on every platform, never `%APPDATA%`, so the
+ *   same four variables isolate a Windows account.
  *
  * No `conversationShare`: sessions are per-project JSON files under the data
  * dir rather than per-conversation directories, so the Workstream S store model
@@ -119,8 +119,8 @@ export const opencode: AgentAdapter = {
 
   async checkLoggedIn(account) {
     try {
-      const { stdout } = await execFileAsync('opencode', ['auth', 'list'], {
-        env: { ...process.env, ...xdgEnv(account.config_dir) },
+      const { stdout } = await execAgent('opencode', ['auth', 'list'], {
+        env: agentEnv(xdgEnv(account.config_dir)),
         timeout: 15_000,
       });
       // `auth list` exits 0 whether or not anything is configured, so the
@@ -175,8 +175,8 @@ export const opencode: AgentAdapter = {
 
   async exportTranscript(ref, account) {
     try {
-      const { stdout } = await execFileAsync('opencode', ['export', ref], {
-        env: { ...process.env, ...xdgEnv(account.config_dir) },
+      const { stdout } = await execAgent('opencode', ['export', ref], {
+        env: agentEnv(xdgEnv(account.config_dir)),
         timeout: 30_000,
         maxBuffer: 32 * 1024 * 1024,
       });
@@ -214,16 +214,6 @@ export const opencode: AgentAdapter = {
     busy: [/working/i, /thinking/i],
   },
 };
-
-/** The four XDG roots, all under the account's puddle-owned config dir. */
-function xdgEnv(configDir: string): Record<string, string> {
-  return {
-    XDG_CONFIG_HOME: join(configDir, CONFIG_HOME),
-    XDG_DATA_HOME: join(configDir, DATA_HOME),
-    XDG_CACHE_HOME: join(configDir, CACHE_HOME),
-    XDG_STATE_HOME: join(configDir, STATE_HOME),
-  };
-}
 
 /** opencode's own data root inside the account dir. */
 function dataDir(configDir: string): string {
@@ -288,7 +278,7 @@ async function sessionsFor(configDir: string, worktreePath?: string): Promise<St
   const all = (await allSessions(configDir)).filter((session) => session.parentID === null);
   return worktreePath === undefined
     ? all
-    : all.filter((session) => session.directory === worktreePath);
+    : all.filter((session) => sameNativeCwd(session.directory, worktreePath));
 }
 
 async function allSessions(configDir: string): Promise<StoredSession[]> {
@@ -326,7 +316,7 @@ async function readStoredSession(
   file: string,
   cached: Map<string, CachedSession>,
 ): Promise<CachedSession | null> {
-  const name = file.split('/').pop() ?? '';
+  const name = basename(file);
   if (!name.startsWith('ses_') || !name.endsWith('.json')) return null;
   try {
     const stats = await stat(file);

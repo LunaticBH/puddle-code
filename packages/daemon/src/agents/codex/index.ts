@@ -1,9 +1,8 @@
 import { prepareCodexHeadless } from './headless.js';
-import { execFile } from 'node:child_process';
 import { statSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
-import { promisify } from 'node:util';
 import type { AgentAdapter } from '../adapter.js';
+import { agentEnv, execAgent } from '../agent-process.js';
 import { matchesAgentProcess } from '../process-match.js';
 import {
   allRollouts,
@@ -16,7 +15,6 @@ import { codexThread, codexThreadIndex, threadTitle } from './threads.js';
 import { prepareCodexLifecycle } from './lifecycle.js';
 import { lastJsonlOutput } from '../notification-output.js';
 
-const execFileAsync = promisify(execFile);
 const SESSION_START_WINDOW_MS = 5 * 60 * 1000;
 
 /**
@@ -58,6 +56,12 @@ const SESSION_START_WINDOW_MS = 5 * 60 * 1000;
  *   no `agent_title` at all and falls back to the terminal title, which codex
  *   sets to the working directory's basename, so every session in a repo showed
  *   the same static name and a rename never appeared.
+ *
+ * - Windows (from codex-rs source, not run live: no Codex was installed on the
+ *   port machine): `CODEX_HOME` relocates state as above (default
+ *   `%USERPROFILE%\.codex`). Rollout cwds may carry Rust's `\\?\` prefix,
+ *   so cwds are compared through sameNativeCwd, and the npm launcher's native
+ *   app-server is stopped as a process tree.
  *
  * No `conversationShare`: rollouts are date-bucketed files, not per-conversation
  * directories, so the Workstream S store model does not apply and
@@ -125,8 +129,8 @@ export const codex: AgentAdapter = {
     try {
       // Exits 0 logged in, 1 logged out (verified 0.146.0). execFile rejects on
       // a non-zero exit, so reaching the return means authenticated.
-      await execFileAsync('codex', ['login', 'status'], {
-        env: { ...process.env, CODEX_HOME: account.config_dir },
+      await execAgent('codex', ['login', 'status'], {
+        env: agentEnv({ CODEX_HOME: account.config_dir }),
         timeout: 15_000,
       });
       return true;

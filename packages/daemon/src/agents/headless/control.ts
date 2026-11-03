@@ -1,9 +1,10 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
-import { createServer, type Socket } from 'node:net';
+import { createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, win32 } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
+import { resolveSpawn, setEnv, type Environment } from '@puddle/shared/node/platform';
 import type { AgentControl, LifecycleLaunchResource } from '../adapter.js';
 import { record, type HeadlessContext, type HeadlessDriver, type JsonRecord } from './codec.js';
 import { HEADLESS_TERMINAL_SOURCE } from './terminal-source.js';
@@ -28,6 +29,7 @@ export class HeadlessControl implements AgentControl {
   constructor(
     private readonly context: HeadlessContext,
     private readonly driver: HeadlessDriver,
+    private readonly platform: NodeJS.Platform = process.platform,
   ) {
     this.ref = context.resumeRef;
     this.initialPrompt = context.opts.prompt;
@@ -37,7 +39,8 @@ export class HeadlessControl implements AgentControl {
     return this.connected && !this.pending && !this.closed;
   }
 
-  connect(socket: Socket): void {
+  /** `received` is text an admission check already read from the socket. */
+  connect(socket: Socket, received = ''): void {
     if (this.socket || this.closed) {
       socket.destroy();
       return;
@@ -45,7 +48,7 @@ export class HeadlessControl implements AgentControl {
     this.socket = socket;
     let buffer = '';
     socket.setEncoding('utf8');
-    socket.on('data', (chunk: string) => {
+    const onData = (chunk: string) => {
       buffer += chunk;
       for (;;) {
         const end = buffer.indexOf('\n');
@@ -69,9 +72,11 @@ export class HeadlessControl implements AgentControl {
         }
       }
       if (Buffer.byteLength(buffer) > 2 * LIMIT) this.dispose();
-    });
+    };
+    socket.on('data', onData);
     socket.once('close', () => this.dispose());
     socket.on('error', () => this.dispose());
+    if (received) onData(received);
   }
 
   async ask(prompt: string, signal: AbortSignal, schema?: JsonRecord): Promise<string> {
@@ -84,6 +89,7 @@ export class HeadlessControl implements AgentControl {
       initial ? `${initial}\n\n${prompt}` : prompt,
       schema,
     );
+    const run = this.runMessage(command);
     const decode = this.driver.decoder();
     const utf8 = new StringDecoder('utf8');
     let lines = '',
@@ -175,14 +181,36 @@ export class HeadlessControl implements AgentControl {
       this.initialPrompt = undefined;
       this.context.reportStatus?.('working');
       this.display(`\n> ${prompt}\n\n`);
-      this.send({
-        type: 'run',
-        id,
-        binary: this.driver.binary,
-        ...command,
-        env: { ...this.driver.env, ...command.env },
-      });
+      this.send({ type: 'run', id, ...run });
     });
+  }
+
+  /**
+   * The `run` request for one native command. The terminal driver has no
+   * executable resolver, so on Windows the daemon resolves the CLI on PATH
+   * (never the driver's cwd, the worktree, where a repository could plant
+   * `claude.exe`) and unwraps npm shims, as for every other agent child.
+   */
+  private runMessage(command: ReturnType<HeadlessDriver['command']>): JsonRecord {
+    const env = { ...this.driver.env, ...command.env };
+    if (this.platform !== 'win32') return { binary: this.driver.binary, ...command, env };
+    const lookup: Environment = { ...process.env, ...this.context.env, ...env };
+    const resolved = resolveSpawn(this.driver.binary, command.args, {
+      platform: this.platform,
+      env: lookup,
+    });
+    if (!win32.isAbsolute(resolved.file))
+      throw new Error(`'${this.driver.binary}' was not found on the daemon's PATH`);
+    const childEnv: Environment = { ...env };
+    for (const [key, value] of Object.entries(resolved.env ?? {}))
+      setEnv(childEnv, key, value, this.platform);
+    return {
+      ...command,
+      binary: resolved.file,
+      args: resolved.args,
+      env: childEnv,
+      ...(resolved.windowsVerbatimArguments ? { verbatim: true } : {}),
+    };
   }
 
   private cancel(message: string): void {
@@ -208,7 +236,9 @@ export class HeadlessControl implements AgentControl {
 export async function prepareHeadless(
   context: HeadlessContext,
   driver: HeadlessDriver,
+  platform: NodeJS.Platform = process.platform,
 ): Promise<LifecycleLaunchResource> {
+  if (platform === 'win32') return prepareWindowsHeadless(context, driver);
   const directory = await mkdtemp(join(tmpdir(), 'pudl-'));
   const path = join(directory, 's');
   const control = new HeadlessControl(context, driver);
@@ -232,4 +262,85 @@ export async function prepareHeadless(
       await rm(directory, { recursive: true, force: true });
     },
   };
+}
+
+/**
+ * Windows: a named pipe in place of the socket in a private directory
+ * (docs/windows.md, decision 3). Under a pipe's default DACL any local user
+ * may open it for reading, so a connection is attached only once its first
+ * line, the driver's `ready`, carries the per-launch token from the driver's
+ * argv; until then the daemon writes nothing to it.
+ */
+async function prepareWindowsHeadless(
+  context: HeadlessContext,
+  driver: HeadlessDriver,
+): Promise<LifecycleLaunchResource> {
+  const path = `\\\\.\\pipe\\pudl-headless-${randomUUID()}`;
+  const token = randomBytes(32).toString('hex');
+  const control = new HeadlessControl(context, driver, 'win32');
+  const server = createServer((socket) =>
+    admitWithToken(socket, token, (received) => control.connect(socket, received)),
+  );
+  await listen(server, path);
+  return {
+    binary: process.execPath,
+    args: ['-e', HEADLESS_TERMINAL_SOURCE, path, token],
+    control,
+    dispose: () => {
+      control.dispose();
+      server.close();
+    },
+  };
+}
+
+function listen(server: Server, path: string): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(path, resolve);
+  });
+}
+
+/** Hands `socket` to `admit` once its first line is a `ready` holding `token`. */
+export function admitWithToken(
+  socket: Socket,
+  token: string,
+  admit: (received: string) => void,
+): void {
+  let received = '';
+  const refuse = () => socket.destroy();
+  const timer = setTimeout(refuse, 10_000);
+  timer.unref();
+  socket.once('close', () => clearTimeout(timer));
+  socket.on('error', refuse);
+  socket.setEncoding('utf8');
+  const onData = (chunk: string) => {
+    received += chunk;
+    const end = received.indexOf('\n');
+    if (end < 0) {
+      if (received.length > 4096) refuse();
+      return;
+    }
+    clearTimeout(timer);
+    socket.off('data', onData);
+    socket.off('error', refuse);
+    let first: JsonRecord = {};
+    try {
+      first = record(JSON.parse(received.slice(0, end)));
+    } catch {
+      // Not JSON: refused below.
+    }
+    const offered = typeof first['token'] === 'string' ? Buffer.from(first['token']) : null;
+    const expected = Buffer.from(token);
+    if (
+      first['type'] !== 'ready' ||
+      offered === null ||
+      offered.length !== expected.length ||
+      !timingSafeEqual(offered, expected)
+    ) {
+      refuse();
+      return;
+    }
+    admit(received);
+  };
+  socket.on('data', onData);
 }

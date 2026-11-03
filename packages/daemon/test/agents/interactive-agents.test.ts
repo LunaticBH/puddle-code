@@ -11,7 +11,8 @@ import { installStatusHooks } from '../../src/agents/claude-code/hooks.js';
 import { installClaudeTurnHooks } from '../../src/agents/claude-code/control.js';
 import { installGeminiLifecycleHooks } from '../../src/agents/gemini-cli/hooks.js';
 import { installOpenCodePlugin } from '../../src/agents/opencode/plugin.js';
-import { fakeAdapter, fixture, waitFor } from '../helpers/daemon-fixtures.js';
+import { fixture, waitFor } from '../helpers/daemon-fixtures.js';
+import { nodeFakeAdapter } from './node-fake-agent.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -306,7 +307,7 @@ describe('generated native hooks', () => {
   it('routes nonce-scoped control and human input through the stable runtime', async () => {
     const f = fixture({
       adapter: {
-        ...fakeAdapter(),
+        ...nodeFakeAdapter(),
         scriptedTurns: true,
         prepareLifecycleLaunch: async (ctx) => {
           const control = new InteractiveControl(ctx.writeInput!, '\x1b');

@@ -1,21 +1,32 @@
 import { randomUUID } from 'node:crypto';
 import {
+  chmodSync,
+  closeSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import type { Account } from '@puddle/shared';
-import { describe, expect, it } from 'vitest';
-import type { ShareSession } from '../../src/sessions/conversation-share.js';
+import { describe, expect, it, vi } from 'vitest';
+import { KeyedMutex } from '../../src/git/mutex.js';
+import { ConversationShare, type ShareSession } from '../../src/sessions/conversation-share.js';
 import { removeDirWithin } from '../../src/http/fs-cleanup.js';
 import { fixture, waitFor, type Fixture } from '../helpers/daemon-fixtures.js';
+import { nodeFakeAdapter } from '../agents/node-fake-agent.js';
 
-/** Path is a symlink (regardless of whether its target exists). */
+/** The share-capable fake agent, run by Node so the live paths work on every OS. */
+function shareFixture(): Fixture {
+  return fixture({ adapter: nodeFakeAdapter({ share: true }) });
+}
+
+/** Path is a symlink or, on Windows, a junction (regardless of whether its target exists). */
 function isSymlink(p: string): boolean {
   try {
     return lstatSync(p).isSymbolicLink();
@@ -84,9 +95,26 @@ function cfg(f: Fixture, accountId: number): string {
   return f.stores.accounts.get(accountId).config_dir;
 }
 
+/** The fixture's manager, or one forced onto the Windows junction paths. */
+function managerFor(f: Fixture, platform: 'native' | 'win32'): ConversationShare {
+  if (platform === 'native') return f.share;
+  return new ConversationShare({
+    accounts: f.stores.accounts,
+    adapters: f.adapters,
+    paths: f.paths,
+    mutex: new KeyedMutex(),
+    events: f.stores.events,
+    platform: 'win32',
+  });
+}
+
+// Windows runs the junction paths natively; elsewhere they run on symlinks too.
+const PLATFORMS =
+  process.platform === 'win32' ? (['native'] as const) : (['native', 'win32'] as const);
+
 describe('ConversationShare adoption (live agent)', () => {
   it('moves the conversation dir into the canonical store, symlinks it back, and live writes land in the canonical file', async () => {
-    const f = fixture({ share: true });
+    const f = shareFixture();
     const session = await f.service.create({
       project_id: f.ids.project,
       account_id: f.ids.account,
@@ -112,13 +140,14 @@ describe('ConversationShare adoption (live agent)', () => {
   });
 });
 
-describe('ConversationShare manager', () => {
+describe.each(PLATFORMS)('ConversationShare manager (%s)', (platform) => {
+  const share = (f: Fixture) => managerFor(f, platform);
   it('mirrors the adopted conversation into every other account of the profile', async () => {
-    const f = fixture({ share: true });
+    const f = shareFixture();
     const a = f.stores.accounts.get(f.ids.account);
     const b = addAccount(f, 'work');
     writeConv(a.config_dir, 'k1', 'refA');
-    const done = await f.share.adoptIfNeeded(makeSession(f, a.id, 'refA'));
+    const done = await share(f).adoptIfNeeded(makeSession(f, a.id, 'refA'));
     expect(done).toBe(true);
 
     const canonical = join(storeRootOf(f), 'k1');
@@ -129,14 +158,14 @@ describe('ConversationShare manager', () => {
   });
 
   it('merges without loss when two accounts hold real dirs of the same key', async () => {
-    const f = fixture({ share: true });
+    const f = shareFixture();
     const a = f.stores.accounts.get(f.ids.account);
     const b = addAccount(f, 'work');
     writeConv(a.config_dir, 'k1', 'refA');
     writeConv(b.config_dir, 'k1', 'refB');
-    await f.share.adoptIfNeeded(makeSession(f, a.id, 'refA'));
+    await share(f).adoptIfNeeded(makeSession(f, a.id, 'refA'));
     // B's real dir is folded into canonical during A's adoption; adopting B again is a no-op.
-    await f.share.adoptIfNeeded(makeSession(f, b.id, 'refB'));
+    await share(f).adoptIfNeeded(makeSession(f, b.id, 'refB'));
 
     const canonical = join(storeRootOf(f), 'k1');
     expect(existsSync(join(canonical, 'refA.jsonl'))).toBe(true);
@@ -146,54 +175,54 @@ describe('ConversationShare manager', () => {
   });
 
   it('backfills a new account with existing canonical keys, folding in an imported real dir', async () => {
-    const f = fixture({ share: true });
+    const f = shareFixture();
     const a = f.stores.accounts.get(f.ids.account);
     writeConv(a.config_dir, 'k1', 'refA');
-    await f.share.adoptIfNeeded(makeSession(f, a.id, 'refA'));
+    await share(f).adoptIfNeeded(makeSession(f, a.id, 'refA'));
     const canonical = join(storeRootOf(f), 'k1');
 
     // Plain new account → gets a symlink.
     const c = addAccount(f, 'third');
-    await f.share.backfillAccount(c);
+    await share(f).backfillAccount(c);
     expect(isSymlink(join(c.config_dir, 'projects', 'k1'))).toBe(true);
     expect(f.adapters.get('fake').hasConversation!('refA', c)).toBe(true);
 
     // Imported account already holding a real dir of the same key → merged in.
     const d = addAccount(f, 'imported');
     writeConv(d.config_dir, 'k1', 'refD');
-    await f.share.backfillAccount(d);
+    await share(f).backfillAccount(d);
     expect(isSymlink(join(d.config_dir, 'projects', 'k1'))).toBe(true);
     expect(existsSync(join(canonical, 'refD.jsonl'))).toBe(true);
     expect(existsSync(join(canonical, 'refA.jsonl'))).toBe(true);
   });
 
   it('reconcile repairs a deleted symlink and removes links whose canonical dir vanished', async () => {
-    const f = fixture({ share: true });
+    const f = shareFixture();
     const a = f.stores.accounts.get(f.ids.account);
     const b = addAccount(f, 'work');
     writeConv(a.config_dir, 'k1', 'refA');
-    await f.share.adoptIfNeeded(makeSession(f, a.id, 'refA'));
+    await share(f).adoptIfNeeded(makeSession(f, a.id, 'refA'));
     const storeRoot = storeRootOf(f);
 
     // A deleted mirror link is recreated.
     rmSync(join(b.config_dir, 'projects', 'k1'), { force: true });
-    await f.share.reconcile();
+    await share(f).reconcile();
     expect(isSymlink(join(b.config_dir, 'projects', 'k1'))).toBe(true);
 
     // Canonical dir gone → both links are dangling → removed.
     rmSync(join(storeRoot, 'k1'), { recursive: true, force: true });
-    await f.share.reconcile();
+    await share(f).reconcile();
     expect(lexists(join(a.config_dir, 'projects', 'k1'))).toBe(false);
     expect(lexists(join(b.config_dir, 'projects', 'k1'))).toBe(false);
   });
 
   it('removeSessionData deletes exactly the session files and drops the dir only when empty', async () => {
-    const f = fixture({ share: true });
+    const f = shareFixture();
     const a = f.stores.accounts.get(f.ids.account);
     const b = addAccount(f, 'work');
     writeConv(a.config_dir, 'k1', 'refA');
     const sA = makeSession(f, a.id, 'refA');
-    await f.share.adoptIfNeeded(sA);
+    await share(f).adoptIfNeeded(sA);
     const canonical = join(storeRootOf(f), 'k1');
 
     // A second conversation shares the same store key.
@@ -202,7 +231,7 @@ describe('ConversationShare manager', () => {
     const sB = makeSession(f, a.id, 'refB');
 
     // Archiving A removes only refA's files; the dir + links survive.
-    await f.share.removeSessionData(sA);
+    await share(f).removeSessionData(sA);
     expect(existsSync(join(canonical, 'refA.jsonl'))).toBe(false);
     expect(existsSync(join(a.config_dir, 'todos', 'refA.json'))).toBe(false);
     expect(existsSync(join(canonical, 'refB.jsonl'))).toBe(true);
@@ -210,19 +239,19 @@ describe('ConversationShare manager', () => {
     expect(isSymlink(join(b.config_dir, 'projects', 'k1'))).toBe(true);
 
     // Archiving B empties the dir → dir and every account's link go.
-    await f.share.removeSessionData(sB);
+    await share(f).removeSessionData(sB);
     expect(existsSync(canonical)).toBe(false);
     expect(lexists(join(a.config_dir, 'projects', 'k1'))).toBe(false);
     expect(lexists(join(b.config_dir, 'projects', 'k1'))).toBe(false);
   });
 
   it('deleting an account leaves the canonical store intact and resolvable by its sibling', async () => {
-    const f = fixture({ share: true });
+    const f = shareFixture();
     const a = f.stores.accounts.get(f.ids.account);
     const b = addAccount(f, 'work');
     writeConv(a.config_dir, 'k1', 'refA');
     const sA = makeSession(f, a.id, 'refA');
-    await f.share.adoptIfNeeded(sA);
+    await share(f).adoptIfNeeded(sA);
     const canonical = join(storeRootOf(f), 'k1');
 
     // Account deletion requires archived sessions, then removes its config dir.
@@ -236,17 +265,81 @@ describe('ConversationShare manager', () => {
   });
 
   it('adoptIfNeeded is idempotent — a second call records no new event and keeps the symlink', async () => {
-    const f = fixture({ share: true });
+    const f = shareFixture();
     const a = f.stores.accounts.get(f.ids.account);
     writeConv(a.config_dir, 'k1', 'refA');
     const sA = makeSession(f, a.id, 'refA');
-    await f.share.adoptIfNeeded(sA);
+    await share(f).adoptIfNeeded(sA);
     const adoptEvents = () =>
       f.stores.events.list(sA.id).filter((e) => e.type === 'conversation_adopted').length;
     expect(adoptEvents()).toBe(1);
 
-    expect(await f.share.adoptIfNeeded(sA)).toBe(true);
+    expect(await share(f).adoptIfNeeded(sA)).toBe(true);
     expect(adoptEvents()).toBe(1);
     expect(isSymlink(join(a.config_dir, 'projects', 'k1'))).toBe(true);
   });
+});
+
+describe('ConversationShare on Windows', () => {
+  it('removes a staged junction a crash left behind', async () => {
+    const f = shareFixture();
+    const manager = managerFor(f, 'win32');
+    const a = f.stores.accounts.get(f.ids.account);
+    writeConv(a.config_dir, 'k1', 'refA');
+    await manager.adoptIfNeeded(makeSession(f, a.id, 'refA'));
+    const staged = join(a.config_dir, 'projects', '.k1.puddle-link-0123abcd');
+    symlinkSync(join(storeRootOf(f), 'k1'), staged, 'junction');
+    await manager.reconcile();
+    expect(lexists(staged)).toBe(false);
+    expect(isSymlink(join(a.config_dir, 'projects', 'k1'))).toBe(true);
+  });
+
+  it.runIf(process.platform === 'win32')(
+    'leaves a store dir a live agent holds open in place and adopts it once released',
+    async () => {
+      const f = shareFixture();
+      const a = f.stores.accounts.get(f.ids.account);
+      writeConv(a.config_dir, 'k1', 'refA');
+      const session = makeSession(f, a.id, 'refA');
+      const projects = join(a.config_dir, 'projects');
+      const held = openSync(join(projects, 'k1', 'refA.jsonl'), 'a');
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        expect(await f.share.adoptIfNeeded(session)).toBe(false);
+        expect(isSymlink(join(projects, 'k1'))).toBe(false);
+        expect(readdirSync(projects)).toEqual(['k1']); // no staged junction left behind
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('is in use'));
+      } finally {
+        closeSync(held);
+        warn.mockRestore();
+      }
+      expect(await f.share.adoptIfNeeded(session)).toBe(true);
+      expect(isSymlink(join(projects, 'k1'))).toBe(true);
+      expect(existsSync(join(storeRootOf(f), 'k1', 'refA.jsonl'))).toBe(true);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'keeps sharing off, without moving anything, where no link can be made',
+    async () => {
+      // A read-only parent stands in for a volume that cannot hold a junction.
+      const f = shareFixture();
+      const manager = managerFor(f, 'win32');
+      const a = f.stores.accounts.get(f.ids.account);
+      writeConv(a.config_dir, 'k1', 'refA');
+      const projects = join(a.config_dir, 'projects');
+      chmodSync(projects, 0o555);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        expect(await manager.adoptIfNeeded(makeSession(f, a.id, 'refA'))).toBe(true);
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('cannot create a junction'));
+      } finally {
+        chmodSync(projects, 0o755);
+        warn.mockRestore();
+      }
+      expect(isSymlink(join(projects, 'k1'))).toBe(false);
+      expect(existsSync(join(projects, 'k1', 'refA.jsonl'))).toBe(true);
+      expect(existsSync(join(storeRootOf(f), 'k1'))).toBe(false);
+    },
+  );
 });

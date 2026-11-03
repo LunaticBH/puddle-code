@@ -1,7 +1,9 @@
-import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
+import type { ChildProcess, SpawnOptions } from 'node:child_process';
 import { createServer } from 'node:net';
+import { killProcessTree } from '@puddle/shared/node/platform';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
 import type { LifecycleLaunchContext, LifecycleLaunchResource } from '../adapter.js';
+import { agentEnv, spawnAgent } from '../agent-process.js';
 import { CodexControl } from './control.js';
 import { lifecycleVersionAtLeast } from '../lifecycle-version.js';
 
@@ -34,7 +36,8 @@ export async function prepareCodexLifecycle(
   const scriptedTurns = await lifecycleVersionAtLeast('codex', ['--version'], [0, 159, 0]);
   const appPort = await freePort();
   const appUrl = `ws://127.0.0.1:${appPort}`;
-  const appServer = spawn(
+  // Windows resolves `codex` on PATH only: the worktree cwd could plant codex.exe.
+  const appServer = spawnAgent(
     'codex',
     ['app-server', '--listen', appUrl],
     codexAppServerSpawnOptions(context),
@@ -164,10 +167,11 @@ export function codexRemoteArgs(
 /** Load-bearing spawn context for the remote Codex workspace. */
 export function codexAppServerSpawnOptions(
   context: Pick<LifecycleLaunchContext, 'account' | 'opts'>,
+  platform: NodeJS.Platform = process.platform,
 ): SpawnOptions {
   return {
     cwd: context.opts.worktreePath,
-    env: { ...process.env, CODEX_HOME: context.account.config_dir },
+    env: agentEnv({ CODEX_HOME: context.account.config_dir }, platform),
     stdio: ['ignore', 'ignore', 'pipe'],
   };
 }
@@ -364,6 +368,17 @@ async function waitForWebSocket(
   }
 }
 
-function stopProcess(process: ChildProcess): void {
-  if (process.exitCode === null && !process.killed) process.kill('SIGTERM');
+/**
+ * On Windows the direct child of an npm install is node running codex.js,
+ * which holds the native app-server as its own child; TerminateProcess on
+ * the wrapper alone would leak that server and its port.
+ */
+export function stopProcess(
+  child: ChildProcess,
+  platform: NodeJS.Platform = process.platform,
+): void {
+  if (child.exitCode !== null || child.killed) return;
+  if (platform === 'win32' && child.pid !== undefined)
+    void killProcessTree(child.pid, { platform });
+  else child.kill('SIGTERM');
 }

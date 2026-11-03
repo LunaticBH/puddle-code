@@ -2,6 +2,7 @@ import { createReadStream } from 'node:fs';
 import { open, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
+import { sameNativeCwd } from '../native-cwd.js';
 
 /**
  * Reading Codex's rollout files — the JSONL transcripts it writes per session.
@@ -166,7 +167,7 @@ export function cachedRolloutPath(configDir: string, ref: string): string | null
 export async function rolloutsFor(configDir: string, worktreePath: string): Promise<RolloutMeta[]> {
   return (await rolloutEntries(configDir))
     .map((entry) => entry.meta)
-    .filter((meta) => meta.cwd === worktreePath && meta.parentThreadId === null);
+    .filter((meta) => sameNativeCwd(meta.cwd, worktreePath) && meta.parentThreadId === null);
 }
 
 /** Newest unclaimed top-level rollout recorded against `worktreePath`. */

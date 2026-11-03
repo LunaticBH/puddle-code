@@ -90,8 +90,9 @@ describe('assertBinaryAvailable', () => {
   beforeEach(() => clearBinaryCache());
 
   it('passes for an installed adapter', () => {
-    expect(isBinaryAvailable(fakeAdapter())).toBe(true);
-    expect(() => assertBinaryAvailable(fakeAdapter())).not.toThrow();
+    // `node` runs this suite, so it is on PATH (as node.exe on Windows).
+    expect(isBinaryAvailable(fakeAdapter({ binary: 'node' }))).toBe(true);
+    expect(() => assertBinaryAvailable(fakeAdapter({ binary: 'node' }))).not.toThrow();
   });
 
   it('throws 424 agent_not_installed naming the binary and the escape hatch', () => {
