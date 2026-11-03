@@ -1,7 +1,8 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
+import { renameWithRetrySync } from '@puddle/shared/node/platform';
 
 export interface SshAskpassRequest {
   /** Original SSH destination, including aliases and user, never inferred from prompt text. */
@@ -25,8 +26,12 @@ export async function startSshAskpass(opts: {
   home: string;
   electronPath: string;
   helperPath: string;
+  /** Windows: the compiled ssh-askpass.exe (see ssh-askpass-shim.cs). */
+  windowsShimPath?: string;
+  platform?: NodeJS.Platform;
   prompt(request: SshAskpassRequest, signal: AbortSignal): Promise<string | null>;
 }): Promise<RunningSshAskpass> {
+  const platform = opts.platform ?? process.platform;
   const token = randomBytes(32).toString('hex');
   const lifetime = new AbortController();
   const server = createServer((request, response) => {
@@ -48,8 +53,11 @@ export async function startSshAskpass(opts: {
   }
 
   mkdirSync(opts.home, { recursive: true });
-  const program = join(opts.home, `ssh-askpass-${process.pid}`);
   const endpoint = `http://127.0.0.1:${address.port}/askpass`;
+  if (platform === 'win32') {
+    return startWindowsAskpass(opts.home, endpoint, token, opts, server, lifetime);
+  }
+  const program = join(opts.home, `ssh-askpass-${process.pid}`);
   const launcher = `#!/bin/sh
 exec env ELECTRON_RUN_AS_NODE=1 \\
   PUDDLE_DESKTOP_ASKPASS_URL=${shellQuote(endpoint)} \\
@@ -76,6 +84,53 @@ exec env ELECTRON_RUN_AS_NODE=1 \\
         rmSync(program, { force: true });
       } catch {
         // The dead endpoint/token are harmless; server shutdown matters more.
+      }
+      return new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
+}
+
+/**
+ * Windows: OpenSSH runs the compiled shim, which reads this bridge descriptor
+ * from the private home (as the POSIX launcher carries the same values) and
+ * starts Electron in Node mode on the helper. The desktop is single-instance
+ * per user, so one descriptor per home suffices; close() removes it only
+ * while it still holds this bridge's token.
+ */
+function startWindowsAskpass(
+  home: string,
+  endpoint: string,
+  token: string,
+  opts: { electronPath: string; helperPath: string; windowsShimPath?: string },
+  server: Server,
+  lifetime: AbortController,
+): RunningSshAskpass | Promise<RunningSshAskpass> {
+  const descriptor = join(home, 'ssh-askpass.txt');
+  const contents = `${opts.electronPath}\n${opts.helperPath}\n${endpoint}\n${token}\n`;
+  try {
+    if (opts.windowsShimPath === undefined)
+      throw new Error('the Windows askpass program is missing');
+    const temporary = `${descriptor}.${process.pid}.tmp`;
+    writeFileSync(temporary, contents, { encoding: 'utf8', mode: 0o600 });
+    renameWithRetrySync(temporary, descriptor);
+  } catch (error) {
+    return new Promise<RunningSshAskpass>((_resolve, reject) =>
+      server.close(() => reject(error instanceof Error ? error : new Error(String(error)))),
+    );
+  }
+  const program = opts.windowsShimPath;
+  let closed = false;
+  return {
+    program,
+    close() {
+      if (closed) return Promise.resolve();
+      closed = true;
+      lifetime.abort();
+      server.closeAllConnections();
+      try {
+        if (readFileSync(descriptor, 'utf8') === contents) rmSync(descriptor, { force: true });
+      } catch {
+        // A newer bridge owns the descriptor, or it is already gone.
       }
       return new Promise<void>((resolve) => server.close(() => resolve()));
     },
