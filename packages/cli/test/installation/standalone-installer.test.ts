@@ -2,7 +2,9 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -15,7 +17,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { installDaemon, readInstallScript } from '../../src/lib/installation/bootstrap.js';
@@ -23,10 +25,16 @@ import type { Transport } from '../../src/lib/transport/transport.js';
 import {
   standaloneInstallation,
   removeStandaloneCli,
+  windowsStandaloneLauncher,
+  windowsUpgradeCommand,
 } from '../../src/lib/installation/standalone-cli.js';
 
 const root = fileURLToPath(new URL('../../../../', import.meta.url));
 const installer = join(root, 'scripts/install-cli.sh');
+const powershellInstaller = join(root, 'scripts/install-cli.ps1');
+const systemRoot = process.env.SystemRoot ?? 'C:\\Windows';
+const windowsPowerShell = join(systemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe');
+const psFlags = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass'];
 const temps: string[] = [];
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -73,7 +81,9 @@ function fixture() {
   return { temp, home, prefix, launcher, stage, tarball, pack, install };
 }
 
-describe('standalone CLI installer', () => {
+// install-cli.sh is the POSIX installer (symlinks, modes, sh); install-cli.ps1
+// has its own suite below.
+describe.skipIf(process.platform === 'win32')('standalone CLI installer', () => {
   it('migrates owned puddlang launchers to pudl and permits older archive removal', async () => {
     const f = fixture();
     const legacy = join(f.home, '.local/bin/puddlang');
@@ -241,11 +251,12 @@ describe('standalone CLI installer', () => {
   });
 });
 
-it('publishes only the CLI as install.sh and removes obsolete staged installers', () => {
-  const f = fixture();
-  const output = join(f.temp, 'public');
+it('publishes only the CLI installers and removes obsolete staged installers', () => {
+  const temp = mkdtempSync(join(tmpdir(), 'puddle-cli-installers-'));
+  temps.push(temp);
+  const output = join(temp, 'public');
   mkdirSync(output);
-  for (const name of ['install.sh', 'install-cli.sh', 'install-daemon.sh']) {
+  for (const name of ['install.sh', 'install-cli.sh', 'install-daemon.sh', 'install-cli.ps1']) {
     writeFileSync(join(output, name), 'obsolete installer');
   }
   writeFileSync(join(output, 'index.html'), 'application');
@@ -254,14 +265,36 @@ it('publishes only the CLI as install.sh and removes obsolete staged installers'
     output,
     'example/puddle',
   ]);
-  expect(readdirSync(output).sort()).toEqual(['index.html', 'install.sh']);
+  expect(readdirSync(output).sort()).toEqual(['index.html', 'install.ps1', 'install.sh']);
   const script = readFileSync(join(output, 'install.sh'), 'utf8');
   expect(script).toBe(readFileSync(installer, 'utf8').replaceAll('@@REPO@@', 'example/puddle'));
   expect(script).not.toContain('@@REPO@@');
-  expect(execFileSync('sh', ['-s', '--', '--help'], { input: script, encoding: 'utf8' })).toContain(
-    'usage: install.sh',
+  const powershell = readFileSync(join(output, 'install.ps1'), 'utf8');
+  expect(powershell).toBe(
+    readFileSync(join(root, 'scripts/install-cli.ps1'), 'utf8').replaceAll(
+      '@@REPO@@',
+      'example/puddle',
+    ),
   );
+  expect(powershell).not.toContain('@@REPO@@');
   expect(readFileSync(join(output, 'index.html'), 'utf8')).toBe('application');
+  if (process.platform === 'win32') {
+    expect(
+      execFileSync(windowsPowerShell, [...psFlags, '-File', join(output, 'install.ps1'), '-Help'], {
+        encoding: 'utf8',
+      }),
+    ).toContain('usage: install.ps1');
+  } else {
+    expect(
+      execFileSync('sh', ['-s', '--', '--help'], { input: script, encoding: 'utf8' }),
+    ).toContain('usage: install.sh');
+  }
+});
+
+it('keeps the Windows installer ASCII for Windows PowerShell 5.1', () => {
+  // 5.1 reads a script without a byte order mark in the ANSI code page.
+  const script = readFileSync(join(root, 'scripts/install-cli.ps1'), 'utf8');
+  expect([...script].filter((c) => c !== '\n' && (c < ' ' || c > '~'))).toEqual([]);
 });
 
 it('pipes the embedded daemon bootstrap over SSH with the GitHub release source', async () => {
@@ -281,4 +314,286 @@ it('pipes the embedded daemon bootstrap over SSH with the GitHub release source'
   );
   expect(readInstallScript()).toContain('https://github.com/$REPO/releases/download/v$VERSION');
   expect(readInstallScript()).toContain('puddled-v$VERSION-$OS-$ARCH.tar.gz');
+});
+
+describe('Windows standalone launchers (any OS)', () => {
+  it('reaches a sibling root through %~dp0 so no literal profile path enters the batch file', () => {
+    expect(
+      windowsStandaloneLauncher(
+        'C:\\Users\\Zoë\\AppData\\Local\\puddle\\cli',
+        'C:\\Users\\Zoë\\AppData\\Local\\puddle\\bin',
+      ),
+    ).toBe(
+      '@rem puddle standalone launcher\r\n' +
+        '@(goto) 2>nul & "%~dp0..\\cli\\current\\bin\\node.exe" "%~dp0..\\cli\\current\\cli\\index.js" %*\r\n',
+    );
+    expect(windowsStandaloneLauncher('C:\\p\\cli', 'C:\\p\\bin', 'pudl')).toContain(
+      '"%~dp0..\\cli\\current\\cli\\pudl.js" %*\r\n',
+    );
+  });
+
+  it('falls back to the absolute root across drives', () => {
+    expect(windowsStandaloneLauncher('D:\\tools\\puddle', 'C:\\bin')).toBe(
+      '@rem puddle standalone launcher\r\n' +
+        '@(goto) 2>nul & "D:\\tools\\puddle\\current\\bin\\node.exe" "D:\\tools\\puddle\\current\\cli\\index.js" %*\r\n',
+    );
+  });
+
+  it('upgrades through the release installer with Windows PowerShell, never touching PATH', () => {
+    const installation = {
+      root: 'C:\\Users\\a\\AppData\\Local\\puddle\\cli',
+      release: 'C:\\Users\\a\\AppData\\Local\\puddle\\cli\\versions\\1.2.3.abc',
+      launcher: 'C:\\Users\\a\\AppData\\Local\\puddle\\bin\\puddle.cmd',
+    };
+    expect(
+      windowsUpgradeCommand(installation, '1.2.4', 'example/puddle', { SystemRoot: 'C:\\Win' }),
+    ).toEqual({
+      file: 'C:\\Win\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+      args: [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        win32.join(installation.release, 'cli', 'install-cli.ps1'),
+        '-Prefix',
+        installation.root,
+        '-BinDir',
+        'C:\\Users\\a\\AppData\\Local\\puddle\\bin',
+        '-NoPathUpdate',
+        '-Version',
+        '1.2.4',
+        '-Repo',
+        'example/puddle',
+      ],
+    });
+  });
+});
+
+// Every run passes -NoPathUpdate: the default edits the real HKCU PATH, which
+// scripts/test-cli-tarball.mjs exercises on disposable CI runners only.
+describe.runIf(process.platform === 'win32')('Windows standalone CLI installer', () => {
+  function windowsFixture() {
+    const temp = mkdtempSync(join(tmpdir(), 'puddle-ps-installer-'));
+    temps.push(temp);
+    const home = join(temp, 'home');
+    const localAppData = join(home, 'AppData', 'Local');
+    const prefix = join(localAppData, 'puddle', 'cli');
+    const bin = join(localAppData, 'puddle', 'bin');
+    const launcher = join(bin, 'puddle.cmd');
+    const stage = join(temp, 'stage', 'puddle-cli-v1.2.3');
+    const archive = join(temp, `puddle-cli-v1.2.3-win32-x64.zip`);
+    mkdirSync(localAppData, { recursive: true });
+    mkdirSync(join(stage, 'cli', 'public'), { recursive: true });
+    mkdirSync(join(stage, 'bin'));
+    try {
+      linkSync(process.execPath, join(stage, 'bin', 'node.exe')); // no privilege, no 80 MB copy
+    } catch {
+      copyFileSync(process.execPath, join(stage, 'bin', 'node.exe'));
+    }
+    writeFileSync(join(stage, 'cli', 'index.js'), "console.log('fixture CLI help');\n");
+    writeFileSync(join(stage, 'puddle.cmd'), '@"%~dp0bin\\node.exe" "%~dp0cli\\index.js" %*\r\n');
+    writeFileSync(join(stage, 'STANDALONE'), 'puddle-cli\n');
+    writeFileSync(join(stage, 'VERSION'), '1.2.3\n');
+    for (const file of [
+      'host-control.mjs',
+      'public/index.html',
+      'install.sh',
+      'install-cli.sh',
+      'install-cli.ps1',
+    ])
+      writeFileSync(join(stage, 'cli', file), 'fixture');
+    const pack = () => {
+      rmSync(archive, { force: true });
+      // Stored, not deflated: the fixture carries a whole node.exe.
+      execFileSync(join(systemRoot, 'System32', 'tar.exe'), [
+        '-a',
+        '--options',
+        'zip:compression=store',
+        '-c',
+        '-f',
+        archive,
+        '-C',
+        join(temp, 'stage'),
+        'puddle-cli-v1.2.3',
+      ]);
+      const hash = createHash('sha256').update(readFileSync(archive)).digest('hex');
+      writeFileSync(`${archive}.sha256`, `${hash}  puddle-cli-v1.2.3-win32-x64.zip\n`);
+    };
+    pack();
+    const install = (args: string[] = []) =>
+      execFileSync(
+        windowsPowerShell,
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-File',
+          powershellInstaller,
+          '-Archive',
+          archive,
+          '-Sums',
+          `${archive}.sha256`,
+          '-NoPathUpdate',
+          ...args,
+        ],
+        { env: { ...process.env, LOCALAPPDATA: localAppData }, encoding: 'utf8', stdio: 'pipe' },
+      );
+    const current = () => readlinkSync(join(prefix, 'current'));
+    return { temp, home, prefix, bin, launcher, stage, archive, pack, install, current };
+  }
+
+  const runLauncher = (launcher: string, args: string[]) =>
+    execFileSync(
+      join(systemRoot, 'System32', 'cmd.exe'),
+      ['/d', '/s', '/c', `""${launcher}" ${args.join(' ')}"`],
+      {
+        encoding: 'utf8',
+        windowsVerbatimArguments: true,
+      },
+    );
+
+  it('installs into %LOCALAPPDATA%, keeps immutable trees on reinstall and removes cleanly', async () => {
+    const f = windowsFixture();
+    f.install();
+    const prefix = realpathSync(f.prefix);
+    expect(readFileSync(f.launcher, 'utf8')).toBe(
+      windowsStandaloneLauncher(prefix, realpathSync(f.bin)),
+    );
+    expect(readFileSync(f.launcher, 'utf8')).toContain('%~dp0..\\cli\\current\\bin\\node.exe');
+    expect(runLauncher(f.launcher, ['--help'])).toContain('fixture CLI help');
+    expect(JSON.parse(readFileSync(join(prefix, 'installation.json'), 'utf8'))).toEqual({
+      kind: 'puddle-cli',
+      launcher: join(realpathSync(f.bin), 'puddle.cmd'),
+    });
+    const previous = f.current();
+    expect(readdirSync(join(prefix, 'versions'))).toHaveLength(1);
+
+    f.install();
+    expect(f.current()).not.toBe(previous);
+    expect(existsSync(join(previous, 'cli', 'public', 'index.html'))).toBe(true);
+    expect(existsSync(join(prefix, '.install-lock'))).toBe(false);
+
+    const release = realpathSync(join(prefix, 'current'));
+    const installation = standaloneInstallation(
+      join(release, 'cli', 'index.js'),
+      join(release, 'bin', 'node.exe'),
+      'win32',
+    );
+    expect(installation).toEqual({
+      root: prefix,
+      release,
+      launcher: join(realpathSync(f.bin), 'puddle.cmd'),
+    });
+    await removeStandaloneCli(installation!, 'win32');
+    expect(existsSync(f.launcher)).toBe(false);
+    expect(existsSync(f.prefix)).toBe(false);
+  });
+
+  it('owns pudl.cmd only while releases ship it and never overwrites an unrelated one', async () => {
+    const f = windowsFixture();
+    const script = join(f.bin, 'pudl.cmd');
+    writeFileSync(join(f.stage, 'pudl.cmd'), '@exit /b 0\r\n');
+    writeFileSync(join(f.stage, 'cli', 'pudl.js'), "console.log('fixture pudl help');\n");
+    f.pack();
+    f.install();
+    expect(runLauncher(script, ['--help'])).toContain('fixture pudl help');
+
+    rmSync(join(f.stage, 'pudl.cmd'));
+    f.pack();
+    f.install();
+    expect(existsSync(script)).toBe(false);
+
+    writeFileSync(script, 'unrelated');
+    writeFileSync(join(f.stage, 'pudl.cmd'), '@exit /b 0\r\n');
+    f.pack();
+    const previous = f.current();
+    expect(() => f.install()).toThrow('unrelated launcher');
+    expect(readFileSync(script, 'utf8')).toBe('unrelated');
+    expect(f.current()).toBe(previous);
+
+    rmSync(script);
+    f.install();
+    const release = realpathSync(join(f.prefix, 'current'));
+    const installation = standaloneInstallation(
+      join(release, 'cli', 'index.js'),
+      join(release, 'bin', 'node.exe'),
+      'win32',
+    )!;
+    expect(installation.scriptLauncher).toBe(join(realpathSync(f.bin), 'pudl.cmd'));
+    writeFileSync(script, 'replacement');
+    await expect(removeStandaloneCli(installation, 'win32')).rejects.toThrow(
+      'pudl launcher was replaced',
+    );
+    expect(existsSync(f.launcher)).toBe(true);
+  });
+
+  it('rejects checksum failures and broken archives before replacing a working installation', () => {
+    const f = windowsFixture();
+    f.install();
+    const previous = f.current();
+    writeFileSync(`${f.archive}.sha256`, `${'0'.repeat(64)}  puddle-cli-v1.2.3-win32-x64.zip\n`);
+    expect(() => f.install()).toThrow('checksum mismatch');
+    writeFileSync(`${f.archive}.sha256`, '');
+    expect(() => f.install()).toThrow('missing or ambiguous checksum');
+    writeFileSync(join(f.stage, 'cli', 'index.js'), 'process.exit(1);\n');
+    f.pack();
+    expect(() => f.install()).toThrow('CLI smoke test failed');
+    rmSync(join(f.stage, 'cli', 'public', 'index.html'));
+    f.pack();
+    expect(() => f.install()).toThrow('archive is missing');
+    expect(f.current()).toBe(previous);
+    expect(existsSync(join(f.prefix, '.install-lock'))).toBe(false);
+    expect(readdirSync(join(f.prefix, 'versions'))).toHaveLength(1);
+  });
+
+  it('refuses an unrelated launcher without overwriting it', () => {
+    const f = windowsFixture();
+    mkdirSync(f.bin, { recursive: true });
+    writeFileSync(f.launcher, 'another installation');
+    expect(() => f.install()).toThrow('Refusing to replace an unrelated launcher');
+    expect(readFileSync(f.launcher, 'utf8')).toBe('another installation');
+    expect(existsSync(join(f.prefix, 'current'))).toBe(false);
+  });
+
+  it('refuses unmanaged, junction or writable-by-others installation roots', () => {
+    const f = windowsFixture();
+    const unmanaged = join(f.home, 'unmanaged');
+    mkdirSync(unmanaged);
+    writeFileSync(join(unmanaged, 'keep'), 'keep');
+    expect(() => f.install(['-Prefix', unmanaged])).toThrow('non-empty unmanaged');
+    const alias = join(f.temp, 'alias');
+    symlinkSync(f.home, alias, 'junction');
+    expect(() => f.install(['-Prefix', alias])).toThrow('must not be a symlink or junction');
+    expect(() => f.install(['-Prefix', `${alias}\\`])).toThrow('must not be a symlink or junction');
+    const shared = join(f.home, 'shared');
+    mkdirSync(shared);
+    execFileSync(join(systemRoot, 'System32', 'icacls.exe'), [
+      shared,
+      '/grant',
+      '*S-1-1-0:(OI)(CI)M',
+    ]);
+    expect(() => f.install(['-Prefix', shared])).toThrow('not writable by others');
+    expect(readFileSync(join(unmanaged, 'keep'), 'utf8')).toBe('keep');
+  });
+
+  it('rejects invalid versions, relative paths and overlapping operations', () => {
+    const f = windowsFixture();
+    expect(() => f.install(['-Version', '..\\..\\outside'])).toThrow('invalid release version');
+    expect(() => f.install(['-Prefix', 'relative\\cli'])).toThrow(
+      '-Prefix must be an absolute path',
+    );
+    f.install();
+    mkdirSync(join(f.prefix, '.install-lock'));
+    expect(() => f.install()).toThrow('another installer is running');
+    expect(existsSync(join(f.prefix, '.install-lock'))).toBe(true);
+  });
+
+  it('does not treat an unmanaged standalone archive as an installation', () => {
+    const f = windowsFixture();
+    expect(() =>
+      standaloneInstallation(join(f.stage, 'cli', 'index.js'), process.execPath, 'win32'),
+    ).toThrow(expect.objectContaining({ hint: expect.stringContaining('install.ps1') }));
+  });
 });

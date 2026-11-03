@@ -6,10 +6,20 @@
  * `npm i -g @puddle-code/cli` ships the whole cockpit (SPEC §2: UI updates
  * ride the CLI, hosts only update when the protocol breaks).
  */
-import { cpSync, existsSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
+
+/**
+ * .gitattributes keeps installers LF, but a Windows checkout made before it
+ * can still hold CRLF, which a remote sh rejects (`$'\r': command not found`).
+ */
+function copyInstaller(from, to) {
+  cpSync(from, to);
+  const text = readFileSync(to, 'utf8');
+  if (text.includes('\r\n')) writeFileSync(to, text.replaceAll('\r\n', '\n'));
+}
 
 const pkgRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const repoRoot = resolve(pkgRoot, '..', '..');
@@ -50,8 +60,11 @@ await build({
   logLevel: 'warning',
 });
 
-cpSync(join(repoRoot, 'scripts/install.sh'), join(pkgRoot, 'dist/install.sh'));
-cpSync(join(repoRoot, 'scripts/install-cli.sh'), join(pkgRoot, 'dist/install-cli.sh'));
+// install-cli.ps1 upgrades a standalone Windows CLI from its own release tree;
+// the two sh installers still bootstrap Linux and macOS hosts from Windows.
+for (const installer of ['install.sh', 'install-cli.sh', 'install-cli.ps1']) {
+  copyInstaller(join(repoRoot, 'scripts', installer), join(pkgRoot, 'dist', installer));
+}
 
 // npm only renders a README living in the package directory, and shows no
 // changelog at all — so surface both by copying them in at build time (both

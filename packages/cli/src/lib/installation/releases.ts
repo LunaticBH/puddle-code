@@ -1,6 +1,42 @@
 import { CliError } from '../types.js';
 import { repoSlug } from '../version.js';
 
+/** A component the release workflow publishes as a self-contained archive. */
+export type ReleaseArchive = 'puddled' | 'puddle-cli';
+
+/**
+ * The `<platform>-<arch>` token of release archives (docs/windows.md §14).
+ * Windows arm64 is not published yet; Windows on Arm runs the x64 build
+ * under emulation.
+ */
+export function releaseTarget(
+  platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch,
+): string {
+  if (platform === 'win32') return 'win32-x64';
+  return `${platform}-${arch === 'arm64' ? 'arm64' : 'x64'}`;
+}
+
+/**
+ * `puddled-v<v>-<target>.tar.gz`, or `.zip` on Windows, matching
+ * scripts/build-tarball.mjs and build-cli-tarball.mjs; SHA256SUMS lists the
+ * same names.
+ */
+export function releaseArchiveName(
+  component: ReleaseArchive,
+  version: string,
+  platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch,
+): string {
+  const extension = platform === 'win32' ? 'zip' : 'tar.gz';
+  return `${component}-v${version}-${releaseTarget(platform, arch)}.${extension}`;
+}
+
+/** The download URL of one asset of the `v<version>` release. */
+export function releaseAssetUrl(slug: string, version: string, asset: string): string {
+  return `https://github.com/${slug}/releases/download/v${version}/${asset}`;
+}
+
 /**
  * Release-version resolution for `puddle install`/`upgrade` (SPEC §10):
  * "newest" means the repository's latest published release, resolved
