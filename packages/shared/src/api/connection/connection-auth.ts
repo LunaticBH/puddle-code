@@ -73,10 +73,17 @@ export const proxyGrantRequestSchema = proxyTargetSchema.extend({
 });
 export const proxyGrantResponseSchema = z.object({ url: z.string().url() });
 export const proxyExchangeSchema = z.object({ invitation: invitationSchema }).strict();
-export const launcherRequestSchema = z
-  .object({ t: z.literal('invite'), secret: z.string().max(128).optional() })
-  .strict();
+export const launcherRequestSchema = z.discriminatedUnion('t', [
+  z.object({ t: z.literal('invite'), secret: z.string().max(128).optional() }).strict(),
+  /**
+   * Stop the cockpit cleanly (protocol 25.7): Windows has no SIGTERM to send
+   * another process, so `puddle kill`/`refresh` ask over the launcher pipe.
+   */
+  z.object({ t: z.literal('shutdown'), secret: z.string().max(128).optional() }).strict(),
+]);
 export const launcherResponseSchema = z.object({ url: z.string().url() }).strict();
+/** Acknowledges a launcher `shutdown`; the cockpit then closes (25.7). */
+export const launcherShutdownResponseSchema = z.object({ t: z.literal('stopping') }).strict();
 export const cockpitStatusSchema = z.object({
   instance: z.string().uuid(),
   refreshId: z.string().uuid().nullable(),

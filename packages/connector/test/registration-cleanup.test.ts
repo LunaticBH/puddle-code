@@ -51,8 +51,11 @@ it('retires a replaced registration without unregistering a disabled or newly en
     expect(readPrivateJson(join(directory, 'config.json'))).toEqual({ ...next, enabled: true });
     expect(hasRegistrationCleanup(directory)).toBe(true);
     const file = join(directory, 'retired', readdirSync(join(directory, 'retired'))[0]!);
-    expect(statSync(file).mode & 0o777).toBe(0o600);
-    expect(statSync(join(directory, 'retired')).mode & 0o777).toBe(0o700);
+    // Unix modes; a Windows home is private through its DACL instead.
+    if (process.platform !== 'win32') {
+      expect(statSync(file).mode & 0o777).toBe(0o600);
+      expect(statSync(join(directory, 'retired')).mode & 0o777).toBe(0o700);
+    }
     expect(readPrivateJson(file)).toEqual(old);
     fetch.mockImplementation(async (_url, request) => {
       expect(JSON.parse(String(request.body))).toEqual({ credential: old.credential });

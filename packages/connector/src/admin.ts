@@ -14,9 +14,9 @@ import {
 } from '@puddle/shared';
 import {
   atomicPrivateJson,
+  checkIpcEndpoint,
   ipcPath,
   jsonLines,
-  privatePath,
   readPrivateJson,
 } from '@puddle/shared/node';
 import { installConnectorSupervisor, supervisorKind } from './supervisor.js';
@@ -35,7 +35,8 @@ async function exchange(
   profile: string,
 ): Promise<RemoteAdminResponse> {
   const path = ipcPath(home, `remote-${profile}`);
-  privatePath(path);
+  // A missing Windows pipe reports ENOENT from the connect below instead.
+  checkIpcEndpoint(path);
   return new Promise((resolve, reject) => {
     const socket = connect(path);
     const timer = setTimeout(() => {
