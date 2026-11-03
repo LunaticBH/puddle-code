@@ -21,7 +21,7 @@ import {
   type Notebook,
 } from './notebook-format';
 import type { TextPreviewProps } from '../previews/preview-controls';
-import { bindScrollRestoration } from '../previews/scroll-restoration';
+import { bindNotebookScrollRestoration } from './notebook-scroll-restoration';
 import { WidgetContext, useNotebookWidgets } from './widgets/context';
 import { useViewStateKey } from '../tabs/view-state-context';
 
@@ -66,8 +66,7 @@ export function NotebookPreview({
   const ready = parsed.notebook !== null;
   useLayoutEffect(() => {
     if (!scroller.current || !content.current || !ready) return;
-    const binding = bindScrollRestoration(scroller.current, content.current, viewKey);
-    return () => binding.dispose();
+    return bindNotebookScrollRestoration(scroller.current, content.current, viewKey);
   }, [viewKey, ready]);
   useLayoutEffect(() => {
     if (!reveal.current) return;

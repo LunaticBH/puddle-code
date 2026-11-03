@@ -32,6 +32,7 @@ export function NotebookCellEditor({
   match?: { start: number; end: number };
 }) {
   const settings = useClientSettings();
+  const lineHeight = Math.round(settings.editorFontSize * 1.5);
   const notebook = useContext(NotebookRenderingContext);
   const [mounted, setMounted] = useState<monaco.editor.ITextModel | null>(null);
   useEffect(() => {
@@ -50,6 +51,8 @@ export function NotebookCellEditor({
   const view = useRef<monaco.editor.ICodeEditorViewState | null>(null);
   const callbacks = useRef({ onChange, onExecute, onEscape, onSplit, onSave });
   callbacks.current = { onChange, onExecute, onEscape, onSplit, onSave };
+  const focusRef = useRef(focus);
+  focusRef.current = focus;
   const matchRef = useRef(match);
   matchRef.current = match;
   const showMatch = (instance: monaco.editor.IStandaloneCodeEditor) => {
@@ -67,7 +70,8 @@ export function NotebookCellEditor({
     if (editor.current) showMatch(editor.current);
   }, [match]);
   const [visible, setVisible] = useState(false);
-  const [height, setHeight] = useState(Math.max(64, value.split('\n').length * 22 + 24));
+  const [hasFocus, setHasFocus] = useState(false);
+  const [height, setHeight] = useState(Math.max(64, value.split('\n').length * lineHeight + 24));
   useEffect(() => {
     const observer = new IntersectionObserver(([entry]) => setVisible(!!entry?.isIntersecting), {
       rootMargin: '600px',
@@ -98,9 +102,39 @@ export function NotebookCellEditor({
     if (focus) editor.current?.focus();
   }, [focus]);
   return (
-    <div ref={host} style={{ height }} className="min-w-0 rounded-md bg-surface">
-      {(visible || focus) && (
+    <div
+      ref={host}
+      style={{ height }}
+      className="relative min-w-0 rounded-md bg-surface"
+      onWheelCapture={(event) => {
+        // Vertical gestures belong to the notebook even during an editor relayout.
+        // Leave horizontal gestures to Monaco for unwrapped source lines.
+        if (
+          !event.shiftKey &&
+          Math.abs(event.deltaY) >= Math.abs(event.deltaX) &&
+          !(event.target as HTMLElement).closest(
+            '.overflowingContentWidgets,.overflowingOverlayWidgets,.contentWidgets,.overlayWidgets',
+          )
+        )
+          event.stopPropagation();
+      }}
+    >
+      {!mounted && (
+        <pre
+          aria-hidden="true"
+          className="absolute inset-0 overflow-hidden px-2 py-3 font-mono text-fg"
+          style={{
+            fontSize: settings.editorFontSize,
+            lineHeight: `${lineHeight}px`,
+            whiteSpace: settings.editorWordWrap ? 'pre-wrap' : 'pre',
+          }}
+        >
+          {value}
+        </pre>
+      )}
+      {(visible || focus || hasFocus) && (
         <Editor
+          loading={null}
           theme={THEME_NAME}
           defaultValue={value}
           defaultLanguage={language}
@@ -116,8 +150,28 @@ export function NotebookCellEditor({
             setMounted(instance.getModel());
             registerEditorKeybindings(instance, { onSave: () => callbacks.current.onSave() });
             if (view.current) instance.restoreViewState(view.current);
-            const resize = () => setHeight(Math.max(64, instance.getContentHeight()));
+            // Cell source expands vertically; never retain an internal vertical viewport.
+            instance.setScrollTop(0);
+            let layingOut = false;
+            const resize = () => {
+              if (layingOut || !host.current || !host.current.clientWidth) return;
+              layingOut = true;
+              // Measure wrapping at the current width before sizing the full source.
+              instance.layout({
+                width: host.current.clientWidth,
+                height: host.current.clientHeight,
+              });
+              const height = Math.max(64, instance.getContentHeight());
+              host.current.style.height = `${height}px`;
+              instance.layout({ width: host.current.clientWidth, height });
+              setHeight(height);
+              layingOut = false;
+            };
             const size = instance.onDidContentSizeChange(resize);
+            const observer = new ResizeObserver(resize);
+            observer.observe(host.current!);
+            const focused = instance.onDidFocusEditorWidget(() => setHasFocus(true));
+            const blurred = instance.onDidBlurEditorWidget(() => setHasFocus(false));
             const change = instance.onDidChangeModelContent(() => {
               if (!syncing.current) callbacks.current.onChange(instance.getValue());
             });
@@ -150,6 +204,9 @@ export function NotebookCellEditor({
             );
             instance.onDidDispose(() => {
               size.dispose();
+              observer.disconnect();
+              focused.dispose();
+              blurred.dispose();
               scroll.dispose();
               cursor.dispose();
               change.dispose();
@@ -158,18 +215,19 @@ export function NotebookCellEditor({
             });
             resize();
             showMatch(instance);
-            if (focus) instance.focus();
+            if (focusRef.current) instance.focus();
           }}
           beforeMount={() => {
             if (model.current) monaco.editor.setModelLanguage(model.current, language);
           }}
           options={{
             ariaLabel: label,
-            automaticLayout: true,
+            automaticLayout: false,
             fontFamily: getComputedStyle(document.documentElement)
               .getPropertyValue('--font-mono')
               .trim(),
             fontSize: settings.editorFontSize,
+            lineHeight,
             ...editorIndentationOptions(settings.editorTabSize),
             wordWrap: settings.editorWordWrap ? 'on' : 'off',
             minimap: { enabled: false },
@@ -184,7 +242,7 @@ export function NotebookCellEditor({
             renderLineHighlight: 'none',
             // Monaco 0.55's delayed word highlighter rejects on short-lived cell disposal.
             occurrencesHighlight: 'off',
-            scrollbar: { alwaysConsumeMouseWheel: false },
+            scrollbar: { alwaysConsumeMouseWheel: false, vertical: 'hidden' },
           }}
           onChange={() => {
             if (editor.current) view.current = editor.current.saveViewState();

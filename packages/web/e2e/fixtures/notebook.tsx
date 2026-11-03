@@ -1,4 +1,5 @@
-import '../../src/features/editor/monaco/monaco-setup';
+import { monaco } from '../../src/features/editor/monaco/monaco-setup';
+import { updateClientSettings } from '../../src/lib/settings/client-settings';
 import { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -14,6 +15,16 @@ import '../../src/styles/app.css';
 import { applyTheme } from '../../src/lib/appearance/theme';
 
 applyTheme('dark');
+
+declare global {
+  interface Window {
+    notebookFixture: {
+      monaco: typeof monaco;
+      settings: typeof updateClientSettings;
+    };
+  }
+}
+window.notebookFixture = { monaco, settings: updateClientSettings };
 
 const query = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 const source = {
