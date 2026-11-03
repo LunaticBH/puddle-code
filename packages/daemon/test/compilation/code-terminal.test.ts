@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { compilationRunResponseSchema } from '@puddle/shared';
+import { system32Path } from '@puddle/shared/node/platform';
 import { CodeProvider, createCodeProviders } from '../../src/code/provider.js';
 import { createCodeTerminalLauncher } from '../../src/code/terminal.js';
 import { CODE_RECIPES } from '../../src/code/recipes.js';
@@ -18,6 +19,26 @@ import { CompilationService } from '../../src/compilation/service.js';
 import { commandTemplate } from '../../src/compilation/command-template.js';
 import { NO_SESSION } from '../../src/http/routes/worktrees/worktree-shared.js';
 import { fixture, waitFor, type Fixture } from '../helpers/daemon-fixtures.js';
+
+const windows = process.platform === 'win32';
+
+/**
+ * Shell input that prints `<first>-<second>` without its own echo containing
+ * that text. On Windows the session shell is cmd.exe, which drops the `^`.
+ */
+function shellPrint(first: string, second: string): string {
+  return windows ? `echo ${first}-^${second}\r` : `printf '${first}-%s\\n' ${second}\r`;
+}
+
+/**
+ * The fake compiler's product. POSIX writes an sh script. Windows runs only
+ * a real `.exe`, so the compiler links Node there: started without arguments
+ * on a terminal, Node loads NODE_REPL_EXTERNAL_MODULE (set by `setup`) in
+ * place of its REPL, which is the same prompt-and-reply programme.
+ */
+const BUILD_BINARY = windows
+  ? 'fs.linkSync(process.execPath, process.argv[3]);'
+  : `fs.writeFileSync(process.argv[3], '#!/bin/sh\\nprintf "BINARY_READY\\\\n"\\nread value\\nprintf "BINARY_REPLY:%s\\\\n" "$value"\\n', {mode:0o700});`;
 
 const fixtures: Fixture[] = [];
 const services: CompilationService[] = [];
@@ -36,8 +57,17 @@ afterEach(async () => {
 function setup() {
   const f = fixture();
   fixtures.push(f);
-  vi.stubEnv('SHELL', '/bin/bash');
+  vi.stubEnv('SHELL', windows ? system32Path('cmd.exe') : '/bin/bash');
   vi.stubEnv('HOME', f.paths.home);
+  if (windows) {
+    const binary = join(f.paths.home, 'binary.cjs');
+    writeFileSync(
+      binary,
+      "console.log('BINARY_READY'); require('node:readline').createInterface({ input: process.stdin })" +
+        ".once('line', (value) => { console.log('BINARY_REPLY:' + value); process.exit(0); });",
+    );
+    vi.stubEnv('NODE_REPL_EXTERNAL_MODULE', binary);
+  }
   // CI colours Node's inspected booleans inside a PTY. Exercise that path even
   // when the developer's terminal disables colours, and compare rendered text.
   vi.stubEnv('FORCE_COLOR', '1');
@@ -90,12 +120,12 @@ describe('programme terminals', () => {
     f.ptys.write(terminal.id, 'agent', 'reader\r');
     await waitFor(() => output().includes('REPLY:reader'));
     await waitFor(() => output().includes('Process exited with status 0'));
-    f.ptys.write(terminal.id, 'agent', "printf 'SHELL-%s\\n' READY\r");
+    f.ptys.write(terminal.id, 'agent', shellPrint('SHELL', 'READY'));
     await waitFor(() => output().includes('SHELL-READY'));
     expect(existsSync(join(root, 'unwanted'))).toBe(false);
     await f.service.kill(terminal.id);
     await f.service.resume(terminal.id);
-    f.ptys.write(terminal.id, 'agent', "printf 'RESUMED-%s\\n' SHELL\r");
+    f.ptys.write(terminal.id, 'agent', shellPrint('RESUMED', 'SHELL'));
     await waitFor(() => output().includes('RESUMED-SHELL'));
     expect(output().match(/PROGRAMME_READY true true/g)).toHaveLength(1);
   });
@@ -119,7 +149,7 @@ describe('programme terminals', () => {
     await waitFor(() => output().includes('SERVER_READY'));
     f.ptys.write(id, 'agent', '\x03');
     await waitFor(() => output().includes('Process exited with status 130'));
-    f.ptys.write(id, 'agent', "printf 'INTERRUPTED-%s\\n' SHELL\r");
+    f.ptys.write(id, 'agent', shellPrint('INTERRUPTED', 'SHELL'));
     await waitFor(() => output().includes('INTERRUPTED-SHELL'));
   });
 
@@ -136,7 +166,7 @@ describe('programme terminals', () => {
       if (fs.readFileSync(process.argv[2], 'utf8') === 'fail') {
         console.error('BUILD_FAILED'); process.exit(2);
       }
-      fs.writeFileSync(process.argv[3], '#!/bin/sh\\nprintf "BINARY_READY\\\\n"\\nread value\\nprintf "BINARY_REPLY:%s\\\\n" "$value"\\n', {mode:0o700});
+      ${BUILD_BINARY}
     `,
       );
       const entry = CODE_RECIPES.find((r) => r.id === language)!;
@@ -174,7 +204,8 @@ describe('programme terminals', () => {
     writeFileSync(join(f.repoPath, 'main.js'), '');
     const completions: Array<() => void> = [];
     const alias = join(f.paths.home, 'repo-alias');
-    symlinkSync(f.repoPath, alias);
+    // A junction needs no privilege on Windows and resolves like a symlink.
+    symlinkSync(f.repoPath, alias, 'junction');
     const directories: string[] = [];
     const terminal = await f.service.create({ kind: 'terminal', project_id: f.ids.project });
     const provider = new CodeProvider(
