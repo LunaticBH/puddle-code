@@ -20,6 +20,11 @@
  *       ├── puddled.mjs    # esbuild bundle (daemon + shared + hono + ws + zod + yazl)
  *       ├── host-control.mjs # private control relay and host-only legacy inspection
  *       └── node_modules/  # pruned node-pty, better-sqlite3, bindings, file-uri-to-path
+ *
+ * On Windows the same tree ships as puddled-v<v>-win32-<arch>.zip (docs/windows.md):
+ * bin\node.exe, node-pty's win32 prebuilds (conpty and winpty, no .pdb), and
+ * puddled.cmd / puddle-connector.cmd for humans. The CLI and desktop start
+ * bin\node.exe on daemon\puddled.mjs directly, never through cmd.exe.
  */
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -39,7 +44,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 
-import { stageNodeRuntime } from './lib/node-runtime.mjs';
+import { archiveTool, nodeBinary, stageNodeRuntime } from './lib/node-runtime.mjs';
 import { smokePuddlang } from './lib/puddlang-smoke.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -66,9 +71,10 @@ if (!connectorMatch) fail('cannot read REMOTE_PROTOCOL_VERSION');
 const outDir = resolve(repoRoot, flag('--out-dir') ?? 'dist-release');
 const stageOnly = args.includes('--stage-only');
 
-const platform = process.platform === 'darwin' ? 'darwin' : 'linux';
-if (process.platform !== 'darwin' && process.platform !== 'linux') {
-  fail(`unsupported build platform ${process.platform}: tarballs target linux and darwin only`);
+const windows = process.platform === 'win32';
+const platform = windows ? 'win32' : process.platform === 'darwin' ? 'darwin' : 'linux';
+if (process.platform !== 'darwin' && process.platform !== 'linux' && !windows) {
+  fail(`unsupported build platform ${process.platform}: archives target linux, darwin and win32`);
 }
 const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
 const target = `${platform}-${arch}`;
@@ -139,7 +145,9 @@ function copyNativePackages() {
   cpSync(join(pty, 'package.json'), join(ptyDest, 'package.json'));
   const ptyBuild = join(pty, 'build', 'Release');
   const ptyPrebuild = join(pty, 'prebuilds', target);
-  if (existsSync(ptyBuild)) {
+  if (windows) {
+    copyWindowsPty(ptyBuild, ptyPrebuild, ptyDest);
+  } else if (existsSync(ptyBuild)) {
     cpSync(ptyBuild, join(ptyDest, 'build', 'Release'), { recursive: true, dereference: true });
   } else if (existsSync(ptyPrebuild)) {
     cpSync(ptyPrebuild, join(ptyDest, 'prebuilds', target), {
@@ -179,6 +187,24 @@ function copyNativePackages() {
   log('copied pruned native packages');
 }
 
+/**
+ * node-pty's Windows post-install always leaves build/Release/conpty/ behind,
+ * even when the binaries come from prebuilds, so the directory alone proves
+ * nothing: look for the module itself. winpty stays for Windows builds that
+ * predate conpty support; debug symbols (most of the 30 MB) never ship.
+ */
+function copyWindowsPty(ptyBuild, ptyPrebuild, ptyDest) {
+  const source = existsSync(join(ptyBuild, 'conpty.node'))
+    ? [ptyBuild, join(ptyDest, 'build', 'Release')]
+    : existsSync(join(ptyPrebuild, 'conpty.node'))
+      ? [ptyPrebuild, join(ptyDest, 'prebuilds', target)]
+      : fail(`node-pty has no conpty.node in build/Release or prebuilds/${target}`);
+  copyFiltered(source[0], source[1], (p) => !p.endsWith('.pdb'));
+  if (!existsSync(join(source[1], 'conpty', 'conpty.dll'))) {
+    fail('node-pty is missing conpty/conpty.dll — run pnpm install here');
+  }
+}
+
 function copyFiltered(from, to, keep) {
   mkdirSync(to, { recursive: true });
   for (const entry of readdirSync(from, { withFileTypes: true })) {
@@ -189,8 +215,35 @@ function copyFiltered(from, to, keep) {
   }
 }
 
+/**
+ * A batch launcher for humans. cmd.exe reads batch files in the OEM code
+ * page, so the file holds no literal path: %~dp0 is the launcher's own
+ * directory, resolved by cmd itself.
+ */
+function writeWindowsLauncher(name, script) {
+  writeFileSync(
+    join(stage, `${name}.cmd`),
+    `@"%~dp0bin\\node.exe" "%~dp0daemon\\${script}" %*\r\n`,
+  );
+}
+
 /* 4 — launcher, VERSION, PROTOCOL, LICENSE. */
 function writeMetadata() {
+  if (windows) {
+    writeWindowsLauncher('puddled', 'puddled.mjs');
+    writeWindowsLauncher('puddle-connector', 'connector.mjs');
+  } else {
+    writePosixLaunchers();
+  }
+  writeFileSync(join(stage, 'VERSION'), `${version}\n`);
+  // Read directly by `puddle --version`; an offline inventory must never
+  // execute an unknown historical daemon just to discover compatibility.
+  writeFileSync(join(stage, 'PROTOCOL'), `${protocolVersion}\n`);
+  writeFileSync(join(stage, 'CONNECTOR_PROTOCOL'), `${connectorMatch[1]}\n`);
+  cpSync(join(repoRoot, 'LICENSE'), join(stage, 'LICENSE'));
+}
+
+function writePosixLaunchers() {
   // dirname of ~/.puddle/bin/current/puddled resolves THROUGH the `current`
   // symlink, so bin/node is found without readlink -f. install.sh writes
   // ~/.puddle/bin/puddled as an exec wrapper (never a symlink) for this reason.
@@ -204,16 +257,14 @@ function writeMetadata() {
     '#!/bin/sh\ndir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\nexec "$dir/bin/node" "$dir/daemon/connector.mjs" "$@"\n',
   );
   chmodSync(join(stage, 'puddle-connector'), 0o755);
-  writeFileSync(join(stage, 'VERSION'), `${version}\n`);
-  // Read directly by `puddle --version`; an offline inventory must never
-  // execute an unknown historical daemon just to discover compatibility.
-  writeFileSync(join(stage, 'PROTOCOL'), `${protocolVersion}\n`);
-  writeFileSync(join(stage, 'CONNECTOR_PROTOCOL'), `${connectorMatch[1]}\n`);
-  cpSync(join(repoRoot, 'LICENSE'), join(stage, 'LICENSE'));
 }
 
 /* 5 — smoke test: a broken bundle, missing banner, or wrong-ABI native dies here. */
 function smokeTest() {
+  if (windows) {
+    smokeTestWindows();
+    return;
+  }
   const out = execFileSync(join(stage, 'puddled'), ['--version'], { encoding: 'utf8' });
   if (!out.startsWith(`puddled ${version} `)) {
     fail(`smoke test failed: unexpected --version output ${JSON.stringify(out)}`);
@@ -225,8 +276,43 @@ function smokeTest() {
   log(`smoke test passed: ${out.trim()}; ${connector.trim()}`);
 }
 
+/**
+ * Windows starts bin\node.exe directly, as the supervisor does. node-pty loads
+ * conpty lazily (on the first spawn) and `--version` never opens the database,
+ * so both native modules are exercised explicitly from the staged tree.
+ */
+function smokeTestWindows() {
+  const node = nodeBinary(stage);
+  const run = (script) =>
+    execFileSync(node, [join(stage, 'daemon', script), '--version'], { encoding: 'utf8' });
+  const out = run('puddled.mjs');
+  if (!out.startsWith(`puddled ${version} `)) {
+    fail(`smoke test failed: unexpected --version output ${JSON.stringify(out)}`);
+  }
+  const connector = run('connector.mjs');
+  if (!connector.startsWith('puddle-connector ')) fail('connector smoke test failed');
+  execFileSync(
+    node,
+    [
+      '-e',
+      `const db = new (require('better-sqlite3'))(':memory:');
+      if (db.prepare('select 1 as one').get().one !== 1) process.exit(2);
+      db.close();
+      const term = require('node-pty').spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/c', 'exit 7'], {});
+      const timer = setTimeout(() => process.exit(3), 20000);
+      term.onExit(({ exitCode }) => { clearTimeout(timer); process.exit(exitCode === 7 ? 0 : 4); });`,
+    ],
+    { cwd: join(stage, 'daemon'), stdio: 'inherit' },
+  );
+  log(`smoke test passed: ${out.trim()}; ${connector.trim()}; conpty and sqlite load`);
+}
+
 /* 6 — tar + checksum. */
 function pack() {
+  if (windows) {
+    packWindows();
+    return;
+  }
   const tarball = join(outDir, `${name}.tar.gz`);
   execFileSync('tar', ['-czf', tarball, '-C', join(outDir, 'stage'), `puddled-v${version}`], {
     // Prevents AppleDouble ._* entries in tarballs built on macOS.
@@ -236,6 +322,24 @@ function pack() {
   // sha256sum -c compatible: "<hex>  <filename>".
   writeFileSync(`${tarball}.sha256`, `${digest}  ${name}.tar.gz\n`);
   log(`wrote ${tarball} (${(statSync(tarball).size / 1e6).toFixed(1)} MB)`);
+}
+
+/* System32's bsdtar writes a deflated zip from the suffix (-a). */
+function packWindows() {
+  const zip = join(outDir, `${name}.zip`);
+  rmSync(zip, { force: true });
+  execFileSync(archiveTool(), [
+    '-a',
+    '-c',
+    '-f',
+    zip,
+    '-C',
+    join(outDir, 'stage'),
+    `puddled-v${version}`,
+  ]);
+  const digest = createHash('sha256').update(readFileSync(zip)).digest('hex');
+  writeFileSync(`${zip}.sha256`, `${digest}  ${name}.zip\n`);
+  log(`wrote ${zip} (${(statSync(zip).size / 1e6).toFixed(1)} MB)`);
 }
 
 rmSync(stage, { recursive: true, force: true });
