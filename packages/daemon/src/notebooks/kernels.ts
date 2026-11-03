@@ -550,7 +550,8 @@ export class NotebookKernels {
  */
 export function programName(file: string, platform: NodeJS.Platform = process.platform): string {
   if (platform !== 'win32') return basename(file);
-  return win32.basename(file).toLowerCase().replace(/\.exe$/, '');
+  const name = win32.basename(file).toLowerCase();
+  return name.endsWith('.exe') ? name.slice(0, -'.exe'.length) : name;
 }
 
 /** Whether a relative command names a path (`./venv/bin/jupyter`, `.\venv\Scripts\jupyter`). */
