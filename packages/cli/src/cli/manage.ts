@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { chmod, copyFile, mkdir, rename, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { Session } from '@puddle/shared';
 import { installedVersion } from '../lib/installation/bootstrap.js';
 import {
@@ -22,6 +22,7 @@ import {
   isNewerVersion,
   pruneDesktopUpdateCache,
   stageDesktopUpdate,
+  uninstallWindowsDesktop,
 } from '../lib/installation/desktop-update.js';
 import { waitForHttp } from '../lib/transport/net.js';
 import { latestReleaseVersion } from '../lib/installation/releases.js';
@@ -196,8 +197,9 @@ export async function runUpgrade(
 
   const transport = new LocalTransport();
   const daemonInstalled = (await installedVersion(transport)) !== null;
-  const desktopInstalled =
-    process.platform === 'darwin' && (await findInstalledDesktopApp()) !== null;
+  // An installed macOS app or Windows per-user install upgrades in place.
+  const inPlaceDesktop = process.platform === 'darwin' || process.platform === 'win32';
+  const desktopInstalled = inPlaceDesktop && (await findInstalledDesktopApp()) !== null;
 
   // Daemon and desktop first; the CLI LAST — its upgrade replaces the code
   // that is running this very command, so nothing may run after it but us
@@ -205,7 +207,7 @@ export async function runUpgrade(
   if (daemonInstalled) await installDaemonAt(transport, cmd.version, cmd.tarball, logger);
   else logger.info('no daemon installed on this machine — skipping (puddle install daemon)');
   if (desktopInstalled) await setDesktop({ version: cmd.version, verb: 'upgrade' }, logger);
-  else if (process.platform === 'darwin') logger.info('no desktop app installed — skipping');
+  else if (inPlaceDesktop) logger.info('no desktop app installed — skipping');
   return upgradeCli(cmd.version, logger);
 }
 
@@ -235,11 +237,13 @@ async function setDesktop(
     }
     return installDesktopAppImage(opts.version, logger);
   }
+  const windows = process.platform === 'win32';
   const installed = await findInstalledDesktopApp();
-  const targetPath = installed?.appPath ?? (await desktopAppInstallPath());
+  // A first Windows installation goes wherever the per-user installer puts it.
+  const targetPath = installed?.appPath ?? (windows ? '' : await desktopAppInstallPath());
   if (targetPath === null) {
-    // Linux branched off above; this is the no-such-platform case (win32).
-    throw new CliError('not_installed', 'the desktop app ships for macOS and Linux only');
+    // Linux branched off above; this is the no-such-platform case.
+    throw new CliError('not_installed', 'the desktop app ships for macOS, Windows and Linux only');
   }
   if (installed !== null && (await isDesktopAppRunning(installed.appPath))) {
     throw new CliError(
@@ -273,7 +277,7 @@ async function setDesktop(
     if (installed === null) {
       throw new CliError(
         'not_installed',
-        'no Puddle desktop release is available for this macOS architecture',
+        `no Puddle desktop release is available for this ${windows ? 'Windows' : 'macOS'} architecture`,
       );
     }
     logger.info(`Puddle ${installed.version} is already the latest release`);
@@ -287,13 +291,20 @@ async function setDesktop(
   logger.info(move);
   const staged = await stageDesktopUpdate(update, { logger });
   await applyDesktopUpdate(staged, { targetPath, detach: false, relaunch: false, logger });
+  const installedPath = windows ? (await findInstalledDesktopApp())?.appPath : targetPath;
+  if (installedPath === undefined) {
+    throw new CliError(
+      'not_installed',
+      'the Puddle installer finished without registering the app',
+    );
+  }
   const protocol = componentProtocolForVersion(update.version);
   recordDesktopInstallation({
-    path: targetPath,
+    path: installedPath,
     version: update.version,
     ...(protocol ? { protocol } : {}),
   });
-  logger.info(`Puddle ${update.version} installed at ${targetPath}`);
+  logger.info(`Puddle ${update.version} installed at ${installedPath}`);
   return 0;
 }
 
@@ -375,6 +386,7 @@ export async function runRemove(
 }
 
 async function removeDesktop(yes: boolean, logger: Logger): Promise<number> {
+  if (process.platform === 'win32') return removeWindowsDesktop(yes, logger);
   if (process.platform !== 'darwin') {
     throw new CliError(
       'not_installed',
@@ -402,6 +414,33 @@ async function removeDesktop(yes: boolean, logger: Logger): Promise<number> {
   await rm(installed.appPath, { recursive: true, force: true });
   await pruneDesktopUpdateCache([]);
   logger.info(`deleted ${installed.appPath} (recent hosts kept in ~/.puddle/recent-hosts.json)`);
+  return 0;
+}
+
+/** Windows: the per-user installer's own uninstaller, run silently. */
+async function removeWindowsDesktop(yes: boolean, logger: Logger): Promise<number> {
+  const installed = await findInstalledDesktopApp();
+  if (installed === null) {
+    logger.info('no Puddle installation is registered for this Windows user — nothing to remove');
+    return 0;
+  }
+  if (await isDesktopAppRunning(installed.appPath)) {
+    throw new CliError('already_running', 'Puddle is running — quit it first');
+  }
+  const proceed = await confirm(
+    `Uninstall Puddle ${installed.version} from ${dirname(installed.appPath)}? Daemons and ` +
+      `their sessions are untouched.`,
+    { skip: yes },
+  );
+  if (!proceed) {
+    logger.info('nothing removed');
+    return 0;
+  }
+  await uninstallWindowsDesktop(installed);
+  await pruneDesktopUpdateCache([]);
+  logger.info(
+    `uninstalled Puddle ${installed.version} (recent hosts kept in ~/.puddle/recent-hosts.json)`,
+  );
   return 0;
 }
 

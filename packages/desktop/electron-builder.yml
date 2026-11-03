@@ -1,8 +1,9 @@
 # Packaging for the desktop shell (`pnpm --filter @puddle-code/desktop dist`).
 # The bundle is self-contained (dist/ carries main, preloads, install.sh and
 # the web UI); install.sh is READ from inside app.asar (Electron patches fs).
-# The SSH askpass helper is the sole unpacked file because Electron's
-# run-as-Node mode executes it as a real script from a child process.
+# The SSH askpass helper (with ssh-askpass.exe, its Windows launcher) is the
+# only unpacked code because Electron's run-as-Node mode executes it as a
+# real script from a child process.
 #
 # Developer ID signing is environment-driven: electron-builder signs when
 # CSC_LINK + CSC_KEY_PASSWORD are set, and the release workflow adds
@@ -18,7 +19,14 @@
 # Icon: build/icon.icns (mac, from the full-bleed icon-mac.svg — macOS 26+
 # applies its own squircle mask) and build/icon.png (linux, from icon.svg,
 # self-rounded) are picked up from the default buildResources dir — rendered
-# by scripts/render-icon.sh, and committed so CI needs no rasteriser.
+# by scripts/render-icon.sh, and committed so CI needs no rasteriser. Windows
+# converts the same 1024² build/icon.png into the executable's .ico.
+#
+# Windows (docs/windows.md): a per-user one-click NSIS installer, unsigned in
+# v1. The appId doubles as the Start Menu shortcut's AppUserModelID, which
+# main.ts sets so toasts appear. lib/installation/desktop-update.ts reads the
+# installer's registry keys through the pinned GUID (electron-builder's
+# default for this appId) and selects `*-x64-setup.exe`, so keep both stable.
 appId: code.puddle.desktop
 productName: Puddle
 copyright: Copyright © 2026 Yiding Song
@@ -30,6 +38,8 @@ files:
 asar: true
 asarUnpack:
   - dist/askpass-helper.cjs
+  # Windows only: OpenSSH's SSH_ASKPASS program (built by scripts/build.mjs).
+  - dist/ssh-askpass.exe
 mac:
   category: public.app-category.developer-tools
   hardenedRuntime: true
@@ -50,3 +60,18 @@ linux:
   target:
     - AppImage
   category: Development
+win:
+  # Puddle.exe: code and the update flow look for this name and for the
+  # uninstaller ("Uninstall Puddle.exe") beside it.
+  executableName: Puddle
+  target:
+    - target: nsis
+      arch:
+        - x64
+nsis:
+  oneClick: true
+  perMachine: false
+  guid: 21877822-4423-5e9b-90ab-0b75b071b1b1
+  # No spaces: GitHub renames them in asset names, which must match SHA256SUMS.
+  artifactName: ${productName}-${version}-${arch}-setup.${ext}
+  deleteAppDataOnUninstall: false

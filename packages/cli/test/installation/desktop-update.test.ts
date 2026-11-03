@@ -12,10 +12,14 @@ import {
   desktopUpdateAt,
   findInstalledDesktopApp,
   isNewerVersion,
+  nsisInstallerArguments,
   parseSums,
+  parseUninstallString,
   pickDesktopAsset,
   pruneDesktopUpdateCache,
   stageDesktopUpdate,
+  uninstallWindowsDesktop,
+  windowsInstalledApp,
   type DesktopUpdate,
 } from '../../src/lib/installation/desktop-update.js';
 import { latestReleaseVersion } from '../../src/lib/installation/releases.js';
@@ -241,21 +245,25 @@ describe('stageDesktopUpdate + applyDesktopUpdate (AppImage path)', () => {
     (input) =>
       Promise.resolve(String(input).endsWith('/sums') ? new Response(sums) : new Response(BODY));
 
-  it('downloads, verifies, and stages; the swap replaces the target and cleans up', async () => {
-    const staged = await stageDesktopUpdate(update, {
-      cacheDir: join(dir, 'cache'),
-      fetchFn: serve(`${sha256(BODY)}  ${NAME}\n`),
-    });
-    expect(staged.kind).toBe('appimage');
-    expect((await stat(staged.stagedPath)).mode & 0o100).toBeTruthy(); // executable
+  // The AppImage swap is a /bin/sh helper and asserts a Unix mode bit.
+  it.skipIf(process.platform === 'win32')(
+    'downloads, verifies, and stages; the swap replaces the target and cleans up',
+    async () => {
+      const staged = await stageDesktopUpdate(update, {
+        cacheDir: join(dir, 'cache'),
+        fetchFn: serve(`${sha256(BODY)}  ${NAME}\n`),
+      });
+      expect(staged.kind).toBe('appimage');
+      expect((await stat(staged.stagedPath)).mode & 0o100).toBeTruthy(); // executable
 
-    const target = join(dir, 'installed.AppImage');
-    await writeFile(target, '#!/bin/sh\necho old-version\n');
-    await chmod(target, 0o755);
-    await applyDesktopUpdate(staged, { targetPath: target, detach: false, relaunch: false });
-    expect(await readFile(target, 'utf8')).toBe(BODY);
-    await expect(stat(staged.dir)).rejects.toThrow(); // staging dir removed
-  });
+      const target = join(dir, 'installed.AppImage');
+      await writeFile(target, '#!/bin/sh\necho old-version\n');
+      await chmod(target, 0o755);
+      await applyDesktopUpdate(staged, { targetPath: target, detach: false, relaunch: false });
+      expect(await readFile(target, 'utf8')).toBe(BODY);
+      await expect(stat(staged.dir)).rejects.toThrow(); // staging dir removed
+    },
+  );
 
   it('rejects a checksum mismatch and leaves no staging directory behind', async () => {
     const cacheDir = join(dir, 'cache-bad');
@@ -268,6 +276,133 @@ describe('stageDesktopUpdate + applyDesktopUpdate (AppImage path)', () => {
     ).rejects.toThrow(/checksum mismatch/);
     await expect(stat(join(cacheDir, update.version))).rejects.toThrow();
   });
+});
+
+describe('Windows NSIS desktop updates', () => {
+  const NAME = 'Puddle-0.0.14-x64-setup.exe';
+  const BODY = 'MZ fake installer';
+  const update: DesktopUpdate = {
+    version: '0.0.14',
+    asset: { name: NAME, url: 'https://a/setup' },
+    sumsUrl: 'https://a/sums',
+  };
+
+  it('picks the per-arch installer, letting Windows on Arm use the x64 build', () => {
+    const assets = [
+      { name: 'Puddle-0.0.14-arm64-mac.zip', browser_download_url: 'u1' },
+      { name: NAME, browser_download_url: 'u2' },
+      { name: 'Puddle-0.0.14-x64-setup.exe.blockmap', browser_download_url: 'u3' },
+    ];
+    expect(pickDesktopAsset(assets, 'win32', 'x64')?.name).toBe(NAME);
+    expect(pickDesktopAsset(assets, 'win32', 'arm64')?.name).toBe(NAME);
+    expect(pickDesktopAsset(assets, 'win32', 'ia32')).toBeNull();
+    expect(
+      pickDesktopAsset(
+        [...assets, { name: 'Puddle-0.0.14-arm64-setup.exe', browser_download_url: 'u4' }],
+        'win32',
+        'arm64',
+      )?.name,
+    ).toBe('Puddle-0.0.14-arm64-setup.exe');
+  });
+
+  it('stages the verified installer itself, without unpacking', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'puddle-update-win-'));
+    try {
+      const staged = await stageDesktopUpdate(update, {
+        cacheDir: dir,
+        platform: 'win32',
+        fetchFn: (input) =>
+          Promise.resolve(
+            new Response(String(input).endsWith('/sums') ? `${sha256(BODY)}  ${NAME}\n` : BODY),
+          ),
+      });
+      expect(staged).toEqual({
+        version: '0.0.14',
+        kind: 'nsis',
+        stagedPath: join(dir, '0.0.14', NAME),
+        dir: join(dir, '0.0.14'),
+      });
+      expect(await readFile(staged.stagedPath, 'utf8')).toBe(BODY);
+
+      const zip = { ...update, asset: { name: 'Puddle-0.0.14-win.zip', url: 'https://a/zip' } };
+      await expect(
+        stageDesktopUpdate(zip, {
+          cacheDir: dir,
+          platform: 'win32',
+          fetchFn: (input) =>
+            Promise.resolve(
+              new Response(
+                String(input).endsWith('/sums') ? `${sha256(BODY)}  ${zip.asset.name}\n` : BODY,
+              ),
+            ),
+        }),
+      ).rejects.toThrow(/not a Windows installer/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('runs the installer silently, as electron-updater does', () => {
+    expect(nsisInstallerArguments(true, true)).toEqual(['--updated', '/S', '--force-run']);
+    expect(nsisInstallerArguments(true, false)).toEqual(['--updated', '/S']);
+    expect(nsisInstallerArguments(false, false)).toEqual(['/S']);
+  });
+
+  it('finds the registered per-user installation and its uninstaller', async () => {
+    const registration = {
+      version: '1.2.3',
+      installLocation: 'C:\\Users\\Zoë\\AppData\\Local\\Programs\\@puddle-codedesktop',
+      uninstallString:
+        '"C:\\Users\\Zoë\\AppData\\Local\\Programs\\@puddle-codedesktop\\Uninstall Puddle.exe" /currentuser',
+    };
+    await expect(
+      findInstalledDesktopApp({
+        platform: 'win32',
+        readRegistry: () => Promise.resolve(registration),
+      }),
+    ).resolves.toEqual({
+      appPath: 'C:\\Users\\Zoë\\AppData\\Local\\Programs\\@puddle-codedesktop\\Puddle.exe',
+      version: '1.2.3',
+      uninstallString: registration.uninstallString,
+    });
+    await expect(
+      findInstalledDesktopApp({ platform: 'win32', readRegistry: () => Promise.resolve(null) }),
+    ).resolves.toBeNull();
+    expect(windowsInstalledApp({ version: '1.2.3', installLocation: null })).toBeNull();
+    expect(parseUninstallString(registration.uninstallString)).toEqual({
+      file: 'C:\\Users\\Zoë\\AppData\\Local\\Programs\\@puddle-codedesktop\\Uninstall Puddle.exe',
+      args: ['/currentuser'],
+    });
+    expect(parseUninstallString('cmd /c del everything')).toBeNull();
+  });
+
+  it('refuses removal without a registered uninstaller', async () => {
+    await expect(
+      uninstallWindowsDesktop({ appPath: 'C:\\x\\Puddle.exe', version: '1.2.3' }),
+    ).rejects.toThrow(/uninstaller is not registered/);
+  });
+
+  // The real uninstaller relaunches itself from %TEMP%: removal waits for the registration.
+  it.runIf(process.platform === 'win32')(
+    'waits for the registration to disappear after the uninstaller exits',
+    async () => {
+      let reads = 0;
+      const registration = { version: '1.2.3', installLocation: 'C:\\x', uninstallString: '' };
+      await uninstallWindowsDesktop(
+        {
+          appPath: 'C:\\x\\Puddle.exe',
+          version: '1.2.3',
+          // node.exe --version ignores the silent flag that follows it.
+          uninstallString: `"${process.execPath}" --version`,
+        },
+        {
+          pollMs: 10,
+          readRegistry: () => Promise.resolve(++reads < 3 ? registration : null),
+        },
+      );
+      expect(reads).toBe(3);
+    },
+  );
 });
 
 describe('pruneDesktopUpdateCache', () => {

@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { constants, createReadStream, createWriteStream } from 'node:fs';
+import { constants, createReadStream, createWriteStream, existsSync } from 'node:fs';
 import { access, chmod, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, join, win32 } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
+import { system32Path } from '@puddle/shared/node/platform';
 import { clientHome } from '../paths.js';
 import { CliError, type Logger, silentLogger } from '../types.js';
 import { repoSlug } from '../version.js';
@@ -34,8 +35,11 @@ export interface DesktopUpdate {
 
 export interface StagedDesktopUpdate {
   version: string;
-  kind: 'mac-app' | 'appimage';
-  /** The unpacked .app bundle (mac) or the verified AppImage file (linux). */
+  kind: 'mac-app' | 'appimage' | 'nsis';
+  /**
+   * The unpacked .app bundle (mac), the verified AppImage file (linux) or the
+   * verified one-click NSIS installer (windows).
+   */
   stagedPath: string;
   /** The per-version staging directory, removed by the helper after a swap. */
   dir: string;
@@ -74,13 +78,15 @@ export function isNewerVersion(candidate: string, current: string): boolean {
  * none (e.g. darwin-x64, which the release workflow does not build).
  * electron-builder's names: `Puddle-<v>-arm64-mac.zip` / `Puddle-<v>-mac.zip`
  * and `Puddle-<v>-arm64.AppImage` / `Puddle-<v>.AppImage` — the arch token is
- * present exactly when the build is not x64.
+ * present exactly when the build is not x64. Windows installers always carry
+ * it (`Puddle-<v>-x64-setup.exe`, pinned in electron-builder.yml).
  */
 export function pickDesktopAsset(
   assets: ReleaseAsset[],
   platform: NodeJS.Platform,
   arch: string,
 ): ReleaseAsset | null {
+  if (platform === 'win32') return pickWindowsInstaller(assets, arch);
   const suffix = platform === 'darwin' ? '-mac.zip' : platform === 'linux' ? '.AppImage' : null;
   if (suffix === null) return null;
   // electron-builder omits the arch token exactly when the build is x64, so
@@ -90,6 +96,13 @@ export function pickDesktopAsset(
       (a) => a.name.endsWith(suffix) && a.name.includes('-arm64') === (arch === 'arm64'),
     ) ?? null
   );
+}
+
+/** Windows on Arm falls back to the x64 installer, which it runs under emulation. */
+function pickWindowsInstaller(assets: ReleaseAsset[], arch: string): ReleaseAsset | null {
+  const installer = (wanted: string) =>
+    assets.find((a) => a.name.endsWith(`-${wanted}-setup.exe`)) ?? null;
+  return installer(arch) ?? (arch === 'arm64' ? installer('x64') : null);
 }
 
 /** The `<sha256>  <filename>` map from a SHA256SUMS document. */
@@ -185,9 +198,15 @@ function updateFromRelease(
  */
 export async function stageDesktopUpdate(
   update: DesktopUpdate,
-  opts: { cacheDir?: string; fetchFn?: typeof fetch; logger?: Logger } = {},
+  opts: {
+    cacheDir?: string;
+    fetchFn?: typeof fetch;
+    logger?: Logger;
+    platform?: NodeJS.Platform;
+  } = {},
 ): Promise<StagedDesktopUpdate> {
   const logger = opts.logger ?? silentLogger;
+  const platform = opts.platform ?? process.platform;
   const fetchFn = opts.fetchFn ?? fetch;
   const dir = join(opts.cacheDir ?? join(clientHome(), 'cache', 'desktop'), update.version);
   await rm(dir, { recursive: true, force: true });
@@ -227,6 +246,14 @@ export async function stageDesktopUpdate(
       );
     }
 
+    if (platform === 'win32') {
+      // The verified installer is the whole update: it unpacks itself.
+      if (!update.asset.name.endsWith('.exe')) {
+        throw new CliError('not_installed', `${update.asset.name} is not a Windows installer`);
+      }
+      logger.info(`staged ${update.version} at ${archive}`);
+      return { version: update.version, kind: 'nsis', stagedPath: archive, dir };
+    }
     if (update.asset.name.endsWith('.zip')) {
       // ditto preserves the bundle's symlinks, permissions and extended
       // attributes — unzip(1) historically has not, and a subtly broken
@@ -282,7 +309,11 @@ export async function pruneDesktopUpdateCache(
 }
 
 export interface ApplyOptions {
-  /** What to replace: the installed .app bundle (mac) or AppImage path (linux). */
+  /**
+   * What to replace: the installed .app bundle (mac) or AppImage path
+   * (linux). On Windows, the installed Puddle.exe; the installer itself
+   * chooses where a first installation goes.
+   */
   targetPath: string;
   /**
    * Wait for this process to exit before swapping — the in-app flow passes
@@ -311,6 +342,7 @@ export async function applyDesktopUpdate(
   opts: ApplyOptions,
 ): Promise<void> {
   const logger = opts.logger ?? silentLogger;
+  if (staged.kind === 'nsis') return applyNsisUpdate(staged, opts, logger);
   const script = swapScript(staged, opts);
   const scriptPath = join(staged.dir, 'apply.sh');
   await writeFile(scriptPath, script, { mode: 0o755 });
@@ -321,6 +353,38 @@ export async function applyDesktopUpdate(
     return;
   }
   await run('/bin/sh', [scriptPath]);
+}
+
+/**
+ * electron-builder's one-click installer replaces the per-user install
+ * itself. `--updated` makes it wait for (then close) a running app instead of
+ * asking, and keeps the shortcuts; `--force-run` relaunches after a silent
+ * install. These are electron-updater's own arguments (NsisUpdater.doInstall).
+ */
+export function nsisInstallerArguments(update: boolean, relaunch: boolean): string[] {
+  return [...(update ? ['--updated'] : []), '/S', ...(relaunch ? ['--force-run'] : [])];
+}
+
+async function applyNsisUpdate(
+  staged: StagedDesktopUpdate,
+  opts: ApplyOptions,
+  logger: Logger,
+): Promise<void> {
+  const args = nsisInstallerArguments(existsSync(opts.targetPath), opts.relaunch);
+  logger.info(`applying ${staged.version} via ${staged.stagedPath}`);
+  if (opts.detach ?? true) {
+    // The next boot's cache prune removes the installer, which cannot delete itself.
+    const child = spawn(staged.stagedPath, args, {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    child.on('error', (e) => logger.warn(`could not start the installer: ${e.message}`));
+    child.unref();
+    return;
+  }
+  await run(staged.stagedPath, args);
+  await rm(staged.dir, { recursive: true, force: true });
 }
 
 /** POSIX single-quoting, as bootstrap.ts quotes installer arguments. */
@@ -387,16 +451,29 @@ export interface DesktopAppLocationOptions {
   systemApplicationsDir?: string;
   /** Injectable permission probe for tests. */
   canWrite?: (path: string) => Promise<boolean>;
+  /** Injectable Windows registry read for tests. */
+  readRegistry?: () => Promise<WindowsDesktopRegistration | null>;
+}
+
+export interface InstalledDesktopApp {
+  appPath: string;
+  version: string;
+  /** Windows: the uninstaller command line the installer registered. */
+  uninstallString?: string;
 }
 
 /**
- * The installed desktop app this machine could upgrade — macOS only: an
- * AppImage can live anywhere, so on Linux discovery is the app's own job
- * (the in-app updater knows its $APPIMAGE) and the CLI declines.
+ * The installed desktop app this machine could upgrade — macOS, and
+ * Windows through the per-user NSIS registration. An AppImage can live
+ * anywhere, so on Linux discovery is the app's own job (the in-app updater
+ * knows its $APPIMAGE) and the CLI declines.
  */
 export async function findInstalledDesktopApp(
   opts: DesktopAppLocationOptions = {},
-): Promise<{ appPath: string; version: string } | null> {
+): Promise<InstalledDesktopApp | null> {
+  if ((opts.platform ?? process.platform) === 'win32') {
+    return windowsInstalledApp(await (opts.readRegistry ?? readWindowsRegistration)());
+  }
   if ((opts.platform ?? process.platform) !== 'darwin') return null;
   const { readFile } = await import('node:fs/promises');
   const { homedir } = await import('node:os');
@@ -449,13 +526,159 @@ export async function desktopAppInstallPath(
 }
 
 /** Whether the installed app is currently running (its swap must wait). */
-export function isDesktopAppRunning(appPath: string): Promise<boolean> {
+export function isDesktopAppRunning(
+  appPath: string,
+  platform: NodeJS.Platform = process.platform,
+): Promise<boolean> {
+  if (platform === 'win32') return isWindowsDesktopRunning(appPath);
   return new Promise((resolve) => {
     const child = spawn('/usr/bin/pgrep', ['-f', `${appPath}/Contents/MacOS/`], {
       stdio: 'ignore',
     });
     child.on('error', () => resolve(false));
     child.on('exit', (code) => resolve(code === 0));
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Windows: the per-user one-click NSIS installation
+
+/**
+ * electron-builder's NSIS GUID for appId code.puddle.desktop (UUID v5 in its
+ * namespace), pinned as `nsis.guid` in packages/desktop/electron-builder.yml.
+ * It names both per-user registry keys the installer writes.
+ */
+export const WINDOWS_DESKTOP_GUID = '21877822-4423-5e9b-90ab-0b75b071b1b1';
+
+export interface WindowsDesktopRegistration {
+  version?: string | null;
+  installLocation?: string | null;
+  uninstallString?: string | null;
+}
+
+/** Puddle.exe inside the registered install directory, or null when absent. */
+export function windowsInstalledApp(
+  registration: WindowsDesktopRegistration | null,
+): InstalledDesktopApp | null {
+  const { version, installLocation, uninstallString } = registration ?? {};
+  if (!version || !installLocation) return null;
+  return {
+    appPath: win32.join(installLocation, 'Puddle.exe'),
+    version,
+    ...(uninstallString ? { uninstallString } : {}),
+  };
+}
+
+/**
+ * `"C:\…\Uninstall Puddle.exe" /currentuser` → the program and its
+ * arguments, run without a shell. Null for anything not in that shape.
+ */
+export function parseUninstallString(command: string): { file: string; args: string[] } | null {
+  const match = /^"([^"]+\.exe)"\s*(.*)$/i.exec(command.trim());
+  if (!match) return null;
+  return { file: match[1]!, args: match[2]!.split(/\s+/).filter((arg) => arg !== '') };
+}
+
+/**
+ * Reads HKCU's uninstall entry (version, uninstaller) and install key
+ * (location) through Windows PowerShell, whose UTF-8 JSON keeps non-ASCII
+ * profile paths intact (reg.exe prints in the OEM code page).
+ */
+function readWindowsRegistration(): Promise<WindowsDesktopRegistration | null> {
+  const script = [
+    '[Console]::OutputEncoding = New-Object Text.UTF8Encoding $false',
+    `$u = Get-ItemProperty -LiteralPath 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${WINDOWS_DESKTOP_GUID}' -ErrorAction SilentlyContinue`,
+    `$i = Get-ItemProperty -LiteralPath 'HKCU:\\Software\\${WINDOWS_DESKTOP_GUID}' -ErrorAction SilentlyContinue`,
+    'if ($u) { [pscustomobject]@{ version = $u.DisplayVersion; installLocation = $i.InstallLocation; uninstallString = $u.UninstallString } | ConvertTo-Json -Compress }',
+  ].join('\n');
+  return new Promise((resolve) => {
+    const child = spawn(
+      system32Path('WindowsPowerShell\\v1.0\\powershell.exe'),
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-EncodedCommand',
+        Buffer.from(script, 'utf16le').toString('base64'),
+      ],
+      { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true },
+    );
+    let output = '';
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => (output += chunk));
+    child.on('error', () => resolve(null));
+    child.on('close', () => {
+      try {
+        resolve(output.trim() === '' ? null : (JSON.parse(output) as WindowsDesktopRegistration));
+      } catch {
+        resolve(null);
+      }
+    });
+  });
+}
+
+/**
+ * Run the registered uninstaller silently and wait for the registration to
+ * go: an NSIS uninstaller relaunches itself from %TEMP% and its first
+ * process exits at once, so its exit code alone proves nothing.
+ */
+export async function uninstallWindowsDesktop(
+  installed: InstalledDesktopApp,
+  opts: {
+    readRegistry?: () => Promise<WindowsDesktopRegistration | null>;
+    timeoutMs?: number;
+    pollMs?: number;
+  } = {},
+): Promise<void> {
+  const uninstaller =
+    installed.uninstallString === undefined
+      ? null
+      : parseUninstallString(installed.uninstallString);
+  if (uninstaller === null) {
+    throw new CliError(
+      'not_installed',
+      'the Puddle uninstaller is not registered',
+      'remove Puddle from Settings → Apps → Installed apps',
+    );
+  }
+  await run(uninstaller.file, [...uninstaller.args, '/S']);
+  const readRegistry = opts.readRegistry ?? readWindowsRegistration;
+  const deadline = Date.now() + (opts.timeoutMs ?? 120_000);
+  while (windowsInstalledApp(await readRegistry()) !== null) {
+    if (Date.now() > deadline) {
+      throw new CliError('not_installed', 'the Puddle uninstaller did not finish in time');
+    }
+    await new Promise((resolve) => setTimeout(resolve, opts.pollMs ?? 500));
+  }
+}
+
+/** This user's Puddle.exe processes, from tasklist (the installer's own check). */
+function isWindowsDesktopRunning(appPath: string): Promise<boolean> {
+  const image = win32.basename(appPath);
+  const user = process.env.USERNAME;
+  return new Promise((resolve) => {
+    const child = spawn(
+      system32Path('tasklist.exe'),
+      [
+        '/FI',
+        `IMAGENAME eq ${image}`,
+        ...(user ? ['/FI', `USERNAME eq ${user}`] : []),
+        '/FO',
+        'CSV',
+        '/NH',
+      ],
+      { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true },
+    );
+    let output = '';
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => (output += chunk));
+    child.on('error', () => resolve(false));
+    child.on('close', () =>
+      resolve(
+        output
+          .split(/\r?\n/)
+          .some((line) => line.toLowerCase().startsWith(`"${image.toLowerCase()}"`)),
+      ),
+    );
   });
 }
 
