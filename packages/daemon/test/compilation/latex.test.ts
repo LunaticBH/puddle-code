@@ -30,24 +30,87 @@ const emptyStores = {
 afterEach(() => clearLatexDiscoveryCache());
 
 describe('LaTeX tool discovery', () => {
-  it('finds executables on PATH and caches the result briefly', () => {
-    const bin = mkdtempSync(join(tmpdir(), 'puddle-tex-bin-'));
-    const latexmk = join(bin, 'latexmk');
-    writeFileSync(latexmk, '#!/bin/sh\nexit 0\n');
-    chmodSync(latexmk, 0o755);
-    let now = 100;
-    const options = {
-      env: { PATH: bin },
-      home: mkdtempSync(join(tmpdir(), 'puddle-tex-home-')),
-      platform: 'linux' as const,
-      now: () => now,
+  // Asserts Unix execute bits, which Windows does not have; covered below for Windows.
+  it.skipIf(process.platform === 'win32')(
+    'finds executables on PATH and caches the result briefly',
+    () => {
+      const bin = mkdtempSync(join(tmpdir(), 'puddle-tex-bin-'));
+      const latexmk = join(bin, 'latexmk');
+      writeFileSync(latexmk, '#!/bin/sh\nexit 0\n');
+      chmodSync(latexmk, 0o755);
+      let now = 100;
+      const options = {
+        env: { PATH: bin },
+        home: mkdtempSync(join(tmpdir(), 'puddle-tex-home-')),
+        platform: 'linux' as const,
+        now: () => now,
+      };
+      expect(discoverLatexToolchain(options).paths.latexmk).toBe(latexmk);
+      chmodSync(latexmk, 0o644);
+      now += 1;
+      expect(discoverLatexToolchain(options).paths.latexmk).toBe(latexmk);
+      now += 31_000;
+      expect(discoverLatexToolchain(options).paths.latexmk).toBeUndefined();
+    },
+  );
+
+  it('completes Windows tool names and searches MiKTeX, TeX Live and TinyTeX defaults', () => {
+    const root = mkdtempSync(join(tmpdir(), 'puddle-tex-windows-'));
+    const tool = (dir: string, name: string) => {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, name), '');
+      return join(dir, name);
     };
-    expect(discoverLatexToolchain(options).paths.latexmk).toBe(latexmk);
-    chmodSync(latexmk, 0o644);
-    now += 1;
-    expect(discoverLatexToolchain(options).paths.latexmk).toBe(latexmk);
-    now += 31_000;
-    expect(discoverLatexToolchain(options).paths.latexmk).toBeUndefined();
+    const onPath = join(root, 'on path');
+    const miktex = join(root, 'Local', 'Programs', 'MiKTeX', 'miktex', 'bin', 'x64');
+    const texlive = join(root, 'drive', 'texlive', '2025', 'bin', 'windows');
+    const tinytex = join(root, 'Roaming', 'TinyTeX', 'bin', 'windows');
+    const xelatex = tool(onPath, 'xelatex.exe');
+    // Never run: Windows cannot start an extensionless file.
+    writeFileSync(join(onPath, 'pdflatex'), '#!/bin/sh\n');
+    const pdflatex = tool(miktex, 'pdflatex.exe');
+    const lualatex = tool(texlive, 'lualatex.exe');
+    const biber = tool(tinytex, 'biber.exe');
+    const toolchain = discoverLatexToolchain({
+      env: {
+        Path: [`"${onPath}"`, '%TEXLIVE%\\bin', ''].join(';'),
+        LOCALAPPDATA: join(root, 'Local'),
+        APPDATA: join(root, 'Roaming'),
+        SystemDrive: join(root, 'drive'),
+      },
+      home: join(root, 'home'),
+      platform: 'win32',
+    });
+    expect(toolchain.paths).toMatchObject({ xelatex, pdflatex, lualatex, biber });
+    expect(toolchain.searchPath.split(';')[0]).toBe(onPath);
+    expect(toolchain.searchPath).not.toContain('%');
+  });
+
+  it('offers latexmk on Windows only with a Perl to run it', () => {
+    const root = mkdtempSync(join(tmpdir(), 'puddle-tex-perl-'));
+    const miktex = join(root, 'miktex', 'bin', 'x64');
+    mkdirSync(miktex, { recursive: true });
+    writeFileSync(join(miktex, 'latexmk.exe'), '');
+    writeFileSync(join(miktex, 'pdflatex.exe'), '');
+    const discover = (path: string) => {
+      clearLatexDiscoveryCache();
+      return discoverLatexToolchain({ env: { PATH: path }, home: root, platform: 'win32' });
+    };
+    // MiKTeX's latexmk without Perl fails every build: fall back to the engine.
+    expect(discover(miktex).paths).toEqual({ pdflatex: join(miktex, 'pdflatex.exe') });
+    const perl = join(root, 'perl', 'bin');
+    mkdirSync(perl, { recursive: true });
+    writeFileSync(join(perl, 'perl.exe'), '');
+    expect(discover(`${miktex};${perl}`).paths.latexmk).toBe(join(miktex, 'latexmk.exe'));
+    // TeX Live's latexmk runs on the Perl TeX Live bundles.
+    const texlive = join(root, 'texlive', '2025');
+    mkdirSync(join(texlive, 'bin', 'windows'), { recursive: true });
+    mkdirSync(join(texlive, 'tlpkg', 'tlperl', 'bin'), { recursive: true });
+    writeFileSync(join(texlive, 'bin', 'windows', 'latexmk.exe'), '');
+    writeFileSync(join(texlive, 'tlpkg', 'tlperl', 'bin', 'perl.exe'), '');
+    expect(discover(join(texlive, 'bin', 'windows')).paths.latexmk).toBe(
+      join(texlive, 'bin', 'windows', 'latexmk.exe'),
+    );
   });
 });
 

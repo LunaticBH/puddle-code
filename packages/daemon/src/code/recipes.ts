@@ -6,6 +6,8 @@ export interface CodeRecipe {
   extensions: string[];
   inputs?: string[];
   executables: string[];
+  /** Windows names in place of `executables`, where the usual names differ. */
+  windowsExecutables?: string[];
   args: string[];
   /** A compiler produces {{binary}}, which is run only after a successful build. */
   compiled?: boolean;
@@ -19,6 +21,9 @@ export const CODE_RECIPES: readonly CodeRecipe[] = [
     name: 'Python',
     extensions: ['py', 'pyw'],
     executables: ['python3', 'python'],
+    // python.org installs only python.exe, and python3.exe is usually the
+    // Microsoft Store redirector. The py launcher takes the same arguments.
+    windowsExecutables: ['python', 'py', 'python3'],
     args: ['-u', '{{source}}'],
   },
   {
@@ -41,6 +46,9 @@ export const CODE_RECIPES: readonly CodeRecipe[] = [
     extensions: ['c'],
     inputs: ['c', 'h'],
     executables: ['cc', 'clang', 'gcc', 'tcc', 'icc', 'icx'],
+    // Windows has no cc, and Intel's compilers there are MSVC-style drivers
+    // that do not take -o.
+    windowsExecutables: ['gcc', 'clang', 'tcc'],
     args: ['{{source}}', '-o', '{{binary}}'],
     compiled: true,
   },
@@ -50,6 +58,7 @@ export const CODE_RECIPES: readonly CodeRecipe[] = [
     extensions: ['cpp', 'cc', 'cxx'],
     inputs: ['cpp', 'cc', 'cxx', 'h', 'hpp', 'hxx'],
     executables: ['c++', 'clang++', 'g++', 'icpx', 'icpc'],
+    windowsExecutables: ['g++', 'clang++'],
     args: ['{{source}}', '-o', '{{binary}}'],
     compiled: true,
   },
@@ -92,6 +101,21 @@ export const CODE_RECIPES: readonly CodeRecipe[] = [
     notebook: true,
   },
 ];
+
+/** The executable names a recipe looks for on `platform`, in order of preference. */
+export function recipeExecutables(
+  recipe: CodeRecipe,
+  platform: NodeJS.Platform = process.platform,
+): readonly string[] {
+  return platform === 'win32'
+    ? (recipe.windowsExecutables ?? recipe.executables)
+    : recipe.executables;
+}
+
+/** The managed build product's file name: Windows only runs a binary named `.exe`. */
+export function managedBinaryName(platform: NodeJS.Platform = process.platform): string {
+  return platform === 'win32' ? 'programme.exe' : 'programme';
+}
 
 export function recipeCommand(recipe: CodeRecipe, executable: string): string {
   return commandTemplate(executable, recipe.args);

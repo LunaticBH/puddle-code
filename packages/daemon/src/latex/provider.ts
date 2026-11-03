@@ -6,7 +6,6 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
-  renameSync,
   rmSync,
   statSync,
   unlinkSync,
@@ -20,10 +19,13 @@ import {
   type LatexSynctexRequest,
   type LatexSynctexResponse,
 } from '@puddle/shared';
+import { renameWithRetrySync } from '@puddle/shared/node/platform';
 import type { RepoStore } from '../db/stores/repos.js';
 import type { SessionStore } from '../db/stores/sessions.js';
 import type { CompilationProvider, CompilationProviderResult } from '../compilation/provider.js';
 import { expandCommandTemplate, parseCommandTemplate } from '../compilation/command-template.js';
+import { withEnvironment } from '../compilation/environment.js';
+import { sameHostPath } from '../host-path.js';
 import { KeyedMutex } from '../git/mutex.js';
 import { ApiError } from '../http/errors.js';
 import {
@@ -213,8 +215,8 @@ export class LatexProvider implements CompilationProvider {
     if (
       manifest.pdf.session !== request.session ||
       manifest.pdf.path !== request.path ||
-      normalize(manifest.pdf.root) !== buildDir ||
-      normalize(manifest.sourceRoot) !== sourceRoot ||
+      !sameHostPath(normalize(manifest.pdf.root), buildDir) ||
+      !sameHostPath(normalize(manifest.sourceRoot), sourceRoot) ||
       !validManifestSource(manifest, sourceRoot, basename(dirname(buildDir)))
     ) {
       throw ApiError.badRequest('invalid_latex_output', 'PDF does not match its LaTeX manifest');
@@ -223,7 +225,7 @@ export class LatexProvider implements CompilationProvider {
       throw ApiError.badRequest('synctex_unavailable', 'This PDF has no SyncTeX index');
     }
     const expectedSynctex = join(buildDir, `${basename(pdfPath, '.pdf')}.synctex.gz`);
-    if (normalize(manifest.synctexPath) !== expectedSynctex) {
+    if (!sameHostPath(normalize(manifest.synctexPath), expectedSynctex)) {
       throw ApiError.badRequest('invalid_latex_output', 'SyncTeX index is outside the PDF output');
     }
     const toolchain = this.toolchain();
@@ -242,7 +244,7 @@ export class LatexProvider implements CompilationProvider {
         file: executable,
         args: ['edit', '-o', `${request.page}:${request.x}:${request.y}:${pdfPath}`],
         cwd: buildDir,
-        env: { ...process.env, PATH: toolchain.searchPath },
+        env: withEnvironment({ PATH: toolchain.searchPath }),
         ...(this.deps.timeoutMs !== undefined ? { timeoutMs: this.deps.timeoutMs } : {}),
       });
       output = `${result.stdout}\n${result.stderr}`;
@@ -320,7 +322,8 @@ function validManifestSource(
     .digest('hex')
     .slice(0, 24);
   return (
-    normalize(sourceFromTarget) === normalize(manifest.sourceAbsolute) && expectedKey === buildKey
+    sameHostPath(normalize(sourceFromTarget), normalize(manifest.sourceAbsolute)) &&
+    expectedKey === buildKey
   );
 }
 
@@ -342,9 +345,10 @@ function promoteBuild(
     copyFileSync(pdfSource, pdfNext);
     copyFileSync(join(runDir, 'build.log'), logNext);
     if (synctexSource && synctexNext) copyFileSync(synctexSource, synctexNext);
-    renameSync(pdfNext, pdfPath);
-    renameSync(logNext, logPath);
-    if (synctexPath && synctexNext) renameSync(synctexNext, synctexPath);
+    // A viewer streaming the previous PDF briefly blocks its replacement on Windows.
+    renameWithRetrySync(pdfNext, pdfPath);
+    renameWithRetrySync(logNext, logPath);
+    if (synctexPath && synctexNext) renameWithRetrySync(synctexNext, synctexPath);
     else removeIfPresent(join(currentDir, `${basename(pdfSource, '.pdf')}.synctex.gz`));
     return { pdfPath, synctexPath };
   } finally {
@@ -352,7 +356,11 @@ function promoteBuild(
   }
 }
 
-function pruneRuns(runsDir: string, keep: number): void {
+function pruneRuns(
+  runsDir: string,
+  keep: number,
+  platform: NodeJS.Platform = process.platform,
+): void {
   let runs: string[];
   try {
     runs = readdirSync(runsDir, { withFileTypes: true })
@@ -364,7 +372,16 @@ function pruneRuns(runsDir: string, keep: number): void {
     return;
   }
   for (const name of runs.slice(keep)) {
-    rmSync(join(runsDir, name), { recursive: true, force: true });
+    if (platform !== 'win32') {
+      rmSync(join(runsDir, name), { recursive: true, force: true });
+      continue;
+    }
+    try {
+      rmSync(join(runsDir, name), { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    } catch {
+      // A TeX process stopped after a timeout, or a virus scanner, may still
+      // hold a file open. The next build prunes the run instead of failing.
+    }
   }
 }
 
@@ -402,7 +419,7 @@ function writeManifest(buildDir: string, manifest: LatexManifest): void {
   const target = join(buildDir, 'manifest.json');
   const temporary = join(buildDir, 'manifest.json.tmp');
   writeFileSync(temporary, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
-  renameSync(temporary, target);
+  renameWithRetrySync(temporary, target);
 }
 
 function readManifest(buildDir: string): LatexManifest {
