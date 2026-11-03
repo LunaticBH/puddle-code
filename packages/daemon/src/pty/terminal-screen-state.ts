@@ -1,6 +1,7 @@
 import { isStorageFull } from '../storage/errors.js';
-import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { renameWithRetry } from '@puddle/shared/node/platform';
 import headless, {
   type ITerminalAddon as HeadlessTerminalAddon,
   type Terminal as HeadlessTerminal,
@@ -260,7 +261,8 @@ export class TerminalScreenStateStore {
       try {
         await mkdir(join(stateDir, stream), { recursive: true });
         await writeFile(temp, JSON.stringify(persisted), { encoding: 'utf8', mode: 0o600 });
-        await rename(temp, file);
+        // Windows: a scanner or indexer briefly holding the old snapshot is not a failure.
+        await renameWithRetry(temp, file);
         state.dirty = false;
         this.retryAt = 0;
         this.retryMs = 1000;
