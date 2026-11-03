@@ -117,6 +117,112 @@ describe('findPathCandidates', () => {
   });
 });
 
+describe('findPathCandidates on a Windows host', () => {
+  const win = (text: string) => findPathCandidates(text, 'win32');
+
+  it('captures a drive path with line and column, consuming the drive colon first', () => {
+    expect(win('C:\\x\\y.ts:12:5')).toEqual([
+      { path: 'C:\\x\\y.ts', line: 12, column: 5, start: 0, end: 14 },
+    ]);
+    expect(win('C:\\x\\y.ts:12')).toEqual([
+      { path: 'C:\\x\\y.ts', line: 12, column: undefined, start: 0, end: 12 },
+    ]);
+  });
+
+  it('captures a forward-slash drive path', () => {
+    expect(win('open C:/x/y.ts now')).toEqual([
+      { path: 'C:/x/y.ts', line: undefined, column: undefined, start: 5, end: 14 },
+    ]);
+  });
+
+  it('captures backslash relative paths, with and without a ./ prefix', () => {
+    expect(win('a\\b.ts')).toEqual([
+      { path: 'a\\b.ts', line: undefined, column: undefined, start: 0, end: 6 },
+    ]);
+    expect(win('.\\a\\b.py:3')).toEqual([
+      { path: '.\\a\\b.py', line: 3, column: undefined, start: 0, end: 10 },
+    ]);
+    expect(win('..\\x\\y')).toEqual([
+      { path: '..\\x\\y', line: undefined, column: undefined, start: 0, end: 6 },
+    ]);
+    expect(win('~\\notes\\todo.md')).toEqual([
+      { path: '~\\notes\\todo.md', line: undefined, column: undefined, start: 0, end: 15 },
+    ]);
+  });
+
+  it('captures a UNC path', () => {
+    expect(win('see \\\\server\\share\\x.txt')).toEqual([
+      { path: '\\\\server\\share\\x.txt', line: undefined, column: undefined, start: 4, end: 24 },
+    ]);
+  });
+
+  it('reads the tsc/MSVC file(line,col) position and underlines its parentheses', () => {
+    expect(win('src\\a.ts(12,5): error TS2322')).toEqual([
+      { path: 'src\\a.ts', line: 12, column: 5, start: 0, end: 14 },
+    ]);
+    expect(win('C:\\x\\y.cpp(7): error C2065')).toEqual([
+      { path: 'C:\\x\\y.cpp', line: 7, column: undefined, start: 0, end: 13 },
+    ]);
+  });
+
+  it('finds paths in Node stack frames and Python tracebacks', () => {
+    expect(win('    at main (C:\\app\\index.js:3:9)')).toEqual([
+      { path: 'C:\\app\\index.js', line: 3, column: 9, start: 13, end: 32 },
+    ]);
+    expect(win('  File "C:\\app\\main.py", line 4')).toEqual([
+      { path: 'C:\\app\\main.py', line: undefined, column: undefined, start: 8, end: 22 },
+    ]);
+  });
+
+  it('still finds the forward-slash paths git and agents print', () => {
+    expect(win('src/foo.ts:12:3')).toEqual([
+      { path: 'src/foo.ts', line: 12, column: 3, start: 0, end: 15 },
+    ]);
+    expect(win('@src\\foo.ts')).toEqual([
+      { path: 'src\\foo.ts', line: undefined, column: undefined, start: 1, end: 11 },
+    ]);
+    expect(win('@C:\\notes.md')).toEqual([
+      { path: 'C:\\notes.md', line: undefined, column: undefined, start: 1, end: 12 },
+    ]);
+  });
+
+  it('stays quiet for prose and decimals', () => {
+    expect(win('the build took 3.14 seconds')).toEqual([]);
+  });
+
+  it('leaves POSIX hosts on their own pattern: no Windows paths, no paren positions', () => {
+    expect(findPathCandidates('C:\\x\\y.ts:12:5')).toEqual([]);
+    expect(findPathCandidates('a.ts(12,5)')).toEqual([
+      { path: 'a.ts', line: undefined, column: undefined, start: 0, end: 4 },
+    ]);
+  });
+});
+
+describe('findBufferPathCandidates on a Windows host', () => {
+  it('joins a deliberate break after a backslash', () => {
+    const buffer = bufferWithLines(
+      [{ text: 'see C:\\src\\' }, { text: '  nested\\file.ts:4' }],
+      80,
+    );
+    expect(findBufferPathCandidates(buffer, 1, 80, 'win32')[0]).toMatchObject({
+      candidate: { path: 'C:\\src\\nested\\file.ts', line: 4 },
+      start: { row: 0, col: 4 },
+      end: { row: 1, col: 17 },
+    });
+    // A POSIX host never treats a backslash as a separator to continue after.
+    expect(findBufferPathCandidates(buffer, 1, 80).map((link) => link.text)).not.toContain(
+      'C:\\src\\nested\\file.ts:4',
+    );
+  });
+
+  it('does not merge a new drive path into the previous line', () => {
+    const buffer = bufferWithLines([{ text: 'src\\file.ts' }, { text: 'C:\\other.ts' }], 12);
+    expect(findBufferPathCandidates(buffer, 1, 12, 'win32').map((link) => link.text)).toEqual([
+      'C:\\other.ts',
+    ]);
+  });
+});
+
 describe('findBufferPathCandidates', () => {
   it('joins indented continuations with a right gutter and keeps the original coordinates', () => {
     const buffer = bufferWithLines(

@@ -1,5 +1,5 @@
 import type { IBufferCellPosition, IDisposable, ILink, Terminal as XTerm } from '@xterm/xterm';
-import type { ResolvePathResponse } from '@puddle/shared';
+import type { HostPathStyle, ResolvePathResponse } from '@puddle/shared';
 import { api } from '../../../lib/transport/api';
 import { findBufferPathCandidates } from './file-link-buffer';
 export { findBufferPathCandidates } from './file-link-buffer';
@@ -208,12 +208,15 @@ async function resolvePath(
 /**
  * Registers the validated file-path link provider on `xterm`. `onOpen` receives
  * the daemon's normalised target (never the raw match) plus the requested
- * line/column. Returns an `IDisposable` to unregister on unmount.
+ * line/column. `hostStyle` is read on every lookup, so Windows path patterns
+ * apply as soon as `/api/host` reports a win32 host. Returns an `IDisposable`
+ * to unregister on unmount.
  */
 export function registerFileLinks(
   xterm: XTerm,
   sessionId: string,
   onOpen: (target: FileLinkTarget) => void,
+  hostStyle: () => HostPathStyle = () => 'posix',
 ): IDisposable {
   const cache = new ResolveCache({ fetcher: resolvePath });
 
@@ -221,7 +224,12 @@ export function registerFileLinks(
     provideLinks(bufferLineNumber, callback) {
       const buffer = xterm.buffer.active;
       // xterm hands provideLinks a 1-based buffer line; map from 0-based.
-      const candidates = findBufferPathCandidates(buffer, bufferLineNumber - 1, xterm.cols);
+      const candidates = findBufferPathCandidates(
+        buffer,
+        bufferLineNumber - 1,
+        xterm.cols,
+        hostStyle(),
+      );
       if (candidates.length === 0) {
         callback(undefined);
         return;
