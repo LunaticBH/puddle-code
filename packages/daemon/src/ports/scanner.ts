@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import type { SessionPort } from '@puddle/shared';
+import { listWindowsProcesses, system32Path } from '@puddle/shared/node/platform';
 import type { PtyManager } from '../pty/pty-manager.js';
 import { descendantsOf } from './process-tree.js';
 
@@ -108,6 +109,61 @@ async function listListenersLinux(): Promise<Listener[]> {
   return parseSsOutput(await execTolerant('ss', ['-tlnpH']));
 }
 
+/**
+ * `netstat -ano` from System32 (ASCII; about 60 ms), named from the shared
+ * process table, since netstat reports only pids. Unlike lsof and ss, a
+ * failure rejects: netstat exits 0 whenever it ran, and a silently empty list
+ * would make the proxy refuse every port.
+ */
+async function listListenersWin32(): Promise<Listener[]> {
+  const [stdout, processes] = await Promise.all([
+    new Promise<string>((resolve, reject) => {
+      execFile(
+        system32Path('netstat.exe'),
+        ['-ano'],
+        { maxBuffer: 16 * 1024 * 1024, encoding: 'utf8', windowsHide: true, timeout: 10_000 },
+        (err, out) => (err ? reject(err) : resolve(out)),
+      );
+    }),
+    listWindowsProcesses(),
+  ]);
+  const names = new Map(processes.map((entry) => [entry.pid, entry.name.replace(/\.exe$/i, '')]));
+  return parseNetstatOutput(stdout, (pid) => names.get(pid) ?? '');
+}
+
+/**
+ * `netstat -ano` rows: `TCP <local> <foreign> <state> <pid>` (IPv6 rows use
+ * `[...]` addresses and are labelled TCP too). The State column is localised
+ * (German `ABHÖREN`), so a listener is recognised by its foreign address,
+ * `0.0.0.0:0` or `[::]:0`, which only listening sockets have. UDP rows have
+ * no state and are skipped. The port follows the LAST `:`; brackets and a
+ * `%scope` suffix are stripped from the address.
+ */
+export function parseNetstatOutput(stdout: string, nameOf: (pid: number) => string): Listener[] {
+  const listeners: Listener[] = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    const match = /^\s*TCP\s+(\S+)\s+(\S+)\s+\S+\s+(\d+)\s*$/i.exec(line);
+    if (!match) continue;
+    const [, local, foreign, pidText] = match;
+    if (foreign !== '0.0.0.0:0' && foreign !== '[::]:0') continue;
+    const idx = local!.lastIndexOf(':');
+    if (idx === -1) continue;
+    const port = Number(local!.slice(idx + 1));
+    if (!Number.isInteger(port)) continue;
+    let address = local!.slice(0, idx);
+    if (address.startsWith('[') && address.endsWith(']')) address = address.slice(1, -1);
+    address = address.replace(/%.*$/, '');
+    const pid = Number(pidText);
+    listeners.push({ pid, command: nameOf(pid), port, address });
+  }
+  return listeners;
+}
+
+function platformLister(platform: NodeJS.Platform): () => Promise<Listener[]> {
+  if (platform === 'darwin') return listListenersDarwin;
+  return platform === 'win32' ? listListenersWin32 : listListenersLinux;
+}
+
 interface CacheEntry {
   /** Epoch ms the settled result expires; irrelevant while `pending` is set. */
   expires: number;
@@ -123,6 +179,8 @@ export interface PortScannerOptions {
   ttlMs?: number;
   /** Injectable platform listener lister — tests use this for fixtures/spies. */
   lister?: () => Promise<Listener[]>;
+  /** Injectable process-tree walk (descendantsOf by default) — tests use this for fixtures. */
+  tree?: (roots: number[]) => Promise<Set<number>>;
 }
 
 /**
@@ -135,13 +193,16 @@ export class PortScanner {
   private readonly ptys: Pick<PtyManager, 'pidsFor'> & Partial<Pick<PtyManager, 'hiddenPortsFor'>>;
   private readonly ttlMs: number;
   private readonly lister: () => Promise<Listener[]>;
+  private readonly tree: (roots: number[]) => Promise<Set<number>>;
+  private readonly platform: NodeJS.Platform;
   private readonly cache = new Map<string, CacheEntry>();
 
   constructor(opts: PortScannerOptions) {
     this.ptys = opts.ptys;
     this.ttlMs = opts.ttlMs ?? 2000;
-    const platform = opts.platform ?? process.platform;
-    this.lister = opts.lister ?? (platform === 'darwin' ? listListenersDarwin : listListenersLinux);
+    this.platform = opts.platform ?? process.platform;
+    this.lister = opts.lister ?? platformLister(this.platform);
+    this.tree = opts.tree ?? ((roots) => descendantsOf(roots, { platform: this.platform }));
   }
 
   async scan(sessionId: string, opts: { fresh?: boolean } = {}): Promise<SessionPort[]> {
@@ -177,25 +238,47 @@ export class PortScanner {
     return fresh.some((p) => p.port === port);
   }
 
+  /**
+   * The loopback address the proxy dials for a detected `port`: 127.0.0.1,
+   * except on Windows when every listener on it is `::1` only. Node resolves
+   * `localhost` to ::1 first there, so a dev server told to listen on
+   * localhost (Vite's default) accepts no IPv4 connection. Call after hasPort,
+   * whose scan this reuses.
+   */
+  async upstreamHost(sessionId: string, port: number): Promise<string> {
+    if (this.platform !== 'win32') return '127.0.0.1';
+    const listeners = (await this.scan(sessionId)).filter((p) => p.port === port);
+    return listeners.length > 0 && listeners.every((p) => p.address === '::1')
+      ? '::1'
+      : '127.0.0.1';
+  }
+
   private async runScan(sessionId: string): Promise<SessionPort[]> {
     const pids = this.ptys.pidsFor(sessionId);
     if (pids.length === 0) return []; // exited/interrupted session: zero execs
-    const [tree, listeners] = await Promise.all([descendantsOf(pids), this.lister()]);
+    const [tree, listeners] = await Promise.all([this.tree(pids), this.lister()]);
     const hidden = this.ptys.hiddenPortsFor?.(sessionId) ?? new Set<number>();
-    const seen = new Set<string>();
+    const seen = new Map<string, SessionPort>();
     const ports: SessionPort[] = [];
     for (const listener of listeners) {
       if (!tree.has(listener.pid)) continue;
       if (hidden.has(listener.port)) continue;
       const key = `${listener.port}:${listener.pid}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      ports.push({
+      const kept = seen.get(key);
+      if (kept) {
+        // Windows: an IPv4-reachable socket of the same listener decides how
+        // the proxy dials it (upstreamHost), so it is the one reported.
+        if (this.platform === 'win32' && kept.address === '::1') kept.address = listener.address;
+        continue;
+      }
+      const port: SessionPort = {
         port: listener.port,
         pid: listener.pid,
         command: listener.command,
         address: listener.address,
-      });
+      };
+      seen.set(key, port);
+      ports.push(port);
     }
     ports.sort((a, b) => a.port - b.port);
     return ports;

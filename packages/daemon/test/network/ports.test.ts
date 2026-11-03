@@ -5,9 +5,11 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { sessionPortsResponseSchema } from '@puddle/shared';
 import { ApiError } from '../../src/http/errors.js';
 import { sessionRoutes } from '../../src/http/routes/sessions.js';
-import { descendantsOf, parsePsOutput } from '../../src/ports/process-tree.js';
+import type { WindowsProcess } from '@puddle/shared/node/platform';
+import { descendantsOf, parsePsOutput, windowsDescendants } from '../../src/ports/process-tree.js';
 import {
   parseLsofOutput,
+  parseNetstatOutput,
   parseSsOutput,
   PortScanner,
   type Listener,
@@ -82,6 +84,72 @@ describe('parseSsOutput', () => {
   });
 });
 
+describe('parseNetstatOutput', () => {
+  it('keeps TCP listeners by foreign address, whatever the localised state says', () => {
+    const stdout = [
+      '',
+      'Aktive Verbindungen',
+      '',
+      '  Proto  Lokale Adresse         Remoteadresse          Status           PID',
+      '  TCP    0.0.0.0:135            0.0.0.0:0              ABHÖREN          1508',
+      '  TCP    127.0.0.1:5173         0.0.0.0:0              LISTENING        4200',
+      '  TCP    127.0.0.1:5173         127.0.0.1:50122        ESTABLISHED      4200',
+      '  TCP    [::]:3000              [::]:0                 LISTENING        4300',
+      '  TCP    [::1]:8080             [::]:0                 LISTENING        4400',
+      '  TCP    [fe80::1%12]:9000      [::]:0                 LISTENING        4500',
+      '  UDP    0.0.0.0:5353           *:*                                    4600',
+      'garbage',
+    ].join('\r\n');
+    const names = new Map([
+      [4200, 'node'],
+      [4300, 'python'],
+    ]);
+    expect(parseNetstatOutput(stdout, (pid) => names.get(pid) ?? '')).toEqual([
+      { pid: 1508, command: '', port: 135, address: '0.0.0.0' },
+      { pid: 4200, command: 'node', port: 5173, address: '127.0.0.1' },
+      { pid: 4300, command: 'python', port: 3000, address: '::' },
+      { pid: 4400, command: '', port: 8080, address: '::1' },
+      { pid: 4500, command: '', port: 9000, address: 'fe80::1' },
+    ] satisfies Listener[]);
+  });
+});
+
+describe('windowsDescendants', () => {
+  const entry = (pid: number, ppid: number, createdAtMs: number | null): WindowsProcess => ({
+    pid,
+    ppid,
+    name: 'node.exe',
+    command: 'node',
+    commandLine: null,
+    createdAtMs,
+  });
+
+  it('follows parent links only to processes not older than their parent', () => {
+    const table = [
+      entry(0, 0, null), // System Idle Process: its own parent
+      entry(100, 1, 1_000),
+      entry(101, 100, 1_100),
+      entry(102, 101, 1_200),
+      entry(103, 100, 900), // started before 100: an earlier owner's orphan
+      entry(104, 103, 950),
+      entry(105, 100, null), // creation time withheld: trusted, as on POSIX
+      entry(200, 1, 1_000),
+    ];
+    expect(windowsDescendants([100], table)).toEqual(new Set([100, 101, 102, 105]));
+    expect(windowsDescendants([0], table)).toEqual(new Set([0]));
+  });
+
+  it('reads the process table instead of exec-ing ps on Windows', async () => {
+    vi.mocked(execFile).mockClear();
+    const tree = await descendantsOf([100], {
+      platform: 'win32',
+      windowsProcesses: async () => [entry(100, 1, 1), entry(101, 100, 2)],
+    });
+    expect(tree).toEqual(new Set([100, 101]));
+    expect(execFile).not.toHaveBeenCalled();
+  });
+});
+
 describe('parsePsOutput', () => {
   it('builds a ppid -> children map, skipping malformed lines', () => {
     const stdout = [
@@ -129,7 +197,7 @@ describe('descendantsOf', () => {
       return {} as ChildProcess;
     }) as unknown as typeof execFile);
 
-    const result = await descendantsOf([100]);
+    const result = await descendantsOf([100], { platform: 'linux' });
     expect(result).toEqual(new Set([100, 101, 102, 103]));
   });
 
@@ -211,6 +279,38 @@ describe('PortScanner cache', () => {
   });
 });
 
+describe('PortScanner.upstreamHost', () => {
+  const ptys = { pidsFor: () => [42] } as unknown as PtyManager;
+  const scanner = (platform: NodeJS.Platform, listeners: Listener[]) =>
+    new PortScanner({
+      ptys,
+      platform,
+      tree: async () => new Set([42]),
+      lister: async () => listeners,
+    });
+  const listener = (port: number, address: string): Listener => ({
+    pid: 42,
+    command: 'node',
+    port,
+    address,
+  });
+
+  it('dials ::1 on Windows only for a port listening on IPv6 loopback alone', async () => {
+    const listeners = [
+      listener(5173, '::1'),
+      listener(3000, '::1'),
+      listener(3000, '127.0.0.1'),
+      listener(8080, '::'),
+    ];
+    const windows = scanner('win32', listeners);
+    expect(await windows.upstreamHost('s', 5173)).toBe('::1');
+    expect(await windows.upstreamHost('s', 3000)).toBe('127.0.0.1');
+    expect(await windows.upstreamHost('s', 8080)).toBe('127.0.0.1');
+    expect(await windows.upstreamHost('s', 9999)).toBe('127.0.0.1');
+    expect(await scanner('linux', listeners).upstreamHost('s', 5173)).toBe('127.0.0.1');
+  });
+});
+
 describe('PortScanner integration (real child process, real platform lister)', () => {
   let child: ChildProcess;
   let childPort: number;
@@ -268,7 +368,9 @@ describe('PortScanner integration (real child process, real platform lister)', (
     await expect(freshScanner.hasPort(sessionId, unusedPort)).resolves.toBe(false);
     const listenerCalls = vi
       .mocked(execFile)
-      .mock.calls.filter(([cmd]) => cmd === 'lsof' || cmd === 'ss').length;
+      .mock.calls.filter(
+        ([cmd]) => cmd === 'lsof' || cmd === 'ss' || /netstat.exe$/i.test(cmd),
+      ).length;
     expect(listenerCalls).toBe(2);
   });
 });

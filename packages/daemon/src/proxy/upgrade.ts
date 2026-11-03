@@ -17,7 +17,7 @@ const PROXY_UPGRADE = /^\/proxy\/([^/]+)\/(\d+)(?:\/.*)?$/;
 
 export interface UpgradeProxyDeps {
   sessions: Pick<SessionStore, 'get'>;
-  scanner: Pick<PortScanner, 'hasPort'>;
+  scanner: Pick<PortScanner, 'hasPort'> & Partial<Pick<PortScanner, 'upstreamHost'>>;
   authority: LeaseRegistry;
   tracker: ProxySocketTracker;
 }
@@ -85,6 +85,7 @@ async function forward(
   if (!(await deps.scanner.hasPort(sid, portNum))) {
     return refuse(socket, 403, 'Forbidden');
   }
+  const host = (await deps.scanner.upstreamHost?.(sid, portNum)) ?? '127.0.0.1';
 
   if (!resource.valid()) return refuse(socket, 401, 'Unauthorized');
 
@@ -93,7 +94,7 @@ async function forward(
   // HTTP path, they are load-bearing here). Raw path sliced textually.
   const rawPath = pathAfterPrefix(req.url, sid, port);
   const upstreamReq = httpRequest({
-    host: '127.0.0.1',
+    host,
     port: portNum,
     method: req.method,
     path: rawPath,

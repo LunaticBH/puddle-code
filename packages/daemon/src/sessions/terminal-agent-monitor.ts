@@ -1,6 +1,10 @@
 import { StatusDetector } from '../pty/status-detector.js';
 import type { AgentAdapter } from '../agents/adapter.js';
-import { foregroundProcesses, readProcessSnapshot } from '../pty/foreground-process.js';
+import {
+  foregroundProcesses,
+  readProcessSnapshot,
+  type ProcessEntry,
+} from '../pty/foreground-process.js';
 
 export interface TerminalAgentTarget {
   session: string;
@@ -14,14 +18,18 @@ interface Options {
   changed(session: string): void;
   notify?(session: string, reason: 'waiting_input' | 'exited'): void;
   quietMs?: number;
-  snapshot?: typeof readProcessSnapshot;
+  snapshot?: () => ReturnType<typeof readProcessSnapshot>;
   intervalMs?: number;
+  /** How snapshots are read and interpreted; `process.platform` by default. */
+  platform?: NodeJS.Platform;
 }
 
 interface ObservedAgent {
   runtime: string;
   agent: string;
   pid: number;
+  /** The agent process's creation time where known (Windows), so a reused pid is an exit. */
+  createdAtMs: number | null;
   detector: StatusDetector | null;
   armed: boolean;
 }
@@ -76,7 +84,9 @@ export class TerminalAgentMonitor {
       // Inspection failure removes hints; an unavailable ps must never leave
       // a stale agent mark or interfere with the shell itself.
       let succeeded = true;
-      const entries = await (this.options.snapshot ?? readProcessSnapshot)().catch(() => {
+      const platform = this.options.platform ?? process.platform;
+      const snapshot = this.options.snapshot ?? (() => readProcessSnapshot(platform));
+      const entries = await snapshot().catch(() => {
         succeeded = false;
         return new Map();
       });
@@ -87,7 +97,7 @@ export class TerminalAgentMonitor {
         if (now?.runtime !== target.runtime || now.pid !== target.pid) continue;
         const matches = new Set<string>();
         const pids = new Set<number>();
-        for (const path of foregroundProcesses(target.pid, entries)) {
+        for (const path of foregroundProcesses(target.pid, entries, platform)) {
           for (const entry of path) {
             let recognised = false;
             for (const adapter of this.options.adapters) {
@@ -114,7 +124,7 @@ export class TerminalAgentMonitor {
         }
         // Only a successful process snapshot with a live shell can establish
         // child exit. Suspension, backgrounding and failed ps are not exits.
-        if (observed && succeeded && entries.has(target.pid) && !entries.has(observed.pid)) {
+        if (observed && succeeded && entries.has(target.pid) && !this.alive(observed, entries)) {
           observed.detector?.dispose();
           this.observed.delete(target.session);
           this.options.notify?.(target.session, 'exited');
@@ -129,9 +139,21 @@ export class TerminalAgentMonitor {
           }
           continue;
         }
-        if (observed?.pid !== pid || observed.agent !== agent) {
+        const createdAtMs = entries.get(pid)?.createdAtMs ?? null;
+        if (
+          observed?.pid !== pid ||
+          observed.createdAtMs !== createdAtMs ||
+          observed.agent !== agent
+        ) {
           observed?.detector?.dispose();
-          observed = { runtime: target.runtime, agent, pid, detector: null, armed: false };
+          observed = {
+            runtime: target.runtime,
+            agent,
+            pid,
+            createdAtMs,
+            detector: null,
+            armed: false,
+          };
           this.observed.set(target.session, observed);
         }
         if (!observed.detector) {
@@ -156,5 +178,11 @@ export class TerminalAgentMonitor {
     } finally {
       this.pending = false;
     }
+  }
+
+  /** The observed agent is still in the snapshot, and not a newer process on its pid. */
+  private alive(observed: ObservedAgent, entries: ReadonlyMap<number, ProcessEntry>): boolean {
+    const entry = entries.get(observed.pid);
+    return entry !== undefined && (entry.createdAtMs ?? null) === observed.createdAtMs;
   }
 }
