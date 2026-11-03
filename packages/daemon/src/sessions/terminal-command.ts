@@ -10,6 +10,23 @@ function quote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
+/**
+ * The PTY programme and arguments that run `command` and then hand over to
+ * the session shell. POSIX wraps both in `/bin/sh -c`.
+ */
+export function terminalCommandSpawn(
+  command: TerminalCommand,
+  shell: string,
+  shellArgs: string[],
+  platform: NodeJS.Platform = process.platform,
+): { file: string; args: string[] } {
+  if (platform === 'win32') {
+    // TODO(windows): the Node run wrapper (docs/windows.md decision 13).
+    throw new Error('one-shot terminal commands are not yet supported on Windows');
+  }
+  return { file: '/bin/sh', args: terminalCommandArgs(command, shell, shellArgs) };
+}
+
 export function terminalCommandArgs(
   command: TerminalCommand,
   shell: string,

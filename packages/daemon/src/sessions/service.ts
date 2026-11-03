@@ -42,7 +42,7 @@ import { StatusDetector, type DetectedStatus } from '../pty/status-detector.js';
 import type { CreateWorktreeResult, WorktreeManager } from '../worktrees/manager.js';
 import type { ConversationShare } from './conversation-share.js';
 import { buildHandoffPrompt } from './handoff.js';
-import { terminalCommandArgs, type TerminalCommand } from './terminal-command.js';
+import { terminalCommandSpawn, type TerminalCommand } from './terminal-command.js';
 import {
   buildConcurrentWorktreeNote,
   buildInterruptedResumeNote,
@@ -710,13 +710,11 @@ export class SessionService extends EventEmitter {
   private spawnTerminal(sessionId: string, worktreePath: string, command?: TerminalCommand): void {
     const { shell, args, env } = this.shellSpawnParts(sessionId);
     try {
-      this.deps.ptys.spawn(
-        sessionId,
-        'agent',
-        command ? '/bin/sh' : shell,
-        command ? terminalCommandArgs(command, shell, args) : args,
-        { cwd: command?.cwd ?? worktreePath, env: { ...env, ...command?.env } },
-      );
+      const spawn = command ? terminalCommandSpawn(command, shell, args) : { file: shell, args };
+      this.deps.ptys.spawn(sessionId, 'agent', spawn.file, spawn.args, {
+        cwd: command?.cwd ?? worktreePath,
+        env: { ...env, ...command?.env },
+      });
     } catch (e) {
       this.transition(sessionId, 'exited');
       this.deps.events.record(sessionId, 'spawn_failed', { message: (e as Error).message });
