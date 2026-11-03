@@ -9,3 +9,7 @@ Past releases: see docs/changelogs/.
 
 ## [Unreleased]
 
+### Fixed
+
+- Suppress duplicate terminal colour replies from xterm when the daemon answers startup theme queries, preserving legacy viewer replies and replay suppression.
+

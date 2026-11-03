@@ -30,7 +30,7 @@ import {
 } from '../../lib/appearance/theme';
 import { cn } from '../../lib/utils';
 import { wsManager } from '../../lib/transport/ws';
-import { dynamicColourReport, type DynamicColourCode } from './osc-colour';
+import { registerDynamicColourQueries } from './osc-colour';
 import { terminalClipboard, writeTerminalClipboard } from './clipboard/clipboard';
 import { terminalSelectionText } from './clipboard/copy-text';
 import { registerUrlLinks } from './links/url-links';
@@ -451,30 +451,15 @@ export function Terminal({
       wsManager.write(stream, term, consumeTerminalModifiers(stream, term, data));
     });
 
-    // Answer the terminal dynamic-colour queries (OSC 10 foreground, OSC 11
-    // background) that xterm.js leaves unanswered. An agent with auto/system
-    // theme detection (e.g. Claude Code) queries the background luminance to
-    // choose light vs dark; without a reply it cannot match the puddle theme.
-    // Tokens are read live so the answer reflects the theme at query time.
-    //
-    // COMPATIBILITY PATH ONLY (pre-14.1 daemons): a ≥14.1 daemon answers these
-    // itself, from the colours the shell reports over the WS — it sees the
-    // query at agent SPAWN, before any viewer attaches, which is why the
-    // viewer-side answer alone left auto-theming agents dark. Registering here
-    // too would double-reply.
-    const answerColour = (code: DynamicColourCode, token: string) => (data: string) => {
-      if (data !== '?') return false; // a set request, not a query — leave it to xterm
-      if (replayingRef.current) return true; // a historical query — never re-answer it
-      const report = dynamicColourReport(code, cssTokenReader()(token));
-      if (report) wsManager.write(stream, term, report);
-      return true;
-    };
-    const oscForeground = daemonAnswersColours
-      ? null
-      : xterm.parser.registerOscHandler(10, answerColour(10, '--text-primary'));
-    const oscBackground = daemonAnswersColours
-      ? null
-      : xterm.parser.registerOscHandler(11, answerColour(11, '--bg-base'));
+    // The daemon sees startup queries before viewers attach. Consume them
+    // here to suppress xterm 6's built-in replies; only older daemons need
+    // viewer-side answers. Historical queries must never reach PTY stdin.
+    const oscColours = registerDynamicColourQueries(xterm, {
+      daemonAnswers: daemonAnswersColours,
+      isReplaying: () => replayingRef.current,
+      readColour: (code) => cssTokenReader()(code === 10 ? '--text-primary' : '--bg-base'),
+      reply: (report) => wsManager.write(stream, term, report),
+    });
 
     const oscClipboard = xterm.parser.registerOscHandler(52, clipboard.osc);
 
@@ -579,8 +564,7 @@ export function Terminal({
       resizeScrollGuardRef.current.release();
       searchResults.dispose();
       viewportScroll.dispose();
-      oscForeground?.dispose();
-      oscBackground?.dispose();
+      oscColours.dispose();
       oscClipboard.dispose();
       urlLinks.dispose();
       fileLinks?.dispose();
