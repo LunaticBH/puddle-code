@@ -1,7 +1,7 @@
 import WebSocket from 'ws';
 import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, isAbsolute, join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { PROTOCOL_VERSION, versionResponseSchema } from '@puddle/shared';
 import type {
@@ -14,6 +14,7 @@ import type {
   SessionEnvResponse,
   WsServerMessage,
 } from '@puddle/shared';
+import { stripAnsi } from '../../src/pty/ansi.js';
 import { startDaemon, type RunningDaemon } from '../helpers/authorised-daemon.js';
 import { fakeAdapter } from '../helpers/daemon-fixtures.js';
 import { initRepo } from '../helpers/git-fixtures.js';
@@ -76,6 +77,14 @@ function wsClient(daemon: RunningDaemon) {
     },
   };
 }
+
+// Shell tabs run the real shell: cmd.exe on Windows (SHELL may name it there
+// because it is an existing executable), where Enter is CR and `cd` prints the
+// directory. A wide terminal keeps deep temp paths from wrapping.
+const windows = process.platform === 'win32';
+if (windows) process.env.SHELL = process.env.ComSpec;
+const ENTER = windows ? '\r' : '\n';
+const PRINT_DIRECTORY = windows ? 'cd\r' : 'pwd\n';
 
 async function pollUntil(cond: () => Promise<boolean>, ms = 30000): Promise<void> {
   const start = Date.now();
@@ -151,8 +160,10 @@ describe('daemon end-to-end (Phase 1 acceptance)', () => {
       label: 'org',
     });
     // Directories are keyed by profile id — the name is a display label only.
-    expect(alice1.config_dir).toContain(`/profiles/${profile.id}/accounts/fake/personal`);
-    expect(alice2.config_dir).toContain(`/profiles/${profile.id}/accounts/fake/org`);
+    expect(alice1.config_dir).toContain(
+      join('profiles', profile.id, 'accounts', 'fake', 'personal'),
+    );
+    expect(alice2.config_dir).toContain(join('profiles', profile.id, 'accounts', 'fake', 'org'));
     // The fake adapter's "credentials": session spawns verify these exist.
     writeFileSync(join(alice1.config_dir, 'creds.json'), '{}');
     writeFileSync(join(alice2.config_dir, 'creds.json'), '{}');
@@ -187,7 +198,7 @@ describe('daemon end-to-end (Phase 1 acceptance)', () => {
     );
     expect(host.username.length).toBeGreaterThan(0);
     expect(host.hostname.length).toBeGreaterThan(0);
-    expect(host.home.startsWith('/')).toBe(true);
+    expect(isAbsolute(host.home)).toBe(true);
 
     const renamedPrefix = await c.json<Profile>('PATCH', `/api/profiles/${profile.id}`, {
       branch_prefix: 'team/alice/',
@@ -220,7 +231,7 @@ describe('daemon end-to-end (Phase 1 acceptance)', () => {
     // Dotdirs are listed too (the repo's .git itself, when completing inside it).
     const inside = await c.json<{ entries: Array<{ name: string }> }>(
       'GET',
-      `/api/fs/dirs?prefix=${encodeURIComponent(repoPath + '/.g')}`,
+      `/api/fs/dirs?prefix=${encodeURIComponent(join(repoPath, '.g'))}`,
     );
     expect(inside.entries.some((e) => e.name === '.git')).toBe(true);
 
@@ -235,7 +246,7 @@ describe('daemon end-to-end (Phase 1 acceptance)', () => {
       'GET',
       '/api/fs/dirs?prefix=~/',
     );
-    expect(tilde.entries.every((e) => e.path.startsWith(`${homedir()}/`))).toBe(true);
+    expect(tilde.entries.every((e) => e.path.startsWith(join(homedir(), '/')))).toBe(true);
     expect(tilde.entries.some((e) => e.path === homedir())).toBe(false);
 
     // Re-registering a known path (however spelt) returns the existing repo.
@@ -316,9 +327,11 @@ describe('daemon end-to-end (Phase 1 acceptance)', () => {
       term: string;
     };
     expect(spawned.term).toBe('shell-1');
-    viewer.send({ t: 'attach', session: s1.id, term: spawned.term, cols: 80, rows: 24 });
-    viewer.send({ t: 'stdin', session: s1.id, term: spawned.term, data: 'pwd\n' });
-    await waitFor(() => viewer.outputFor(s1.id, spawned.term).includes(s1.worktree_path));
+    viewer.send({ t: 'attach', session: s1.id, term: spawned.term, cols: 400, rows: 24 });
+    viewer.send({ t: 'stdin', session: s1.id, term: spawned.term, data: PRINT_DIRECTORY });
+    await waitFor(() =>
+      stripAnsi(viewer.outputFor(s1.id, spawned.term)).includes(s1.worktree_path),
+    );
     viewer.close();
   });
 
@@ -346,17 +359,22 @@ describe('daemon end-to-end (Phase 1 acceptance)', () => {
     await waitFor(() => a.outputFor(s.id).includes('firstsecond'));
     expect(a.outputFor(s.id)).not.toContain('12;34R');
 
-    // The answering viewer's reply reaches the PTY.
-    b.send({ t: 'stdin', session: s.id, term: 'agent', data: '\x1b[56;78R\n' });
-    await waitFor(() => b.outputFor(s.id).includes('56;78R'));
+    // ConPTY consumes a cursor report typed into its input as the console's own
+    // answer, so a passed reply cannot be seen echoed there; the passing side
+    // of the rule is covered by the gateway unit tests.
+    if (!windows) {
+      // The answering viewer's reply reaches the PTY.
+      b.send({ t: 'stdin', session: s.id, term: 'agent', data: '\x1b[56;78R\n' });
+      await waitFor(() => b.outputFor(s.id).includes('56;78R'));
 
-    // B detaches — the role falls back to A, whose replies then pass. The
-    // detach has no ack, so poll by re-sending until one lands.
-    b.send({ t: 'detach', session: s.id, term: 'agent' });
-    await waitFor(() => {
-      a.send({ t: 'stdin', session: s.id, term: 'agent', data: '\x1b[99;9R\n' });
-      return a.outputFor(s.id).includes('99;9R');
-    });
+      // B detaches — the role falls back to A, whose replies then pass. The
+      // detach has no ack, so poll by re-sending until one lands.
+      b.send({ t: 'detach', session: s.id, term: 'agent' });
+      await waitFor(() => {
+        a.send({ t: 'stdin', session: s.id, term: 'agent', data: '\x1b[99;9R\n' });
+        return a.outputFor(s.id).includes('99;9R');
+      });
+    }
 
     a.close();
     b.close();
@@ -383,7 +401,7 @@ describe('daemon end-to-end (Phase 1 acceptance)', () => {
 
     // The stream attaches like a session and the shell answers stdin.
     viewer.send({ t: 'attach', session: 'home', term, cols: 80, rows: 24 });
-    viewer.send({ t: 'stdin', session: 'home', term, data: 'echo home-shell-ok\n' });
+    viewer.send({ t: 'stdin', session: 'home', term, data: `echo home-shell-ok${ENTER}` });
     await waitFor(() => viewer.outputFor('home', term).includes('home-shell-ok'));
 
     // kill-shell ends it; attached viewers learn through `exit`.
@@ -557,7 +575,9 @@ describe('daemon end-to-end (Phase 1 acceptance)', () => {
       import_dir: source,
     });
     // Copied into a puddle-owned dir, never linked in place…
-    expect(imported.config_dir).toContain(`/profiles/${profile.id}/accounts/fake/imported`);
+    expect(imported.config_dir).toContain(
+      join('profiles', profile.id, 'accounts', 'fake', 'imported'),
+    );
     expect(existsSync(join(imported.config_dir, 'settings.json'))).toBe(true);
     // …with login state verified through the adapter, not assumed.
     expect(imported.logged_in).toBe(true);
@@ -772,12 +792,12 @@ describe('tier-2 reverse proxy end-to-end (Phase 5 acceptance)', () => {
     viewer.send({ t: 'spawn-shell', session: sid });
     await waitFor(() => viewer.messages.some((m) => m.t === 'shell-spawned'));
     const shell = viewer.messages.find((m) => m.t === 'shell-spawned') as { term: string };
-    viewer.send({ t: 'attach', session: sid, term: shell.term, cols: 80, rows: 24 });
+    viewer.send({ t: 'attach', session: sid, term: shell.term, cols: 400, rows: 24 });
     viewer.send({
       t: 'stdin',
       session: sid,
       term: shell.term,
-      data: `node ${join(session.worktree_path, 'listener.js')}\n`,
+      data: `node "${join(session.worktree_path, 'listener.js')}"${ENTER}`,
     });
     await waitFor(() => /PORT \d+/.test(viewer.outputFor(sid, shell.term)));
     listenerPort = Number(/PORT (\d+)/.exec(viewer.outputFor(sid, shell.term))![1]);
@@ -1209,12 +1229,29 @@ describe('tier-1 migration end-to-end (Workstream S / SPEC §5)', () => {
       return ((await res.json()) as Session).status !== 'starting';
     });
     viewer.send({ t: 'attach', session: s.id, term: 'agent', cols: 100, rows: 30 });
-    viewer.send({
-      t: 'stdin',
-      session: s.id,
-      term: 'agent',
-      data: '\u001b]7733;set;Q0FQVFVSRURfUFJPQkU=;aHVudGVyMg==\u0007\n',
-    });
+    if (windows) {
+      // ConPTY parses escapes typed into its input instead of echoing them, so
+      // a shell tab prints the report, as the PowerShell hook would. Node
+      // decodes the \u escapes typed here.
+      viewer.send({ t: 'spawn-shell', session: s.id });
+      await waitFor(() => viewer.messages.some((m) => m.t === 'shell-spawned'));
+      const shell = viewer.messages.find((m) => m.t === 'shell-spawned') as { term: string };
+      viewer.send({
+        t: 'stdin',
+        session: s.id,
+        term: shell.term,
+        data:
+          'node -e "process.stdout.write(\'\\u001b]7733;set;Q0FQVFVSRURfUFJPQkU=;' +
+          'aHVudGVyMg==\\u0007\')"\r',
+      });
+    } else {
+      viewer.send({
+        t: 'stdin',
+        session: s.id,
+        term: 'agent',
+        data: '\u001b]7733;set;Q0FQVFVSRURfUFJPQkU=;aHVudGVyMg==\u0007\n',
+      });
+    }
     await pollUntil(async () => {
       const env = await c.json<SessionEnvResponse>('GET', `/api/sessions/${s.id}/env`);
       return env.vars.length === 1;

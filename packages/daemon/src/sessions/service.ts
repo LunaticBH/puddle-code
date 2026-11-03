@@ -37,8 +37,14 @@ import type {
   PtyExitEvent,
   PtyManager,
 } from '../pty/pty-manager.js';
+import { defaultShell } from '../pty/shell.js';
 import { isDeniedEnvName, type ShellHooks } from '../pty/shell-hooks.js';
 import { StatusDetector, type DetectedStatus } from '../pty/status-detector.js';
+import {
+  isConsoleHostTitle,
+  STATUS_CONTROL_C_EXIT,
+  windowsExitCodeLabel,
+} from '../pty/windows-console.js';
 import type { CreateWorktreeResult, WorktreeManager } from '../worktrees/manager.js';
 import type { ConversationShare } from './conversation-share.js';
 import { buildHandoffPrompt } from './handoff.js';
@@ -689,7 +695,8 @@ export class SessionService extends EventEmitter {
     if (!existsSync(absolute) || !statSync(absolute).isDirectory()) {
       throw ApiError.badRequest('cwd_not_a_directory', `cwd '${cwd}' is not a directory`);
     }
-    const rel = relative(worktreeRoot, absolute);
+    // Stored and sent root-relative, which is `/`-separated on every host.
+    const rel = relative(worktreeRoot, absolute).split(sep).join('/');
     return rel === '' ? null : rel;
   }
 
@@ -1278,9 +1285,11 @@ export class SessionService extends EventEmitter {
       // The directory may disappear between exists/stat; ignore a stale prompt.
       return;
     }
+    // Windows: relative() compares case-insensitively and returns an absolute
+    // path across drives, which counts as outside.
     const rel = relative(resolve(session.worktree_path), absolute);
     const outside = rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel);
-    const cwd = outside || rel === '' ? null : rel;
+    const cwd = outside || rel === '' ? null : rel.split(sep).join('/');
     if ((session.cwd ?? null) !== cwd) this.deps.sessions.setCwd(session.id, cwd);
   }
 
@@ -1323,7 +1332,7 @@ export class SessionService extends EventEmitter {
     args: string[];
     env: Record<string, string>;
   } {
-    const shell = process.env.SHELL ?? 'bash';
+    const shell = defaultShell();
     const session = this.deps.sessions.get(sessionId);
     const captureEnv = this.captureEnvEnabled(session.project_id);
     const captured = this.capturedSpawnEnv(session);
@@ -1536,7 +1545,11 @@ export class SessionService extends EventEmitter {
     // 0/1/2) — e.g. Claude Code's `/rename`, handled client-side with no status
     // transition. `extractOscTitle` returns the de-animated title (spinner
     // glyphs stripped) or null (SPEC §4).
-    const oscTitle = extractOscTitle(e.data);
+    let oscTitle = extractOscTitle(e.data);
+    // Windows' inbox ConPTY titles every new console with its executable path.
+    if (oscTitle !== null && process.platform === 'win32' && isConsoleHostTitle(oscTitle)) {
+      oscTitle = null;
+    }
     if (oscTitle !== null) {
       // The "sequence" name: the default label for sessions without an
       // adapter-maintained agent_title (terminals, agents whose adapter has no
@@ -1910,6 +1923,8 @@ export class SessionService extends EventEmitter {
    */
   private noticeOnAbnormalExit(e: PtyExitEvent, startupFailure: boolean): void {
     if (this.shuttingDown || e.exitCode === 0) return;
+    // A closed console or Ctrl+C: on POSIX the matching signal deaths exit 0.
+    if (process.platform === 'win32' && e.exitCode === STATUS_CONTROL_C_EXIT) return;
     if (this.expectedExits.delete(`${e.stream}:${e.term}`)) return;
     // A whole-session stop covers every term, so the flag is consumed by the
     // agent's exit rather than the first shell's — otherwise it would linger
@@ -1919,11 +1934,12 @@ export class SessionService extends EventEmitter {
       return;
     }
     const label = e.term === 'agent' ? 'Agent' : 'Terminal';
+    const code = process.platform === 'win32' ? windowsExitCodeLabel(e.exitCode) : e.exitCode;
     this.emit('notice', {
       level: 'error',
       title: startupFailure
-        ? `${label} failed to start (exit ${e.exitCode})`
-        : `${label} exited unexpectedly (exit ${e.exitCode})`,
+        ? `${label} failed to start (exit ${code})`
+        : `${label} exited unexpectedly (exit ${code})`,
       detail: this.exitDetail(e),
       session: e.stream,
       term: e.term,

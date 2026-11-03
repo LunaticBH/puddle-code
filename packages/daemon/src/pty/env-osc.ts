@@ -15,6 +15,8 @@
  * carry buffer holds partial state between pushes.
  */
 
+import { normaliseHostPath } from '@puddle/shared';
+
 export interface EnvDelta {
   op: 'set' | 'unset';
   name: string;
@@ -47,6 +49,9 @@ export class EnvOscFilter {
   private state: State = 'pass';
   private carry = '';
   private discarded = 0;
+
+  /** `platform` decides which cwd reports are absolute paths (see hostCwd). */
+  constructor(private readonly platform: NodeJS.Platform = process.platform) {}
 
   /** Filter a chunk: returns cleaned text plus any complete shell reports parsed from it. */
   push(chunk: string): { data: string; deltas: ShellReport[] } {
@@ -82,7 +87,7 @@ export class EnvOscFilter {
             s = '';
           }
         } else {
-          const delta = parsePayload(s.slice(0, end.at));
+          const delta = parsePayload(s.slice(0, end.at), this.platform);
           if (delta) deltas.push(delta);
           s = s.slice(end.at + end.len);
           this.state = 'pass';
@@ -130,7 +135,7 @@ function lastCharIfEsc(s: string): string {
 }
 
 /** Parse a private shell report; anything malformed is dropped (null). */
-function parsePayload(payload: string): ShellReport | null {
+function parsePayload(payload: string, platform: NodeJS.Platform): ShellReport | null {
   const parts = payload.split(';');
   const op = parts[0];
   if (op === 'set' && parts.length === 3) {
@@ -145,12 +150,27 @@ function parsePayload(payload: string): ShellReport | null {
     return { op: 'unset', name };
   }
   if (op === 'cwd' && parts.length === 2) {
-    const path = decodeB64(parts[1]!);
-    if (path === null || !path.startsWith('/') || path.includes('\0')) return null;
+    const decoded = decodeB64(parts[1]!);
+    const path = decoded === null ? null : hostCwd(decoded, platform);
+    if (path === null || path.includes('\0')) return null;
     if (Buffer.byteLength(path) > MAX_SEQ_BYTES / 2) return null;
     return { op: 'cwd', path };
   }
   return null;
+}
+
+/**
+ * A reported directory as an absolute host path, or null. POSIX accepts
+ * `/`-rooted paths only. Windows accepts drive-absolute (`C:\x`, `C:/x`) and
+ * UNC (`\\server\share`, `//server/share`) paths, never a rootless `\x`, and
+ * translates the MSYS drive form Git Bash reports when `pwd -W` is missing
+ * (`/c/x` is `C:\x`); other MSYS paths (`/tmp`, `/usr`) are unknowable here.
+ */
+function hostCwd(path: string, platform: NodeJS.Platform): string | null {
+  if (platform !== 'win32') return path.startsWith('/') ? path : null;
+  const msys = /^\/([A-Za-z])(\/.*)?$/.exec(path);
+  const native = msys ? `${msys[1]}:${msys[2] ?? '\\'}` : path.replace(/^\/\/(?=[^/])/, '\\\\');
+  return /^(?:[A-Za-z]:[\\/]|\\\\[^\\/])/.test(native) ? normaliseHostPath(native) : null;
 }
 
 function validName(name: string): boolean {

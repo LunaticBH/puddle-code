@@ -30,7 +30,7 @@ function isBodylessStatus(status: number): boolean {
 
 export interface HttpProxyDeps {
   sessions: Pick<SessionStore, 'get'>;
-  scanner: Pick<PortScanner, 'hasPort'>;
+  scanner: Pick<PortScanner, 'hasPort'> & Partial<Pick<PortScanner, 'upstreamHost'>>;
 }
 
 /**
@@ -97,12 +97,13 @@ async function handle(c: Context, deps: HttpProxyDeps): Promise<Response> {
   const outHeaders = forwardHeaders(c.req.header(), portNum);
   const method = c.req.method;
   const hasBody = method !== 'GET' && method !== 'HEAD';
+  const host = (await deps.scanner.upstreamHost?.(sid, portNum)) ?? '127.0.0.1';
 
   let upstreamRes: IncomingMessage;
   try {
     upstreamRes = await new Promise<IncomingMessage>((resolve, reject) => {
       const upstreamReq = httpRequest(
-        { host: '127.0.0.1', port: portNum, method, path: targetPath, headers: outHeaders },
+        { host, port: portNum, method, path: targetPath, headers: outHeaders },
         resolve,
       );
       // Connect/first-byte timeout only: cleared once headers arrive, so a
@@ -124,7 +125,11 @@ async function handle(c: Context, deps: HttpProxyDeps): Promise<Response> {
       else upstreamReq.end();
     });
   } catch {
-    throw new ApiError(502, 'upstream_unreachable', `could not reach 127.0.0.1:${portNum}`);
+    throw new ApiError(
+      502,
+      'upstream_unreachable',
+      `could not reach ${host.includes(':') ? `[${host}]` : host}:${portNum}`,
+    );
   }
 
   const status = upstreamRes.statusCode ?? 502;

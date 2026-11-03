@@ -1,7 +1,9 @@
 import { EventEmitter } from 'node:events';
 import pty from 'node-pty';
+import { killProcessTree } from '@puddle/shared/node/platform';
 import type { LogStore } from '../logs/log-store.js';
 import { EnvOscFilter, type EnvDelta } from './env-osc.js';
+import { planPtySpawn } from './pty-spawn.js';
 import { TerminalScreenStateStore } from './terminal-screen-state.js';
 import { findColourQueries, QUERY_CARRY, type TerminalTheme } from './terminal-theme.js';
 
@@ -42,7 +44,26 @@ interface Live {
   quiesced: string[] | null;
   /** Chunk-boundary carry for the OSC colour-query scanner (terminal-theme.ts). */
   queryTail: string;
+  /** Windows only (null elsewhere); see ConptyState. */
+  conpty: ConptyState | null;
 }
+
+/**
+ * ConPTY bookkeeping. node-pty on Windows queues write/resize/kill until the
+ * first output chunk and then runs them inside its socket listener, where a
+ * throw (resizing a PTY that exited meanwhile) is uncaught and ends the
+ * daemon. Resizes are therefore held here until the PTY is ready, and the
+ * pseudoconsole is closed at most once: a second `kill()` reaches a closed
+ * native handle.
+ */
+interface ConptyState {
+  ready: boolean;
+  closed: boolean;
+  exited: boolean;
+  spawnedSize: { cols: number; rows: number };
+}
+
+const windows = process.platform === 'win32';
 
 /**
  * The size a PTY starts at when no viewer has ever sized this (stream, term) —
@@ -101,12 +122,13 @@ export class PtyManager extends EventEmitter {
     const record = opts.record ?? true;
     const size = this.sizes.get(key) ?? DEFAULT_SIZE;
     this.screens.resize(stream, term, size.cols, size.rows);
-    const proc = pty.spawn(file, args, {
+    const plan = planPtySpawn(file, args, opts.env);
+    const proc = pty.spawn(plan.file, plan.args, {
       name: 'xterm-256color',
       cols: size.cols,
       rows: size.rows,
       cwd: opts.cwd,
-      env: { ...process.env, ...opts.env } as Record<string, string>,
+      env: plan.env,
     });
     const filter = new EnvOscFilter();
     const live: Live = {
@@ -117,9 +139,11 @@ export class PtyManager extends EventEmitter {
       term,
       quiesced: null,
       queryTail: '',
+      conpty: windows ? { ready: false, closed: false, exited: false, spawnedSize: size } : null,
     };
     this.live.set(key, live);
     proc.onData((raw) => {
+      if (live.conpty && !live.conpty.ready) this.conptyReady(live);
       if (live.quiesced !== null) {
         live.quiesced.push(raw);
         return;
@@ -127,6 +151,7 @@ export class PtyManager extends EventEmitter {
       this.handleData(live, raw);
     });
     proc.onExit(({ exitCode }) => {
+      if (live.conpty) live.conpty.exited = true;
       // A lifecycle rebind may be freezing the old segment when the process
       // exits. Flush every held byte against whichever placement currently
       // owns the runtime before closing its log/screen.
@@ -140,10 +165,38 @@ export class PtyManager extends EventEmitter {
       this.emit('exit', {
         stream: currentStream,
         term: currentTerm,
-        exitCode,
+        // ConPTY reports the exit when its output pipe closes, which can come
+        // before the native exit code is known.
+        exitCode: exitCode ?? -1,
       } satisfies PtyExitEvent);
       void this.screens.release(currentStream, currentTerm);
     });
+  }
+
+  /**
+   * The first ConPTY output: node-pty has started running queued calls. Apply
+   * the newest size once its listener has returned, so a failure stays ours.
+   */
+  private conptyReady(live: Live): void {
+    const state = live.conpty!;
+    state.ready = true;
+    setImmediate(() => {
+      if (state.exited || this.live.get(this.key(live.stream, live.term)) !== live) return;
+      const size = this.sizes.get(this.key(live.stream, live.term));
+      if (!size || (size.cols === state.spawnedSize.cols && size.rows === state.spawnedSize.rows)) {
+        return;
+      }
+      try {
+        live.proc.resize(size.cols, size.rows);
+      } catch {
+        // The process exited in between.
+      }
+    });
+  }
+
+  /** Whether calls on this PTY run now rather than in node-pty's deferred queue. */
+  private callable(live: Live): boolean {
+    return live.conpty === null || (live.conpty.ready && !live.conpty.exited);
   }
 
   notificationOutput(stream: string): Promise<string> {
@@ -219,7 +272,9 @@ export class PtyManager extends EventEmitter {
   redraw(stream: string, term: string): void {
     const key = this.key(stream, term);
     const live = this.live.get(key);
-    if (!live) return;
+    // A ConPTY that has not drawn yet needs no repaint, and a queued resize
+    // would run where its failure cannot be caught.
+    if (!live || !this.callable(live)) return;
     const size = this.sizes.get(key) ?? DEFAULT_SIZE;
     try {
       live.proc.resize(size.cols + 1, size.rows);
@@ -242,8 +297,11 @@ export class PtyManager extends EventEmitter {
   resize(stream: string, term: string, cols: number, rows: number): void {
     if (cols > 0 && rows > 0) this.sizes.set(this.key(stream, term), { cols, rows });
     this.screens.resize(stream, term, cols, rows);
+    const live = this.live.get(this.key(stream, term));
+    // A ConPTY not yet ready picks the remembered size up in conptyReady.
+    if (!live || !this.callable(live)) return;
     try {
-      this.live.get(this.key(stream, term))?.proc.resize(cols, rows);
+      live.proc.resize(cols, rows);
     } catch {
       // Resizing a PTY that exited between lookup and call is harmless.
     }
@@ -290,13 +348,45 @@ export class PtyManager extends EventEmitter {
   kill(stream: string, term: string, signal?: string): boolean {
     const rec = this.live.get(this.key(stream, term));
     if (!rec) return false;
-    rec.proc.kill(signal);
+    this.stop(rec, signal);
     return true;
   }
 
   killAll(stream?: string, signal?: string): void {
     for (const [key, rec] of this.live) {
-      if (stream === undefined || key.startsWith(`${stream} `)) rec.proc.kill(signal);
+      if (stream === undefined || key.startsWith(`${stream} `)) this.stop(rec, signal);
+    }
+  }
+
+  /**
+   * POSIX delivers `signal` (node-pty's default is SIGHUP). ConPTY has no
+   * signals, and node-pty throws for any: SIGKILL stops the process tree with
+   * `taskkill /T /F` and then closes the pseudoconsole; every other signal
+   * just closes it, which sends CTRL_CLOSE_EVENT to its processes and then
+   * terminates them, the counterpart of a hang-up.
+   */
+  private stop(rec: Live, signal: string | undefined): void {
+    const state = rec.conpty;
+    if (state === null) {
+      rec.proc.kill(signal);
+      return;
+    }
+    if (signal === 'SIGKILL') {
+      void killProcessTree(rec.proc.pid, { platform: 'win32' })
+        .catch(() => undefined)
+        .then(() => this.closeConsole(rec, state));
+      return;
+    }
+    this.closeConsole(rec, state);
+  }
+
+  private closeConsole(rec: Live, state: ConptyState): void {
+    if (state.closed || state.exited) return;
+    state.closed = true;
+    try {
+      rec.proc.kill();
+    } catch {
+      // Already torn down by node-pty.
     }
   }
 

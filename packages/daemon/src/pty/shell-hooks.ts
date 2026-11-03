@@ -1,6 +1,8 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { join } from 'node:path';
 import type { PuddlePaths } from '../paths.js';
+import { shellKind, type ShellKind } from './shell.js';
+import { gitBashRcfile, powershellHook, powershellHookCommand } from './windows-shell-hooks.js';
 
 /**
  * Session-shell hooks (SPEC §4). At each prompt they report cwd and, when the
@@ -50,8 +52,60 @@ export const ENV_CAPTURE_DENYLIST: ReadonlySet<string> = new Set([
   'TERM_SESSION_ID',
 ]);
 
-export function isDeniedEnvName(name: string): boolean {
-  return name.startsWith('PUDDLE_') || ENV_CAPTURE_DENYLIST.has(name);
+/**
+ * The Windows counterpart, kept separate so the POSIX templates never change
+ * (docs/windows.md, decision 1). Names are upper case and compared case
+ * insensitively, as Windows compares them: the POSIX names (still set by Git
+ * Bash and MSYS tools), the Windows identity and per-logon variables, the
+ * terminal host's, PowerShell's own, and MSYS's.
+ */
+export const WINDOWS_ENV_CAPTURE_DENYLIST: ReadonlySet<string> = new Set([
+  ...ENV_CAPTURE_DENYLIST,
+  'USERNAME',
+  'USERPROFILE',
+  'USERDOMAIN',
+  'USERDOMAIN_ROAMINGPROFILE',
+  'HOMEDRIVE',
+  'HOMEPATH',
+  'HOMESHARE',
+  'APPDATA',
+  'LOCALAPPDATA',
+  'COMPUTERNAME',
+  'LOGONSERVER',
+  'SESSIONNAME',
+  'CLIENTNAME',
+  'PSMODULEPATH',
+  'PSEXECUTIONPOLICYPREFERENCE',
+  'POWERSHELL_DISTRIBUTION_CHANNEL',
+  'MSYSTEM',
+  'MSYS',
+  'ORIGINAL_PATH',
+  'ORIGINAL_TEMP',
+  'ORIGINAL_TMP',
+  'EXEPATH',
+  'PLINK_PROTOCOL',
+  'HOSTNAME',
+]);
+
+/** Windows name prefixes denied as a rule, PUDDLE_ (hook control) included. */
+export const WINDOWS_ENV_CAPTURE_DENIED_PREFIXES: readonly string[] = [
+  'PUDDLE_',
+  'WT_',
+  'MSYSTEM_',
+  'MINGW_',
+  'MSYS2_',
+];
+
+export function isDeniedEnvName(
+  name: string,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  if (platform !== 'win32') return name.startsWith('PUDDLE_') || ENV_CAPTURE_DENYLIST.has(name);
+  const upper = name.toUpperCase();
+  return (
+    WINDOWS_ENV_CAPTURE_DENYLIST.has(upper) ||
+    WINDOWS_ENV_CAPTURE_DENIED_PREFIXES.some((prefix) => upper.startsWith(prefix))
+  );
 }
 
 const SHELL_DENYLIST = [...ENV_CAPTURE_DENYLIST].join(' ');
@@ -309,10 +363,18 @@ export interface ShellSessionConfig {
   historyFile: string;
 }
 
+/** The Windows-only hook files (see windows-shell-hooks.ts). */
+export interface WindowsShellHookFiles {
+  powershellHook: string;
+  gitBashRc: string;
+}
+
 export class ShellHooks {
   constructor(
     private readonly zshDir: string,
     private readonly bashRc: string,
+    private readonly windows: WindowsShellHookFiles | null = null,
+    private readonly platform: NodeJS.Platform = process.platform,
   ) {}
 
   /**
@@ -320,7 +382,7 @@ export class ShellHooks {
    * name; anything unrecognised still receives the isolated HISTFILE.
    */
   spawnConfig(shellPath: string, session?: ShellSessionConfig): ShellSpawnConfig {
-    const shell = basename(shellPath);
+    const kind = shellKind(shellPath, this.platform);
     const controls: Record<string, string> = session
       ? {
           HISTFILE: session.historyFile,
@@ -328,7 +390,8 @@ export class ShellHooks {
           PUDDLE_CAPTURE_ENV: session.captureEnv ? '1' : '0',
         }
       : {};
-    if (shell === 'zsh') {
+    if (this.platform === 'win32') return this.windowsSpawnConfig(kind, controls, session);
+    if (kind === 'zsh') {
       const orig = process.env.ZDOTDIR;
       return {
         args: [],
@@ -341,7 +404,40 @@ export class ShellHooks {
         },
       };
     }
-    if (shell === 'bash') return { args: ['--rcfile', this.bashRc], env: controls };
+    if (kind === 'bash') return { args: ['--rcfile', this.bashRc], env: controls };
+    return { args: [], env: session ? { HISTFILE: session.historyFile } : {} };
+  }
+
+  /**
+   * PowerShell and Git Bash are hooked; cmd.exe and WSL's bash get nothing
+   * (cmd.exe has no prompt hook, and a Windows HISTFILE means nothing inside
+   * WSL). Git Bash does not capture the environment: MSYS rewrites PATH, TEMP
+   * and TMP into its own `/c/...:/usr/bin` form, which would break every native
+   * program they were re-injected into.
+   */
+  private windowsSpawnConfig(
+    kind: ShellKind,
+    controls: Record<string, string>,
+    session: ShellSessionConfig | undefined,
+  ): ShellSpawnConfig {
+    if (kind === 'powershell' && this.windows) {
+      return {
+        args: [
+          '-NoLogo',
+          '-NoExit',
+          '-Command',
+          powershellHookCommand(this.windows.powershellHook),
+        ],
+        env: controls,
+      };
+    }
+    if (kind === 'bash' && this.windows) {
+      return {
+        args: ['--rcfile', this.windows.gitBashRc],
+        env: session ? { ...controls, PUDDLE_CAPTURE_ENV: '0' } : controls,
+      };
+    }
+    if (kind === 'cmd' || kind === 'wsl') return { args: [], env: {} };
     return { args: [], env: session ? { HISTFILE: session.historyFile } : {} };
   }
 }
@@ -349,9 +445,13 @@ export class ShellHooks {
 /**
  * Write the hook scripts under ~/.puddle/shell-hooks (regenerated every boot,
  * so upgrades refresh them). Files are sourced, never executed: 0600 in 0700
- * dirs.
+ * dirs. A Windows daemon also writes the PowerShell and Git Bash hooks; the
+ * mode bits are no-ops there, the home's owner-only ACL protects them.
  */
-export function installShellHooks(paths: PuddlePaths): ShellHooks {
+export function installShellHooks(
+  paths: PuddlePaths,
+  platform: NodeJS.Platform = process.platform,
+): ShellHooks {
   const zshDir = join(paths.shellHooksDir, 'zsh');
   const bashDir = join(paths.shellHooksDir, 'bash');
   mkdirSync(zshDir, { recursive: true, mode: 0o700 });
@@ -364,5 +464,21 @@ export function installShellHooks(paths: PuddlePaths): ShellHooks {
   write(join(zshDir, 'env-report.zsh'), zshEnvReport());
   const bashRc = join(bashDir, 'bashrc.bash');
   write(bashRc, bashRcfile());
-  return new ShellHooks(zshDir, bashRc);
+  if (platform !== 'win32') return new ShellHooks(zshDir, bashRc, null, platform);
+  const powershellDir = join(paths.shellHooksDir, 'powershell');
+  mkdirSync(powershellDir, { recursive: true, mode: 0o700 });
+  const windows: WindowsShellHookFiles = {
+    powershellHook: join(powershellDir, 'hook.ps1'),
+    gitBashRc: join(bashDir, 'git-bash.bash'),
+  };
+  write(
+    windows.powershellHook,
+    powershellHook({
+      denylist: WINDOWS_ENV_CAPTURE_DENYLIST,
+      deniedPrefixes: WINDOWS_ENV_CAPTURE_DENIED_PREFIXES,
+      maxValueChars: MAX_VALUE_CHARS,
+    }),
+  );
+  write(windows.gitBashRc, gitBashRcfile(bashRc));
+  return new ShellHooks(zshDir, bashRc, windows, platform);
 }

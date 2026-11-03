@@ -3,7 +3,12 @@ import { claudeCode } from '../../src/agents/claude-code/index.js';
 import { codex } from '../../src/agents/codex/index.js';
 import { geminiCli } from '../../src/agents/gemini-cli/index.js';
 import { opencode } from '../../src/agents/opencode/index.js';
-import { parseProcessSnapshot } from '../../src/pty/foreground-process.js';
+import type { WindowsProcess } from '@puddle/shared/node/platform';
+import {
+  parseProcessSnapshot,
+  windowsProcessCommand,
+  windowsProcessSnapshot,
+} from '../../src/pty/foreground-process.js';
 import {
   TerminalAgentMonitor,
   type TerminalAgentTarget,
@@ -28,6 +33,8 @@ function fixture() {
     changed,
     notify,
     quietMs: 20,
+    // The fixtures below are macOS `ps` rows, on every host.
+    platform: 'darwin',
   });
   monitors.push(monitor);
   return {
@@ -217,6 +224,110 @@ describe('terminal foreground agent monitor', () => {
     });
     await f.monitor.refresh();
     expect(f.changed).not.toHaveBeenCalled();
+  });
+});
+
+describe('Windows process recognition', () => {
+  function windowsProcess(
+    pid: number,
+    ppid: number,
+    name: string,
+    commandLine: string | null,
+    createdAtMs: number | null = 1_000 + pid,
+  ): WindowsProcess {
+    return {
+      pid,
+      ppid,
+      name,
+      command: name.replace(/\.exe$/i, '').toLowerCase(),
+      commandLine,
+      createdAtMs,
+    };
+  }
+
+  it('gives adapters the POSIX command shape: lower-case image name, then / separated arguments', () => {
+    expect(
+      windowsProcessCommand(
+        windowsProcess(
+          1,
+          0,
+          'node.exe',
+          '"C:\\Program Files\\nodejs\\node.exe" C:\\Users\\a\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js resume',
+        ),
+      ),
+    ).toBe('node C:/Users/a/AppData/Roaming/npm/node_modules/@openai/codex/bin/codex.js resume');
+    expect(
+      windowsProcessCommand(
+        windowsProcess(2, 0, 'Claude.EXE', 'C:\\Users\\a\\.local\\bin\\claude.exe --resume ref'),
+      ),
+    ).toBe('claude --resume ref');
+    expect(windowsProcessCommand(windowsProcess(3, 0, 'codex.exe', null))).toBe('codex');
+    expect(
+      windowsProcessCommand(
+        windowsProcess(
+          4,
+          0,
+          'node.exe',
+          'node "C:\\with spaces\\@google\\gemini-cli\\dist\\index.js"',
+        ),
+      ),
+    ).toBe('node "C:/with spaces/@google/gemini-cli/dist/index.js"');
+  });
+
+  function monitorOn(processes: WindowsProcess[]) {
+    const changed = vi.fn();
+    const notify = vi.fn();
+    const snapshot = vi.fn(async () => windowsProcessSnapshot(processes));
+    const monitor = new TerminalAgentMonitor({
+      targets: () => [{ session: 'terminal', runtime: 'first', pid: 100 }],
+      adapters,
+      snapshot,
+      changed,
+      notify,
+      quietMs: 20,
+      platform: 'win32',
+    });
+    monitors.push(monitor);
+    return {
+      monitor,
+      notify,
+      async scan(next: WindowsProcess[]) {
+        snapshot.mockResolvedValue(windowsProcessSnapshot(next));
+        await monitor.refresh();
+        return monitor.get('terminal', 'first');
+      },
+    };
+  }
+
+  const shell = windowsProcess(100, 1, 'pwsh.exe', '"C:\\Program Files\\PowerShell\\7\\pwsh.exe"');
+
+  it('treats every creation-consistent descendant of the PTY root as foreground', async () => {
+    const codex = windowsProcess(
+      200,
+      100,
+      'node.exe',
+      'node C:\\npm\\node_modules\\@openai\\codex\\bin\\codex.js',
+    );
+    const tool = windowsProcess(210, 200, 'cmd.exe', 'cmd.exe /c npm test');
+    const f = monitorOn([shell, codex, tool]);
+    expect(await f.scan([shell, codex, tool])).toBe('codex');
+    // Two agents side by side stay ambiguous, as on POSIX.
+    const claude = windowsProcess(300, 100, 'claude.exe', 'claude');
+    expect(await f.scan([shell, codex, claude])).toBeNull();
+    // Another console's agent, or a pid recycled from before its parent, is not ours.
+    expect(await f.scan([shell, windowsProcess(400, 1, 'claude.exe', 'claude')])).toBeNull();
+    expect(await f.scan([shell, windowsProcess(500, 100, 'claude.exe', 'claude', 500)])).toBeNull();
+  });
+
+  it('reports an exit when the agent pid is gone or reused by a newer process', async () => {
+    const claude = windowsProcess(200, 100, 'claude.exe', 'claude');
+    const f = monitorOn([shell, claude]);
+    expect(await f.scan([shell, claude])).toBe('claude-code');
+    // Same pid, later creation time: the agent exited and Windows reused its pid.
+    expect(await f.scan([shell, { ...claude, createdAtMs: claude.createdAtMs! + 5_000 }])).toBe(
+      'claude-code',
+    );
+    expect(f.notify).toHaveBeenCalledExactlyOnceWith('terminal', 'exited');
   });
 });
 

@@ -11,6 +11,7 @@ import {
 } from '@puddle/shared';
 import type { LogStore } from '../logs/log-store.js';
 import type { PtyDataEvent, PtyExitEvent, PtyManager } from '../pty/pty-manager.js';
+import { defaultShell } from '../pty/shell.js';
 import type { TerminalTheme } from '../pty/terminal-theme.js';
 import type {
   NoticeEvent,
@@ -336,8 +337,7 @@ export class WsGateway {
     let n = 1;
     while (used.has(`shell-${n}`)) n++;
     const term = `shell-${n}`;
-    const shell = process.env.SHELL ?? 'bash';
-    this.deps.ptys.spawn(HOME_STREAM, term, shell, [], { cwd: homedir() });
+    this.deps.ptys.spawn(HOME_STREAM, term, defaultShell(), [], { cwd: homedir() });
     return term;
   }
 
