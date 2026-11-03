@@ -42,6 +42,8 @@ export interface ConnectOptions {
   /** POST /cockpit/refresh (the UI's refresh button) invokes this — the CLI
    *  layer supplies the process-spawning behaviour; lib stays process-free. */
   onRefreshRequest?: (refreshId: string) => void;
+  /** A launcher `shutdown` request (Windows `puddle kill`); requires onRefreshRequest. */
+  onShutdownRequest?: () => void;
   refreshId?: string;
   /** Test seams. */
   sshBinary?: string;
@@ -49,6 +51,8 @@ export interface ConnectOptions {
   platform?: NodeJS.Platform;
   /** OpenSSH askpass executable for a graphical embedder with no terminal. */
   sshAskpassProgram?: string;
+  /** Never prompt: a Windows background cockpit, with no terminal and no ControlMaster. */
+  sshBatchMode?: boolean;
 }
 
 /**
@@ -66,8 +70,9 @@ export async function connectRemote(opts: ConnectOptions): Promise<RunningCockpi
     scpBinary: opts.scpBinary,
     platform,
     askpassProgram: opts.sshAskpassProgram,
+    ...(opts.sshBatchMode ? { batchMode: true } : {}),
   });
-  if (platform === 'win32') {
+  if (platform === 'win32' && !opts.sshBatchMode) {
     logger.warn(
       'Windows OpenSSH cannot share a connection; you may be asked to authenticate more than once. ' +
         'An SSH key (ssh-copy-id) avoids the prompts.',
@@ -179,7 +184,12 @@ export async function connectRemote(opts: ConnectOptions): Promise<RunningCockpi
       avoidPort,
       target: { host: '127.0.0.1', port: tunnel.localPort },
       ...(opts.onRefreshRequest !== undefined
-        ? { control: { onRefresh: opts.onRefreshRequest } }
+        ? {
+            control: {
+              onRefresh: opts.onRefreshRequest,
+              ...(opts.onShutdownRequest ? { onShutdown: opts.onShutdownRequest } : {}),
+            },
+          }
         : {}),
       // The store lives on the CLIENT machine — every cockpit here shares it,
       // whichever remote daemon each one drives.

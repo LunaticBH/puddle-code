@@ -4,8 +4,16 @@ import { dirname, isAbsolute, win32 } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import type { CockpitFileManager } from '@puddle/shared';
+import { getEnv } from '@puddle/shared/node/platform';
 
 const execute = promisify(execFile);
+
+/** `%SystemRoot%\explorer.exe`, never one found through the working directory or PATH. */
+function explorerPath(env: NodeJS.ProcessEnv = process.env): string {
+  const root =
+    getEnv(env, 'SystemRoot', 'win32') ?? getEnv(env, 'windir', 'win32') ?? 'C:\\Windows';
+  return win32.join(root, 'explorer.exe');
+}
 
 export interface LocalFileManager {
   name: NonNullable<CockpitFileManager['name']>;
@@ -62,7 +70,9 @@ export function localFileManager(
         await run('/usr/bin/open', directory ? ['-a', 'Finder', '--', path] : ['-R', '--', path]);
       } else if (platform === 'win32') {
         // Explorer may become the long-lived desktop process; never wait for or kill it.
-        await run('explorer.exe', directory ? [path] : ['/select,', path], true);
+        // /select ignores paths with forward slashes, so pass the native form.
+        const target = win32.normalize(path);
+        await run(explorerPath(), directory ? [target] : ['/select,', target], true);
       } else {
         try {
           await run('gdbus', [
@@ -74,7 +84,8 @@ export function localFileManager(
             '/org/freedesktop/FileManager1',
             '--method',
             `org.freedesktop.FileManager1.${directory ? 'ShowFolders' : 'ShowItems'}`,
-            JSON.stringify([pathToFileURL(path).href]),
+            // A POSIX path, however this code is hosted (tests run on Windows too).
+            JSON.stringify([pathToFileURL(path, { windows: false }).href]),
             '',
           ]);
         } catch {

@@ -42,18 +42,25 @@ describe('local file-manager integration', () => {
   });
 
   it('selects Windows files and opens folders with Explorer, without cmd.exe', async () => {
+    const explorer = expect.stringMatching(/^[A-Za-z]:\\.*\\explorer\.exe$/i);
     const path = 'C:\\project files\\notes.txt';
     await localFileManager('win32')!.reveal(path, () => true);
-    expect(mocks.spawn).toHaveBeenLastCalledWith('explorer.exe', ['/select,', path], {
+    expect(mocks.spawn).toHaveBeenLastCalledWith(explorer, ['/select,', path], {
       stdio: 'ignore',
       detached: true,
     });
+    expect(mocks.spawn.mock.lastCall![0]).not.toMatch(/system32/i);
     mocks.lstat.mockResolvedValue({ isDirectory: () => true });
     await localFileManager('win32')!.reveal('C:\\project files', () => true);
-    expect(mocks.spawn).toHaveBeenLastCalledWith('explorer.exe', ['C:\\project files'], {
+    expect(mocks.spawn).toHaveBeenLastCalledWith(explorer, ['C:\\project files'], {
       stdio: 'ignore',
       detached: true,
     });
+  });
+
+  it('hands Explorer the native form of a forward-slashed Windows path', async () => {
+    await localFileManager('win32')!.reveal('C:/project files/notes.txt', () => true);
+    expect(mocks.spawn.mock.lastCall![1]).toEqual(['/select,', 'C:\\project files\\notes.txt']);
   });
 
   it('uses Linux selection and folder methods, falling back only to a directory opener', async () => {
