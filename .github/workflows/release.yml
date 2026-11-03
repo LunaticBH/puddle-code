@@ -99,18 +99,55 @@ jobs:
             dist-release/*.sha256
           if-no-files-found: error
 
+  tarball-windows:
+    # Windows arm64 is not published in v1: Windows on Arm runs the x64 zips
+    # under emulation (docs/windows.md). Git Bash runs the steps; the
+    # archives and installers never need it.
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: node scripts/install-ci.mjs
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      - run: node scripts/build-tarball.mjs --version "${GITHUB_REF_NAME#v}"
+      - name: build standalone CLI archive
+        env:
+          PUDDLE_REPO_SLUG: ${{ github.repository }}
+        run: |
+          pnpm --filter @puddle/web... build
+          pnpm --filter @puddle-code/cli build
+          node scripts/build-cli-tarball.mjs --version "${GITHUB_REF_NAME#v}"
+          node scripts/test-cli-tarball.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball-win32-x64
+          path: |
+            dist-release/*.zip
+            dist-release/*.sha256
+          if-no-files-found: error
+
   desktop:
     # Packages the Electron shell (packages/desktop). With MAC_CERT_P12 +
     # MAC_CERT_PASSWORD set, the mac build is signed under hardened runtime
     # and — with APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID —
     # notarised; without them an ad-hoc signature seals the app's identity and
     # resources. This does not provide Developer ID trust or OS notification
-    # approval. AppImage needs no signing.
+    # approval. AppImage needs no signing. The Windows NSIS installer is
+    # unsigned in v1 (SmartScreen warns on a browser download's first run).
     strategy:
       matrix:
         include:
           - { runner: macos-14, target: darwin-arm64 }
           - { runner: ubuntu-22.04, target: linux-x64 }
+          - { runner: windows-latest, target: win32-x64 }
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -132,6 +169,7 @@ jobs:
           PUDDLE_REPO_SLUG: ${{ github.repository }}
       - name: package (ad-hoc signing without certificate secrets)
         working-directory: packages/desktop
+        shell: bash
         env:
           CSC_LINK: ${{ secrets.MAC_CERT_P12 }}
           CSC_KEY_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
@@ -139,7 +177,11 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          if [ "$RUNNER_OS" != "macOS" ]; then
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            # electron-builder would offer the Apple certificate to Authenticode.
+            unset CSC_LINK CSC_KEY_PASSWORD
+            pnpm exec electron-builder --publish never
+          elif [ "$RUNNER_OS" != "macOS" ]; then
             pnpm exec electron-builder --publish never
           elif [ -n "$CSC_LINK" ]; then
             pnpm exec electron-builder --publish never -c.mac.notarize=true
@@ -158,9 +200,17 @@ jobs:
         run: codesign --verify --deep --strict --verbose=2 release/mac-arm64/Puddle.app
       - name: checksums
         working-directory: packages/desktop/release
+        shell: bash
+        # Node on Windows: Git Bash's sha256sum marks binary mode with `*`,
+        # which install.ps1 and desktop-update compare against asset names.
         run: |
-          for f in *.dmg *.zip *.AppImage; do
-            if [ -f "$f" ]; then shasum -a 256 "$f"; fi
+          for f in *.dmg *.zip *.AppImage *-setup.exe; do
+            if [ ! -f "$f" ]; then continue; fi
+            if [ "$RUNNER_OS" = "Windows" ]; then
+              node -e "const f = process.argv[1]; console.log(require('crypto').createHash('sha256').update(require('fs').readFileSync(f)).digest('hex') + '  ' + f)" "$f"
+            else
+              shasum -a 256 "$f"
+            fi
           done > desktop-${{ matrix.target }}.sha256
       - uses: actions/upload-artifact@v4
         with:
@@ -173,11 +223,12 @@ jobs:
             packages/desktop/release/*.dmg
             packages/desktop/release/*.zip
             packages/desktop/release/*.AppImage
+            packages/desktop/release/*-setup.exe
             packages/desktop/release/*.sha256
           if-no-files-found: error
 
   release:
-    needs: [tarball-linux, tarball-darwin, desktop]
+    needs: [tarball-linux, tarball-darwin, tarball-windows, desktop]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -194,7 +245,7 @@ jobs:
           pattern: desktop-*
           merge-multiple: true
           path: dist-release
-      - name: assemble SHA256SUMS and the public CLI installer
+      - name: assemble SHA256SUMS and the public CLI installers
         run: |
           cat dist-release/*.sha256 > dist-release/SHA256SUMS
           node scripts/stage-installers.mjs dist-release "$GITHUB_REPOSITORY"
@@ -212,8 +263,10 @@ jobs:
             dist-release/*.dmg \
             dist-release/*.zip \
             dist-release/*.AppImage \
+            dist-release/*-setup.exe \
             dist-release/SHA256SUMS \
             dist-release/install.sh \
+            dist-release/install.ps1 \
             --verify-tag --notes-file dist-release/RELEASE_NOTES.md
 
   npm-publish:

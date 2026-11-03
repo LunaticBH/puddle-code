@@ -53,10 +53,47 @@ jobs:
       - name: verify hardened remote container startup and static files
         run: node deploy/remote/test-images.mjs
       - name: assert web assets ship inside the CLI
-        run: test -f packages/cli/dist/public/index.html && test -f packages/cli/dist/install.sh && test -f packages/cli/dist/host-control.mjs && test -f packages/cli/dist/install-cli.sh
+        run: test -f packages/cli/dist/public/index.html && test -f packages/cli/dist/install.sh && test -f packages/cli/dist/host-control.mjs && test -f packages/cli/dist/install-cli.sh && test -f packages/cli/dist/install-cli.ps1
       # Self-smoke-tests the staged tree (puddled --version loads both native
       # modules), so the release packaging cannot rot between tags.
       - name: build the daemon tarball
+        run: pnpm build:tarball
+      - name: build and exercise standalone CLI without system Node or npm
+        run: |
+          pnpm build:cli-tarball
+          node scripts/test-cli-tarball.mjs
+
+  # Native Windows (docs/windows.md): the suite, the daemon and CLI zips with
+  # their smoke tests, and install.ps1 end to end, including the user PATH
+  # edit this disposable runner allows. Docker, sshd and the mobile browser
+  # suite stay on Linux. Git Bash runs the steps; the product never needs it.
+  ci-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: node scripts/install-ci.mjs
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      - run: pnpm typecheck
+      - run: pnpm build
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: install isolated Jupyter test environment
+        run: |
+          python -m venv "$RUNNER_TEMP/notebook-python"
+          "$RUNNER_TEMP/notebook-python/Scripts/python.exe" -m pip install nbconvert==7.17.1 nbclient==0.11.0 jupyter-client==8.6.3 ipykernel==7.1.0 ipywidgets==8.1.8
+          echo "$RUNNER_TEMP/notebook-python/Scripts" >> "$GITHUB_PATH"
+      - run: pnpm test
+      - name: build the daemon zip
         run: pnpm build:tarball
       - name: build and exercise standalone CLI without system Node or npm
         run: |
