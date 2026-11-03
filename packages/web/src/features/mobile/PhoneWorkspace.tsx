@@ -3,16 +3,21 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { SquareTerminal } from 'lucide-react';
 import type { NotificationTarget, Session, SessionKind } from '@puddle/shared';
 import { Button } from '../../components/ui/button';
-import { browserScope } from '../../lib/browser-transport';
-import { fetchProfileState, useAllSessions, useProjects, useRepos } from '../../lib/queries';
-import { api } from '../../lib/api';
-import { orderByDrag } from '../workspace/session-order';
+import { browserScope } from '../../lib/transport/browser-transport';
+import {
+  fetchProfileState,
+  useAllSessions,
+  useProjects,
+  useRepos,
+} from '../../lib/queries/queries';
+import { api } from '../../lib/transport/api';
+import { orderByDrag } from '../workspace/sessions/session-order';
 import { loadOrderedProjects } from './project-order';
 import { PhoneTerminalBar } from './PhoneTerminalBar';
-import { wsManager } from '../../lib/ws';
+import { wsManager } from '../../lib/transport/ws';
 import { ProjectCardContent, projectCardSurface } from '../dashboard/ProjectCardContent';
 import { profileStore } from '../profile/profile-store';
-import { NewSessionDialog } from '../workspace/NewSessionDialog';
+import { NewSessionDialog } from '../workspace/sessions/NewSessionDialog';
 import { MobileTerminal } from './MobileTerminal';
 import { PhoneFiles } from './PhoneFiles';
 import { PhoneSessionRail } from './PhoneSessionRail';

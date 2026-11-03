@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { HoverMarquee } from '../../components/hover-marquee';
-import { requestReveal } from '../../lib/reveal-in-tree';
-import { useCommitShow, useWorktreeLog } from '../../lib/worktree-queries';
+import { requestReveal } from '../../lib/navigation/reveal-in-tree';
+import { useCommitShow, useWorktreeLog } from '../../lib/queries/worktree-queries';
 import { cn } from '../../lib/utils';
 import { diffStatusStyle } from '../diff/diff-status';
 import { relativeTime } from '../history/history-logic';

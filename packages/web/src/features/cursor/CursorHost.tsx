@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { useClientSettings } from '../../lib/client-settings';
+import { useClientSettings } from '../../lib/settings/client-settings';
 import { DraftingCursor } from './DraftingCursor';
 import { InvertCursor } from './InvertCursor';
 import { RangefinderCursor } from './RangefinderCursor';

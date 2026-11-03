@@ -2,9 +2,9 @@ import { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { EditorSection } from '../../src/features/settings/sections/editor';
-import { CompilationSettingsDialog } from '../../src/features/editor/CompilationSettingsDialog';
+import { CompilationSettingsDialog } from '../../src/features/editor/compilation/CompilationSettingsDialog';
 import { profileStore } from '../../src/features/profile/profile-store';
-import { applyTheme } from '../../src/lib/theme';
+import { applyTheme } from '../../src/lib/appearance/theme';
 import '../../src/styles/app.css';
 
 applyTheme('dark');

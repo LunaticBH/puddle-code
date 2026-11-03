@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { uiStateSnapshotSchema, type UiStateSnapshot } from '@puddle/shared';
 import { debounce } from '../../lib/debounce';
-import { fetchProfileState, putProfileState } from '../../lib/queries';
+import { fetchProfileState, putProfileState } from '../../lib/queries/queries';
 import { useCurrentProfileId } from '../profile/profile-store';
 
 const WRITE_DEBOUNCE_MS = 2000;

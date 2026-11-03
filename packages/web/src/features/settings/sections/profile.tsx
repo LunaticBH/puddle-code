@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { toastError } from '../../../lib/errors';
+import { toastError } from '../../../lib/transport/errors';
 import { Button } from '../../../components/ui/button';
 import {
   Dialog,
@@ -25,8 +25,8 @@ import {
   usePatchProfileSettings,
   useProfileSettings,
   useProfiles,
-} from '../../../lib/queries';
-import { closeSettings } from '../../../lib/hash-route';
+} from '../../../lib/queries/queries';
+import { closeSettings } from '../../../lib/navigation/hash-route';
 import { profileStore, useCurrentProfileId } from '../../profile/profile-store';
 import { SectionTitle, SettingRow } from '../parts';
 import { ProfileAppearance } from './profile-appearance';

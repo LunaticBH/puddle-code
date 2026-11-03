@@ -7,9 +7,9 @@ import {
   SelectValue,
 } from '../../../components/ui/select';
 import { Switch } from '../../../components/ui/switch';
-import { updateClientSettings, useClientSettings } from '../../../lib/client-settings';
-import { CURSOR_PACKAGES, type CursorPackageId } from '../../../lib/cursor-packages';
-import { applyTheme, storedPreference, type ThemePreference } from '../../../lib/theme';
+import { updateClientSettings, useClientSettings } from '../../../lib/settings/client-settings';
+import { CURSOR_PACKAGES, type CursorPackageId } from '../../../lib/appearance/cursor-packages';
+import { applyTheme, storedPreference, type ThemePreference } from '../../../lib/appearance/theme';
 import { NumberField, SectionTitle, SettingRow } from '../parts';
 
 export function AppearanceSection() {

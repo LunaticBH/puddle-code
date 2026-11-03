@@ -6,7 +6,7 @@ import { ExplorerProvider } from '../../src/features/explorer/explorer-context';
 import { FileExplorer } from '../../src/features/explorer/FileExplorer';
 import { FileTabContextMenu } from '../../src/features/explorer/FileTabContextMenu';
 import { TooltipProvider } from '../../src/components/ui/tooltip';
-import { installBrowserTransport } from '../../src/lib/browser-transport';
+import { installBrowserTransport } from '../../src/lib/transport/browser-transport';
 import '../../src/styles/app.css';
 
 const params = new URLSearchParams(location.search);

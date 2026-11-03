@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '../../components/ui/button';
-import { registerRefreshTrigger, refreshController } from '../../lib/cockpit-refresh';
-import { wsManager } from '../../lib/ws';
+import { registerRefreshTrigger, refreshController } from '../../lib/transport/cockpit-refresh';
+import { wsManager } from '../../lib/transport/ws';
 
 /** A blip this short (the WS manager's own reconnect usually wins) shows nothing. */
 const LOST_GRACE_MS = 4000;

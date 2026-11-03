@@ -8,20 +8,20 @@ import { ErrorBoundary } from '../../components/error-boundary';
 import { InlineLabelEdit, editOnDoubleClick } from '../../components/inline-label-edit';
 import { Button } from '../../components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../../components/ui/tooltip';
-import { openCommandPalette } from '../../lib/command-palette';
-import { toastError } from '../../lib/errors';
-import { openSettings } from '../../lib/hash-route';
-import { useHotkeyLabel } from '../../lib/hotkeys';
+import { openCommandPalette } from '../../lib/navigation/command-palette';
+import { toastError } from '../../lib/transport/errors';
+import { openSettings } from '../../lib/navigation/hash-route';
+import { useHotkeyLabel } from '../../lib/navigation/hotkeys';
 import {
   hostLabel,
   useDaemonVersion,
   useHostInfo,
   usePatchConfig,
   useProjectDetail,
-} from '../../lib/queries';
-import { daemonAnswersColourQueries } from '../../lib/protocol-support';
-import { cssTokenReader, onThemeChange } from '../../lib/theme';
-import { wsManager } from '../../lib/ws';
+} from '../../lib/queries/queries';
+import { daemonAnswersColourQueries } from '../../lib/transport/protocol-support';
+import { cssTokenReader, onThemeChange } from '../../lib/appearance/theme';
+import { wsManager } from '../../lib/transport/ws';
 import { Suspense, lazy, useState } from 'react';
 import { NewProjectDialog } from '../dashboard/NewProjectDialog';
 import { CommandPalette } from '../palette/CommandPalette';
@@ -37,7 +37,7 @@ import { ScratchpadPopover } from '../scratchpad/ScratchpadPopover';
 import { LayoutsPopover } from '../layouts/LayoutsPopover';
 import { desktopBridge, useDesktopFullScreen } from '../../lib/desktop';
 import { cn } from '../../lib/utils';
-import { appearanceColourClass } from '../../lib/appearance-colours';
+import { appearanceColourClass } from '../../lib/appearance/appearance-colours';
 
 // Under the macOS desktop shell the native title bar is hidden and the top
 // bar IS the title bar: draggable, inset on the left for the inlaid traffic

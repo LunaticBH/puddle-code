@@ -10,7 +10,11 @@ import {
 } from '@puddle/shared';
 import { KeyedMutex } from '../git/mutex.js';
 import { ApiError } from '../http/errors.js';
-import { containedPath, resolveFsRoot, type WorktreeDeps } from '../http/routes/worktree-shared.js';
+import {
+  containedPath,
+  resolveFsRoot,
+  type WorktreeDeps,
+} from '../http/routes/worktrees/worktree-shared.js';
 import { findCodeExecutable } from '../code/discovery.js';
 import { KernelBridge } from './kernel-bridge.js';
 import { NotebookExecutionController } from './execution.js';

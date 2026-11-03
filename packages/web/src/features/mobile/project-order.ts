@@ -1,5 +1,5 @@
 import { profileSettingsSchema, type Project } from '@puddle/shared';
-import { orderByDrag } from '../workspace/session-order';
+import { orderByDrag } from '../workspace/sessions/session-order';
 
 /** Keep each profile's projects in the same saved order as its desktop dashboard. */
 export async function loadOrderedProjects(

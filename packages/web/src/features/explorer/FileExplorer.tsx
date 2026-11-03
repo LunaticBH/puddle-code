@@ -15,7 +15,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '../../components/ui/dialog';
-import { useHostInfo } from '../../lib/queries';
+import { useHostInfo } from '../../lib/queries/queries';
 import { tildify } from '../../lib/tildify';
 import { cn } from '../../lib/utils';
 import { useExplorer } from './explorer-context';

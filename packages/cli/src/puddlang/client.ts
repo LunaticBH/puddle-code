@@ -5,10 +5,10 @@ import {
   type PuddlangStart,
 } from '@puddle/shared';
 import { acquireAuthority, type ConnectionAuthority } from '../lib/auth/connection-authority.js';
-import { DaemonClient } from '../lib/daemon-client.js';
+import { DaemonClient } from '../lib/connection/daemon-client.js';
 import { LocalTransport } from '../lib/transport/local.js';
 import { SshTransport } from '../lib/transport/ssh.js';
-import { openTunnel, type Tunnel } from '../lib/tunnel.js';
+import { openTunnel, type Tunnel } from '../lib/transport/tunnel.js';
 
 /** A profile is selected once, on the execution host; no credentials enter programmes. */
 export class PuddlangClient {

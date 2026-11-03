@@ -1,8 +1,8 @@
 import { Fragment, useEffect, useState } from 'react';
 import { HeightHandle, useResizableHeight } from '../../components/resizable-height';
-import { useDaemonVersion } from '../../lib/queries';
-import { sourceControlSupported } from '../../lib/protocol-support';
-import { useGitRepositories } from '../../lib/worktree-queries';
+import { useDaemonVersion } from '../../lib/queries/queries';
+import { sourceControlSupported } from '../../lib/transport/protocol-support';
+import { useGitRepositories } from '../../lib/queries/worktree-queries';
 import { CommitGraph } from './CommitGraph';
 import { UncommittedPanel } from './UncommittedPanel';
 import { SourceControlRepository, type SourceControlOpenOptions } from './SourceControlRepository';

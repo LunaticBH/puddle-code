@@ -14,7 +14,7 @@ import {
 import { toast } from 'sonner';
 import { HoverMarquee } from '../../components/hover-marquee';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../../components/ui/tooltip';
-import { useGitMutation } from '../../lib/worktree-queries';
+import { useGitMutation } from '../../lib/queries/worktree-queries';
 import { cn } from '../../lib/utils';
 import { gitDecoration } from '../explorer/git-decoration';
 import { buildFileTree, treeEntries, type TreeNode } from './file-tree';

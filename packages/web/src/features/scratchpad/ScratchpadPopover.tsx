@@ -7,14 +7,14 @@ import { AgentIcon } from '../../components/agent-icon';
 import { Button } from '../../components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../../components/ui/popover';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../../components/ui/tooltip';
-import { registerHotkey } from '../../lib/hotkeys';
+import { registerHotkey } from '../../lib/navigation/hotkeys';
 import {
   useAgents,
   useCreateScratchpad,
   useDeleteScratchpad,
   usePatchScratchpad,
   useScratchpad,
-} from '../../lib/queries';
+} from '../../lib/queries/queries';
 import { cn } from '../../lib/utils';
 import { useCurrentProfileId } from '../profile/profile-store';
 import { ScratchpadEditor, type ScratchpadDraft } from './ScratchpadEditor';

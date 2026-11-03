@@ -10,9 +10,9 @@ import { CursorHost } from './features/cursor/CursorHost';
 import { ProfilePicker } from './features/profile/ProfilePicker';
 import { useCurrentProfileId } from './features/profile/profile-store';
 import { ShellLayout } from './features/shell/ShellLayout';
-import { tokenStore } from './lib/auth';
-import { toastError } from './lib/errors';
-import { useProfiles } from './lib/queries';
+import { tokenStore } from './lib/transport/auth';
+import { toastError } from './lib/transport/errors';
+import { useProfiles } from './lib/queries/queries';
 
 // Route-level chunks: each page loads on first visit, not up front.
 const Dashboard = lazy(() =>

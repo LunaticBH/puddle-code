@@ -3,7 +3,7 @@ import { ArrowLeft } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { diffResponseSchema, fileAtResponseSchema, fileResponseSchema } from '@puddle/shared';
 import { Button } from '../../components/ui/button';
-import { api } from '../../lib/api';
+import { api } from '../../lib/transport/api';
 import { PhoneDiff } from './PhoneDiff';
 import { PhoneFileText } from './PhoneFileText';
 

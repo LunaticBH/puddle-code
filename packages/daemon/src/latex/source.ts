@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, extname, isAbsolute, relative, resolve } from 'node:path';
 import { ApiError } from '../http/errors.js';
-import { containedPath } from '../http/routes/worktree-shared.js';
+import { containedPath } from '../http/routes/worktrees/worktree-shared.js';
 import type { LatexEngine } from './toolchain.js';
 
 const MAX_DIRECTIVE_BYTES = 2 * 1024 * 1024;

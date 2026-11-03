@@ -40,7 +40,7 @@ export function notebookWidgets(): Plugin {
         const result = await build({
           entryPoints: [
             fileURLToPath(
-              new URL('../src/features/editor/widgets/frame-runtime.ts', import.meta.url),
+              new URL('../src/features/editor/notebooks/widgets/frame-runtime.ts', import.meta.url),
             ),
           ],
           bundle: true,

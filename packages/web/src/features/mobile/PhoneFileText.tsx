@@ -1,8 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { SelectionActions } from '../../components/selection-actions';
 import { attachFileTouchSelection } from './file-touch-selection';
-import { bindScrollRestoration } from '../editor/scroll-restoration';
-import { useViewStateKey } from '../editor/view-state-context';
+import { bindScrollRestoration } from '../editor/previews/scroll-restoration';
+import { useViewStateKey } from '../editor/tabs/view-state-context';
 
 export function PhoneFileText({ content, target }: { content: string; target: unknown }) {
   const source = useRef<HTMLPreElement>(null);

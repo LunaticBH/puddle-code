@@ -11,7 +11,7 @@ import { githubFixture } from '../../remote/test/helpers/oauth.js';
 import { atomicPrivateJson } from '../../shared/src/node/security.js';
 import { administrativeRequest } from '../../connector/src/admin.js';
 import { fixture, createSession, env, stop, until, root } from '../../cli/e2e/helpers.js';
-import { findFreePort } from '../../cli/src/lib/net.js';
+import { findFreePort } from '../../cli/src/lib/transport/net.js';
 
 /** Real daemon, cockpit, service and connector; only the coding agent and GitHub are fixtures. */
 export async function mobileFixture() {

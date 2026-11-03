@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { agentNotificationSchema } from '../notifications.js';
-import { sessionStatusSchema } from '../api/sessions.js';
+import { sessionStatusSchema } from '../api/agents/sessions.js';
 
 /** Terminal ids within a stream: the agent PTY or numbered shells. */
 export const termId = z.string().regex(/^(agent|shell-[0-9]+)$/);

@@ -3,14 +3,14 @@ import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, TextCursorInput } from 'luci
 import { Button } from '../../components/ui/button';
 import { ImagePasteButton } from './ImagePasteButton';
 import { keepTerminalFocus, TerminalKey } from './TerminalKey';
-import { TOUCH_MODIFIERS } from '../terminal/touch-modifiers';
+import { TOUCH_MODIFIERS } from '../terminal/input/touch-modifiers';
 import {
   focusTerminal,
   sendTerminalInput,
   toggleTerminalModifier,
   useTerminalInputReady,
   useTerminalModifiers,
-} from '../terminal/input';
+} from '../terminal/input/input';
 
 export function TerminalKeys({
   session,

@@ -1,15 +1,17 @@
 import { lazy, Suspense } from 'react';
 import type { UseQueryResult } from '@tanstack/react-query';
 import type { FileResponse } from '@puddle/shared';
-import type { PreviewKind } from '../editor/preview-kind';
-import type { MediaKind } from '../editor/media-kind';
+import type { PreviewKind } from '../editor/previews/preview-kind';
+import type { MediaKind } from '../editor/previews/media-kind';
 import { PhoneFileText } from './PhoneFileText';
 
 const TextFilePreview = lazy(() =>
-  import('../editor/TextFilePreview').then((module) => ({ default: module.TextFilePreview })),
+  import('../editor/previews/TextFilePreview').then((module) => ({
+    default: module.TextFilePreview,
+  })),
 );
 const MediaViewer = lazy(() =>
-  import('../editor/MediaViewer').then((module) => ({ default: module.MediaViewer })),
+  import('../editor/previews/MediaViewer').then((module) => ({ default: module.MediaViewer })),
 );
 
 export function PhoneFileContent({

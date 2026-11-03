@@ -2,9 +2,9 @@ import { Disclosure } from '../../components/ui/disclosure';
 import { useQuery } from '@tanstack/react-query';
 import type { StorageStatus } from '@puddle/shared';
 import { AlertTriangle } from 'lucide-react';
-import { api } from '../../lib/api';
-import { browserTransport } from '../../lib/browser-transport';
-import { useDaemonVersion } from '../../lib/queries';
+import { api } from '../../lib/transport/api';
+import { browserTransport } from '../../lib/transport/browser-transport';
+import { useDaemonVersion } from '../../lib/queries/queries';
 
 /** Persistent until recovery; a toast is too easy to miss during a storage outage. */
 export function StorageBanner() {

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { pasteImageMimeSchema } from '../api/worktrees.js';
+import { pasteImageMimeSchema } from '../api/worktrees/worktrees.js';
 
 /** Image uploads keep each request well below the ordinary 256 KiB envelope. */
 export const IMAGE_UPLOAD_POLICY = {

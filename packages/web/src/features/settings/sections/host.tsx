@@ -1,8 +1,13 @@
-import { toastError } from '../../../lib/errors';
+import { toastError } from '../../../lib/transport/errors';
 import type { DaemonConfig } from '@puddle/shared';
 import { Input } from '../../../components/ui/input';
 import { Switch } from '../../../components/ui/switch';
-import { useConfig, useDaemonVersion, useHostInfo, usePatchConfig } from '../../../lib/queries';
+import {
+  useConfig,
+  useDaemonVersion,
+  useHostInfo,
+  usePatchConfig,
+} from '../../../lib/queries/queries';
 import { SectionTitle, SettingRow } from '../parts';
 
 function NumberSetting({

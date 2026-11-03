@@ -27,7 +27,7 @@ import type { RepoStore } from '../db/stores/repos.js';
 import type { SessionStore } from '../db/stores/sessions.js';
 import { KeyedMutex } from '../git/mutex.js';
 import { ApiError } from '../http/errors.js';
-import { containedPath } from '../http/routes/worktree-shared.js';
+import { containedPath } from '../http/routes/worktrees/worktree-shared.js';
 import type { LogStore } from '../logs/log-store.js';
 import { extractOscTitle, stripAnsi } from '../pty/ansi.js';
 import type {

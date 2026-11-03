@@ -6,14 +6,18 @@ import {
   deliverNotification,
   refreshNotificationDelivery,
   useNotificationDelivery,
-} from '../../../lib/notification-delivery';
-import { toastError } from '../../../lib/errors';
+} from '../../../lib/notifications/notification-delivery';
+import { toastError } from '../../../lib/transport/errors';
 import { Switch } from '../../../components/ui/switch';
 import {
   notificationPermission,
   type EffectiveNotificationPermission,
-} from '../../../lib/notification-permission';
-import { usePatchProfileSettings, useProfileSettings, useProjects } from '../../../lib/queries';
+} from '../../../lib/notifications/notification-permission';
+import {
+  usePatchProfileSettings,
+  useProfileSettings,
+  useProjects,
+} from '../../../lib/queries/queries';
 import { useCurrentProfileId } from '../../profile/profile-store';
 import { SectionTitle, SettingRow } from '../parts';
 

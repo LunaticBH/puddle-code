@@ -5,10 +5,10 @@ import {
   usePatchProfileSettings,
   useProjects,
   useRepos,
-} from '../../lib/queries';
-import { useHotkeyLabel } from '../../lib/hotkeys';
+} from '../../lib/queries/queries';
+import { useHotkeyLabel } from '../../lib/navigation/hotkeys';
 import { cn } from '../../lib/utils';
-import { orderByDrag, reorderIds } from '../workspace/session-order';
+import { orderByDrag, reorderIds } from '../workspace/sessions/session-order';
 import { useCurrentProfileId } from '../profile/profile-store';
 import { HomeTerminalPane, useHomeTerminal } from './HomeTerminal';
 import { NewProjectDialog } from './NewProjectDialog';

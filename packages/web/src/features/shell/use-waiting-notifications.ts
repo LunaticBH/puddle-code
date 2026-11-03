@@ -13,15 +13,15 @@ import {
 import {
   notificationPermission,
   type EffectiveNotificationPermission,
-} from '../../lib/notification-permission';
-import { deliverNotification } from '../../lib/notification-delivery';
-import { onNotificationTarget } from '../../lib/notification-navigation';
-import { trackNotificationFocus } from '../../lib/notification-focus';
-import { browserTransport } from '../../lib/browser-transport';
-import { remotePushReady } from '../../lib/remote-notification-status';
-import { api } from '../../lib/api';
-import { fetchAllSessions, hostLabel, useHostInfo } from '../../lib/queries';
-import { wsManager } from '../../lib/ws';
+} from '../../lib/notifications/notification-permission';
+import { deliverNotification } from '../../lib/notifications/notification-delivery';
+import { onNotificationTarget } from '../../lib/notifications/notification-navigation';
+import { trackNotificationFocus } from '../../lib/notifications/notification-focus';
+import { browserTransport } from '../../lib/transport/browser-transport';
+import { remotePushReady } from '../../lib/notifications/remote-notification-status';
+import { api } from '../../lib/transport/api';
+import { fetchAllSessions, hostLabel, useHostInfo } from '../../lib/queries/queries';
+import { wsManager } from '../../lib/transport/ws';
 
 /** The profile's notification prefs (SPEC §11); delivery defaults mirror the settings tab. */
 const DEFAULT_PREFS = notificationPreferencesSchema.parse({});

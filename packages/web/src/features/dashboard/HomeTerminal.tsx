@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { HOME_STREAM } from '@puddle/shared';
 import { LazyTerminal } from '../terminal/LazyTerminal';
-import { wsManager } from '../../lib/ws';
+import { wsManager } from '../../lib/transport/ws';
 
 // The pane survives in-app navigation (module state, not storage): come back
 // to the homescreen and it is still there. A reload starts closed — but the

@@ -2,8 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { CaseSensitive, File as FileIcon, Regex, WholeWord } from 'lucide-react';
 import { HoverMarquee } from '../../components/hover-marquee';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../../components/ui/tooltip';
-import { requestReveal } from '../../lib/reveal-in-tree';
-import { useWorktreeSearch } from '../../lib/worktree-queries';
+import { requestReveal } from '../../lib/navigation/reveal-in-tree';
+import { useWorktreeSearch } from '../../lib/queries/worktree-queries';
 import { cn } from '../../lib/utils';
 import { buildMatcher, splitHighlight, trimPreview } from './search-highlight';
 

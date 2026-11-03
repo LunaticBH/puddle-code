@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { toast } from 'sonner';
-import { toastError } from '../../../lib/errors';
+import { toastError } from '../../../lib/transport/errors';
 import { Button } from '../../../components/ui/button';
 import { Textarea } from '../../../components/ui/input';
 import { Switch } from '../../../components/ui/switch';
@@ -9,13 +9,13 @@ import {
   clientSettings,
   updateClientSettings,
   type ClientSettings,
-} from '../../../lib/client-settings';
+} from '../../../lib/settings/client-settings';
 import {
   effectiveSyncEntry,
   useLocalSync,
   usePutLocalSync,
   type LocalSyncEntry,
-} from '../../../lib/local-sync';
+} from '../../../lib/settings/local-sync';
 import {
   useCreateScratchpad,
   usePatchProfile,
@@ -23,16 +23,16 @@ import {
   useProfileSettings,
   useProfiles,
   useScratchpad,
-} from '../../../lib/queries';
-import { decodeSettings, encodeSettings } from '../../../lib/settings-sync';
+} from '../../../lib/queries/queries';
+import { decodeSettings, encodeSettings } from '../../../lib/settings/settings-sync';
 import {
   applyImport,
   collectExport,
   SYNC_GROUPS,
   type SyncSinks,
   type SyncSources,
-} from '../../../lib/settings-sync-manifest';
-import { applyTheme, storedPreference, type ThemePreference } from '../../../lib/theme';
+} from '../../../lib/settings/settings-sync-manifest';
+import { applyTheme, storedPreference, type ThemePreference } from '../../../lib/appearance/theme';
 import { useCurrentProfileId } from '../../profile/profile-store';
 import { SectionTitle } from '../parts';
 

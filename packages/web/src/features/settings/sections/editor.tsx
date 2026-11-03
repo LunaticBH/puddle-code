@@ -1,8 +1,8 @@
 import { CompilationSection } from './compilation';
 import { Input } from '../../../components/ui/input';
 import { Switch } from '../../../components/ui/switch';
-import { updateClientSettings, useClientSettings } from '../../../lib/client-settings';
-import { hostParamStore } from '../../../lib/editor-links';
+import { updateClientSettings, useClientSettings } from '../../../lib/settings/client-settings';
+import { hostParamStore } from '../../../lib/navigation/editor-links';
 import { NumberField, SectionTitle, SettingRow } from '../parts';
 
 /**

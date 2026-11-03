@@ -1,5 +1,5 @@
 import type { GitArea } from '@puddle/shared';
-import { useWorktreeDiff } from '../../lib/worktree-queries';
+import { useWorktreeDiff } from '../../lib/queries/worktree-queries';
 import { FileDiffContent } from './FileDiffContent';
 
 /**

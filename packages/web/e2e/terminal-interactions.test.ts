@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { build } from 'esbuild';
 import { fileURLToPath } from 'node:url';
-import type { FileLinkTarget } from '../src/features/terminal/file-links';
+import type { FileLinkTarget } from '../src/features/terminal/links/file-links';
 
 test.use({
   viewport: { width: 900, height: 600 },

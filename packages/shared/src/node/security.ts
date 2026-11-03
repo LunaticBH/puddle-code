@@ -17,7 +17,7 @@ import {
 } from 'node:fs';
 import { connect, createServer, type Server, type Socket } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
-import { CONTROL_MAX_BYTES } from '../api/connection-auth.js';
+import { CONTROL_MAX_BYTES } from '../api/connection/connection-auth.js';
 
 export const digest = (value: string): string => createHash('sha256').update(value).digest('hex');
 export const secret = (prefix = ''): string => prefix + randomBytes(32).toString('hex');

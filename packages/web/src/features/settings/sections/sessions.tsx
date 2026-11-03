@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { ShieldAlert } from 'lucide-react';
-import { toastError } from '../../../lib/errors';
+import { toastError } from '../../../lib/transport/errors';
 import {
   DEFAULT_CONCURRENT_TEMPLATE,
   DEFAULT_ONBOARDING_TEMPLATE,
@@ -24,16 +24,16 @@ import {
 import { Input, Textarea } from '../../../components/ui/input';
 import { Label } from '../../../components/ui/label';
 import { Switch } from '../../../components/ui/switch';
-import { updateClientSettings, useClientSettings } from '../../../lib/client-settings';
+import { updateClientSettings, useClientSettings } from '../../../lib/settings/client-settings';
 import {
   useConfig,
   usePatchConfig,
   usePatchProfileSettings,
   useProfileSettings,
   useProfiles,
-} from '../../../lib/queries';
+} from '../../../lib/queries/queries';
 import { useCurrentProfileId } from '../../profile/profile-store';
-import { resolveSessionSeed } from '../../workspace/session-seed';
+import { resolveSessionSeed } from '../../workspace/sessions/session-seed';
 import { NumberField, SectionTitle, SettingRow } from '../parts';
 
 /**

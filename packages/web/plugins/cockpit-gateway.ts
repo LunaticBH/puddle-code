@@ -1,14 +1,14 @@
 import { request } from 'node:http';
 import { join } from 'node:path';
 import { clientHome } from '../../cli/src/lib/paths';
-import { DaemonClient } from '../../cli/src/lib/daemon-client';
+import { DaemonClient } from '../../cli/src/lib/connection/daemon-client';
 import type { AddressInfo } from 'node:net';
 import type { Plugin } from 'vite';
 import { HostConnection } from '../../cli/src/lib/auth/connection-authority';
 import { LocalTransport } from '../../cli/src/lib/transport/local';
 import { startUiServer, type UiServer } from '../../cli/src/lib/serve/ui-server';
-import { RemoteAccessControl } from '../../cli/src/lib/remote-access';
-import { localFileManager } from '../../cli/src/lib/file-manager';
+import { RemoteAccessControl } from '../../cli/src/lib/host/remote-access';
+import { localFileManager } from '../../cli/src/lib/host/file-manager';
 
 /** Development uses the production browser boundary, including the isolated proxy origin. */
 export function cockpitGateway(): Plugin {

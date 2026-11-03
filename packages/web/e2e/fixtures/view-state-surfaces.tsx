@@ -1,14 +1,17 @@
-import { monaco } from '../../src/features/editor/monaco-setup';
+import { monaco } from '../../src/features/editor/monaco/monaco-setup';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import Editor, { DiffEditor } from '@monaco-editor/react';
 import { Terminal as XTerm } from '@xterm/xterm';
-import { CodeEditor } from '../../src/features/editor/CodeEditor';
-import { MarkdownPreview } from '../../src/features/editor/MarkdownPreview';
-import { HtmlPreview } from '../../src/features/editor/HtmlPreview';
-import { useCodeViewState, useDiffViewState } from '../../src/features/editor/monaco-view-state';
+import { CodeEditor } from '../../src/features/editor/monaco/CodeEditor';
+import { MarkdownPreview } from '../../src/features/editor/previews/markdown/MarkdownPreview';
+import { HtmlPreview } from '../../src/features/editor/previews/html/HtmlPreview';
+import {
+  useCodeViewState,
+  useDiffViewState,
+} from '../../src/features/editor/monaco/monaco-view-state';
 import { Terminal } from '../../src/features/terminal/Terminal';
 import { PhoneFileText } from '../../src/features/mobile/PhoneFileText';
-import { wsManager } from '../../src/lib/ws';
+import { wsManager } from '../../src/lib/transport/ws';
 import type { editor } from 'monaco-editor';
 import { useEffect, useRef } from 'react';
 

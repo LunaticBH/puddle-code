@@ -9,14 +9,14 @@
  * both shells (and future ones) can build on it.
  */
 
-export { startLocal, type StartOptions } from './start.js';
-export { connectRemote, type ConnectOptions } from './connect.js';
-export type { RunningCockpit } from './cockpit.js';
+export { startLocal, type StartOptions } from './connection/start.js';
+export { connectRemote, type ConnectOptions } from './connection/connect.js';
+export type { RunningCockpit } from './connection/cockpit.js';
 export {
   daemonUpgradeMessage,
   type ConfirmDaemonUpgrade,
   type DaemonUpgradeRequest,
-} from './handshake.js';
+} from './connection/handshake.js';
 export { CliError, silentLogger, type CliErrorCode, type CliEvent, type Logger } from './types.js';
 export { cliVersion, pinnedDaemonVersion } from './version.js';
 export { clientHome } from './paths.js';
@@ -28,7 +28,7 @@ export {
   type DesktopInstallation,
   type InstalledComponentVersion,
   type SpeakingProtocol,
-} from './component-versions.js';
+} from './installation/component-versions.js';
 export {
   applyDesktopUpdate,
   checkForDesktopUpdate,
@@ -38,4 +38,4 @@ export {
   stageDesktopUpdate,
   type DesktopUpdate,
   type StagedDesktopUpdate,
-} from './desktop-update.js';
+} from './installation/desktop-update.js';

@@ -26,7 +26,11 @@ import type { CompilationProvider, CompilationProviderResult } from '../compilat
 import { expandCommandTemplate, parseCommandTemplate } from '../compilation/command-template.js';
 import { KeyedMutex } from '../git/mutex.js';
 import { ApiError } from '../http/errors.js';
-import { containedPath, NO_SESSION, resolveFsRoot } from '../http/routes/worktree-shared.js';
+import {
+  containedPath,
+  NO_SESSION,
+  resolveFsRoot,
+} from '../http/routes/worktrees/worktree-shared.js';
 import { compileLatex, defaultLatexCommand } from './compiler.js';
 import { LatexBuildFailure, type LatexSourceDiagnostic } from './diagnostics.js';
 import { discoverLatexToolchain } from './discovery.js';

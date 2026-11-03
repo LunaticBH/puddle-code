@@ -22,11 +22,11 @@ import {
   type ProxyTarget,
 } from './proxy.js';
 import { WsBridge } from './ws-bridge.js';
-import type { RemoteAccessControl } from '../remote-access.js';
+import type { RemoteAccessControl } from '../host/remote-access.js';
 import { remoteAccessHandler } from './remote-access.js';
 import { checkRemoteRegistration } from './remote-registration.js';
 import { fileManagerHandler } from './file-manager.js';
-import type { LocalFileManager } from '../file-manager.js';
+import type { LocalFileManager } from '../host/file-manager.js';
 
 export interface UiServerOptions {
   assetsDir: string;

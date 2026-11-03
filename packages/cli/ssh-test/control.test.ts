@@ -7,10 +7,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { startDaemon, type RunningDaemon } from '../../daemon/test/helpers/authorised-daemon.js';
 import { acquireAuthority } from '../src/lib/auth/connection-authority.js';
 import { inspectHost } from '../src/lib/auth/control-channel.js';
-import { findFreePort, waitForTcp } from '../src/lib/net.js';
+import { findFreePort, waitForTcp } from '../src/lib/transport/net.js';
 import { SshTransport, shellQuote } from '../src/lib/transport/ssh.js';
-import { openTunnel } from '../src/lib/tunnel.js';
-import { DaemonClient } from '../src/lib/daemon-client.js';
+import { openTunnel } from '../src/lib/transport/tunnel.js';
+import { DaemonClient } from '../src/lib/connection/daemon-client.js';
 
 const temporary = mkdtempSync(join(tmpdir(), 'puddle-loopback-ssh-'));
 const hostHome = join(temporary, 'host');

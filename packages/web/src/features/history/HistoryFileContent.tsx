@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { DiffEditor } from '@monaco-editor/react';
 import type { DiffEntry } from '@puddle/shared';
-import { useClientSettings } from '../../lib/client-settings';
-import { useFileAt } from '../../lib/worktree-queries';
-import { ApiError } from '../../lib/api';
+import { useClientSettings } from '../../lib/settings/client-settings';
+import { useFileAt } from '../../lib/queries/worktree-queries';
+import { ApiError } from '../../lib/transport/api';
 import { DeletedContent, Note, ReadOnlyView, viewerUri } from '../diff/FileDiffContent';
-import { monaco, THEME_NAME } from '../editor/monaco-setup';
-import { editorIndentationOptions } from '../editor/monaco-options';
+import { monaco, THEME_NAME } from '../editor/monaco/monaco-setup';
+import { editorIndentationOptions } from '../editor/monaco/monaco-options';
 import { effectiveStatus } from './history-logic';
-import { useDiffViewState } from '../editor/monaco-view-state';
+import { useDiffViewState } from '../editor/monaco/monaco-view-state';
 
 /**
  * `added` (and the root-commit override, and a `sha^` original that 404s

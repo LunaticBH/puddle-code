@@ -22,17 +22,17 @@ import {
   CommandList,
   CommandShortcut,
 } from '../../components/ui/command';
-import { applyTheme } from '../../lib/theme';
-import { triggerConnectionRefresh } from '../../lib/cockpit-refresh';
-import { registerCommandPalette } from '../../lib/command-palette';
-import { registerHotkey } from '../../lib/hotkeys';
-import { openSettings } from '../../lib/hash-route';
-import { openPath } from '../../lib/path-open';
-import { useProfileSettings, useProjects, useSessions } from '../../lib/queries';
+import { applyTheme } from '../../lib/appearance/theme';
+import { triggerConnectionRefresh } from '../../lib/transport/cockpit-refresh';
+import { registerCommandPalette } from '../../lib/navigation/command-palette';
+import { registerHotkey } from '../../lib/navigation/hotkeys';
+import { openSettings } from '../../lib/navigation/hash-route';
+import { openPath } from '../../lib/navigation/path-open';
+import { useProfileSettings, useProjects, useSessions } from '../../lib/queries/queries';
 import { collectCommands, type PaletteCommand } from './commands';
 import { useCurrentProfileId, profileStore } from '../profile/profile-store';
 import { useSessionTitleRenderer } from '../profile/use-session-title';
-import { orderByDrag } from '../workspace/session-order';
+import { orderByDrag } from '../workspace/sessions/session-order';
 
 /** ⌘K palette: switch project/session, new project/agent/terminal, theme, settings (Phase 2). */
 export function CommandPalette({

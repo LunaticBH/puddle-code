@@ -1,13 +1,18 @@
 import { useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
-import { toastError } from '../../../lib/errors';
+import { toastError } from '../../../lib/transport/errors';
 import type { RepoWithOrphans } from '@puddle/shared';
 import { Button } from '../../../components/ui/button';
 import { Input, Textarea } from '../../../components/ui/input';
 import { Switch } from '../../../components/ui/switch';
-import { useDaemonVersion, useFetchRepo, usePatchRepo, useRepos } from '../../../lib/queries';
-import { dynamicBaseBranchSupported } from '../../../lib/protocol-support';
+import {
+  useDaemonVersion,
+  useFetchRepo,
+  usePatchRepo,
+  useRepos,
+} from '../../../lib/queries/queries';
+import { dynamicBaseBranchSupported } from '../../../lib/transport/protocol-support';
 import { SectionTitle, SettingRow } from '../parts';
 
 function RepoCard({ repo }: { repo: RepoWithOrphans }) {

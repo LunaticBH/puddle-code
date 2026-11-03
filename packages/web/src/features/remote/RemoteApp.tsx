@@ -28,7 +28,7 @@ import { PairBrowserDialog } from './PairBrowserDialog';
 import { PairDeviceDialog } from './PairDeviceDialog';
 import { parsePairingInvitation, takePairingInvitation } from './pairing-invitation';
 import { DesktopRegistrationPrompt, takeDesktopRegistration } from './DesktopRegistration';
-import { onNotificationTarget } from '../../lib/notification-navigation';
+import { onNotificationTarget } from '../../lib/notifications/notification-navigation';
 import './remote.css';
 
 const initialRegistration = takeDesktopRegistration();

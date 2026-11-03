@@ -6,7 +6,7 @@ import {
   type CockpitRemoteRequest,
   type DesktopRegistration,
 } from '@puddle/shared';
-import { api } from '../../../lib/api';
+import { api } from '../../../lib/transport/api';
 
 const hex = (bytes: Uint8Array) =>
   [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');

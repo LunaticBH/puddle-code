@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Archive, ArchiveRestore, Play, Square } from 'lucide-react';
 import type { Session } from '@puddle/shared';
-import { api } from '../../lib/api';
+import { api } from '../../lib/transport/api';
 import { sessionDisplayName } from '../../lib/session-display';
 import { Button } from '../../components/ui/button';
 import {

@@ -9,7 +9,7 @@ import {
   type WsClientMessage,
 } from '@puddle/shared';
 import { secureChannel, SocketWire, type EncryptedChannel } from '@puddle/remote-transport';
-import type { BrowserTransport, CockpitSocket } from '../../lib/browser-transport';
+import type { BrowserTransport, CockpitSocket } from '../../lib/transport/browser-transport';
 import type { BrowserHost } from './identity-store';
 import { RemoteSocket } from './socket';
 

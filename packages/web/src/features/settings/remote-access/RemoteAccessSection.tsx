@@ -6,9 +6,9 @@ import {
   remoteAdminResponseSchema,
   type CockpitRemoteRequest,
 } from '@puddle/shared';
-import { api, ApiError } from '../../../lib/api';
+import { api, ApiError } from '../../../lib/transport/api';
 import { useCurrentProfileId } from '../../profile/profile-store';
-import { useHostInfo, useProfiles } from '../../../lib/queries';
+import { useHostInfo, useProfiles } from '../../../lib/queries/queries';
 import { Button } from '../../../components/ui/button';
 import { Disclosure } from '../../../components/ui/disclosure';
 import {

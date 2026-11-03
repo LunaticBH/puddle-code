@@ -7,18 +7,18 @@ import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '../../components/ui/popover';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../../components/ui/tooltip';
-import { registerHotkey } from '../../lib/hotkeys';
+import { registerHotkey } from '../../lib/navigation/hotkeys';
 import {
   useCreateLayout,
   useDeleteLayout,
   useLayouts,
   usePatchLayout,
   useProjects,
-} from '../../lib/queries';
-import { toastError } from '../../lib/errors';
+} from '../../lib/queries/queries';
+import { toastError } from '../../lib/transport/errors';
 import { cn } from '../../lib/utils';
 import { useCurrentProfileId } from '../profile/profile-store';
-import { layoutSignature } from '../workspace/layout-signature';
+import { layoutSignature } from '../workspace/layout/layout-signature';
 import { setLayoutsOpen, toggleLayouts, useLayoutBridge, useLayoutsOpen } from './layouts-store';
 import { useDashboardLayouts } from './use-dashboard-layouts';
 

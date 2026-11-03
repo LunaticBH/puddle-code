@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { Session } from '@puddle/shared';
-import { wsManager } from '../../lib/ws';
+import { wsManager } from '../../lib/transport/ws';
 import { useKeepAliveSlot } from '../workspace/keep-alive';
 import { Composer } from './Composer';
 import { PhoneReview } from './PhoneReview';

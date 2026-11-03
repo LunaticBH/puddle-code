@@ -10,10 +10,10 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { fileResponseSchema, treeResponseSchema } from '@puddle/shared';
-import { useDaemonVersion } from '../../lib/queries';
-import { previewKind } from '../editor/preview-kind';
-import { mediaKind } from '../editor/media-kind';
-import { api } from '../../lib/api';
+import { useDaemonVersion } from '../../lib/queries/queries';
+import { previewKind } from '../editor/previews/preview-kind';
+import { mediaKind } from '../editor/previews/media-kind';
+import { api } from '../../lib/transport/api';
 import { Button } from '../../components/ui/button';
 import { PhoneReview } from './PhoneReview';
 import { PhonePathDialog } from './PhonePathDialog';

@@ -1,14 +1,14 @@
 import { useState } from 'react';
 import { RotateCcw } from 'lucide-react';
-import { toastError } from '../../../lib/errors';
+import { toastError } from '../../../lib/transport/errors';
 import {
   eventBinding,
   formatBinding,
   HOTKEY_ACTIONS,
   HOTKEY_GROUPS,
   shellDefaultBinding,
-} from '../../../lib/hotkeys';
-import { usePatchProfileSettings, useProfileSettings } from '../../../lib/queries';
+} from '../../../lib/navigation/hotkeys';
+import { usePatchProfileSettings, useProfileSettings } from '../../../lib/queries/queries';
 import { cn } from '../../../lib/utils';
 import { Switch } from '../../../components/ui/switch';
 import { useCurrentProfileId } from '../../profile/profile-store';

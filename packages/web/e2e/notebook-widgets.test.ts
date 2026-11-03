@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { NotebookKernels } from '../../daemon/src/notebooks/kernels.js';
 import type { SessionStore } from '../../daemon/src/db/stores/sessions.js';
 import type { RepoStore } from '../../daemon/src/db/stores/repos.js';
-import { NO_SESSION } from '../../daemon/src/http/routes/worktree-shared.js';
+import { NO_SESSION } from '../../daemon/src/http/routes/worktrees/worktree-shared.js';
 import { findCodeExecutable } from '../../daemon/src/code/discovery.js';
 
 let server: ViteDevServer;

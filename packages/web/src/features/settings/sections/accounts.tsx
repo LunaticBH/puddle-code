@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { KeyRound, Pencil, Plus, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
-import { toastError } from '../../../lib/errors';
+import { toastError } from '../../../lib/transport/errors';
 import type { Account, AgentType } from '@puddle/shared';
 import { Button } from '../../../components/ui/button';
 import {
@@ -24,8 +24,8 @@ import {
   useLoginAccount,
   usePatchAccount,
   useProfileSettings,
-} from '../../../lib/queries';
-import { useDebouncedValue } from '../../../lib/use-debounced-value';
+} from '../../../lib/queries/queries';
+import { useDebouncedValue } from '../../../lib/hooks/use-debounced-value';
 import { LoginDialog } from '../../accounts/LoginDialog';
 import { useCurrentProfileId } from '../../profile/profile-store';
 import { SectionTitle, SettingRow } from '../parts';

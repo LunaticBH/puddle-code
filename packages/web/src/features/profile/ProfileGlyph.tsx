@@ -1,7 +1,7 @@
 import { UserRound } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { PROFILE_ICON_BY_NAME } from './profile-icons';
-import { appearanceColourClass as profileColourClass } from '../../lib/appearance-colours';
+import { appearanceColourClass as profileColourClass } from '../../lib/appearance/appearance-colours';
 
 export { profileColourClass };
 

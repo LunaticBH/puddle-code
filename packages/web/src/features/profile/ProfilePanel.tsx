@@ -1,12 +1,12 @@
 import { useState } from 'react';
 import { KeyRound, Plus, Settings2 } from 'lucide-react';
-import { toastError } from '../../lib/errors';
+import { toastError } from '../../lib/transport/errors';
 import type { Account } from '@puddle/shared';
 import { InlineLabelEdit, editOnDoubleClick } from '../../components/inline-label-edit';
 import { Button } from '../../components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../../components/ui/popover';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../../components/ui/tooltip';
-import { openSettings } from '../../lib/hash-route';
+import { openSettings } from '../../lib/navigation/hash-route';
 import { cn } from '../../lib/utils';
 import {
   useAccountUsage,
@@ -15,7 +15,7 @@ import {
   useLoginAccount,
   usePatchProfile,
   useProfiles,
-} from '../../lib/queries';
+} from '../../lib/queries/queries';
 import { LoginDialog } from '../accounts/LoginDialog';
 import { useNewSession } from '../shell/new-session-context';
 import { ProfileGlyph, profileColourClass } from './ProfileGlyph';

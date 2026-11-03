@@ -1,5 +1,5 @@
 import type { Project, Session, SessionStatus } from '@puddle/shared';
-import { appearanceColourClass } from '../../lib/appearance-colours';
+import { appearanceColourClass } from '../../lib/appearance/appearance-colours';
 import { cn } from '../../lib/utils';
 
 /** Shared by the desktop dashboard and the host-grouped remote dashboard. */

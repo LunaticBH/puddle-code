@@ -1,6 +1,6 @@
 import { Toaster as SonnerToaster } from 'sonner';
 import { useSyncExternalStore } from 'react';
-import { currentTheme, onThemeChange } from '../../lib/theme';
+import { currentTheme, onThemeChange } from '../../lib/appearance/theme';
 
 /** Toasts follow the active puddle theme and sit on elevated surfaces. */
 export function Toaster() {

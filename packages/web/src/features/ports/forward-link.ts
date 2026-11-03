@@ -1,5 +1,5 @@
 import { proxyGrantResponseSchema } from '@puddle/shared';
-import { api } from '../../lib/api';
+import { api } from '../../lib/transport/api';
 import { desktopBridge } from '../../lib/desktop';
 
 /** Obtain an application-scoped invitation using this cockpit's authorisation. */

@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react';
-import { localValue } from '../../lib/local-store';
+import { localValue } from '../../lib/persistence/local-store';
 
 /** The selected profile — identity, not auth (SPEC §11); remembered per browser. */
 export const profileStore = localValue('puddle.profile-id');

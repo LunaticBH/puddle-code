@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { cockpitRevealRequestSchema } from '@puddle/shared';
-import type { LocalFileManager } from '../file-manager.js';
+import type { LocalFileManager } from '../host/file-manager.js';
 import { fail, json, readJson } from './http-auth.js';
 
 /** Runs behind the cockpit's exact Host/Origin and browser authentication. */

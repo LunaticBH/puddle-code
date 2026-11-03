@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { cockpitRemoteRequestSchema, connectorProfileSchema } from '@puddle/shared';
-import type { RemoteAccessControl } from '../remote-access.js';
+import type { RemoteAccessControl } from '../host/remote-access.js';
 import { fail, json, readJson } from './http-auth.js';
 
 /** Called only after exact cockpit Host/Origin and browser authentication. */

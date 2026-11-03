@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'sonner';
 import { Switch } from '../../src/components/ui/switch';
 import { PhoneFiles } from '../../src/features/mobile/PhoneFiles';
-import { installBrowserTransport } from '../../src/lib/browser-transport';
+import { installBrowserTransport } from '../../src/lib/transport/browser-transport';
 import '../../src/styles/app.css';
 import '../../src/features/remote/remote.css';
 

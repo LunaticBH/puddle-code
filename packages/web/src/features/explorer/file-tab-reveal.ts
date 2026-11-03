@@ -1,4 +1,4 @@
-import type { EditorTab } from '../editor/editor-tabs';
+import type { EditorTab } from '../editor/tabs/editor-tabs';
 import {
   basename,
   dirOf,

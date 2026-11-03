@@ -5,53 +5,57 @@ import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon, type ISearchOptions } from '@xterm/addon-search';
 import '@xterm/xterm/css/xterm.css';
 import { HOME_STREAM, type SessionStatus } from '@puddle/shared';
-import { useClientSettings } from '../../lib/client-settings';
+import { useClientSettings } from '../../lib/settings/client-settings';
 import {
   actionForBinding,
   eventBinding,
   getHotkeyAction,
   getHotkeyHandler,
-} from '../../lib/hotkeys';
-import { daemonAnswersColourQueries } from '../../lib/protocol-support';
-import { useDaemonVersion, useProfileSettings } from '../../lib/queries';
+} from '../../lib/navigation/hotkeys';
+import { daemonAnswersColourQueries } from '../../lib/transport/protocol-support';
+import { useDaemonVersion, useProfileSettings } from '../../lib/queries/queries';
 import { useCurrentProfileId } from '../profile/profile-store';
 import { FindWidget } from '../find/FindWidget';
 import { isValidFindPattern } from '../find/find-matches';
 import { isFindShortcut } from '../find/find-shortcut';
 import { EMPTY_FIND_RESULT, type FindOptions } from '../find/find-types';
 import { useFindControls } from '../find/use-find-controls';
-import { useDocumentVisible } from '../../lib/use-document-visible';
-import { sshMode } from '../../lib/ssh-mode';
+import { useDocumentVisible } from '../../lib/hooks/use-document-visible';
+import { sshMode } from '../../lib/transport/ssh-mode';
 import {
   cssTokenReader,
   onThemeChange,
   xtermThemeFromCss,
   xtermVisualOptionsFromCss,
-} from '../../lib/theme';
+} from '../../lib/appearance/theme';
 import { cn } from '../../lib/utils';
-import { wsManager } from '../../lib/ws';
+import { wsManager } from '../../lib/transport/ws';
 import { dynamicColourReport, type DynamicColourCode } from './osc-colour';
-import { terminalClipboard, writeTerminalClipboard } from './clipboard';
-import { terminalSelectionText } from './copy-text';
-import { registerUrlLinks } from './url-links';
-import { interceptImagePaste } from './paste-image';
-import { macLineEditSequence } from './line-edit-shortcut';
-import { rewriteTerminalUri } from './proxy-links';
+import { terminalClipboard, writeTerminalClipboard } from './clipboard/clipboard';
+import { terminalSelectionText } from './clipboard/copy-text';
+import { registerUrlLinks } from './links/url-links';
+import { interceptImagePaste } from './clipboard/paste-image';
+import { macLineEditSequence } from './input/line-edit-shortcut';
+import { rewriteTerminalUri } from './links/proxy-links';
 import { openBrowserLink } from '../ports/forward-link';
-import { toastError } from '../../lib/errors';
+import { toastError } from '../../lib/transport/errors';
 import {
   TerminalResizeScrollGuard,
   terminalScrollLine,
   terminalScrollStore,
   type TerminalScrollPosition,
-} from './scroll-position';
-import { registerFileLinks, type FileLinkTarget } from './file-links';
-import { consumeTerminalModifiers, pasteTerminalClipboard, registerTerminalInput } from './input';
-import { preserveXtermScrollUp } from './xterm-scrollback';
-import { attachTerminalTouchScroll } from './touch-scroll';
-import { attachIosTerminalInput } from './ios-input';
+} from './scroll/scroll-position';
+import { registerFileLinks, type FileLinkTarget } from './links/file-links';
+import {
+  consumeTerminalModifiers,
+  pasteTerminalClipboard,
+  registerTerminalInput,
+} from './input/input';
+import { preserveXtermScrollUp } from './scroll/xterm-scrollback';
+import { attachTerminalTouchScroll } from './scroll/touch-scroll';
+import { attachIosTerminalInput } from './input/ios-input';
 import { SelectionActions } from '../../components/selection-actions';
-import { TerminalRichOutput } from './TerminalRichOutput';
+import { TerminalRichOutput } from './rich-output/TerminalRichOutput';
 
 const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform);
 

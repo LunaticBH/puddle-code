@@ -1,4 +1,4 @@
-import { useCommitShow } from '../../lib/worktree-queries';
+import { useCommitShow } from '../../lib/queries/worktree-queries';
 import { HistoryFileContent } from './HistoryFileContent';
 
 /**

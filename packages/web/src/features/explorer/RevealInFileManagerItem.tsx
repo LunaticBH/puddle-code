@@ -2,8 +2,8 @@ import { useQuery } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { cockpitFileManagerSchema, type CockpitRevealRequest } from '@puddle/shared';
 import { ContextMenuItem } from '../../components/ui/context-menu';
-import { api } from '../../lib/api';
-import { browserTransport } from '../../lib/browser-transport';
+import { api } from '../../lib/transport/api';
+import { browserTransport } from '../../lib/transport/browser-transport';
 
 /** Mounted only in an open menu; capability discovery is shared across menus. */
 export function RevealInFileManagerItem({ path }: { path: string }) {

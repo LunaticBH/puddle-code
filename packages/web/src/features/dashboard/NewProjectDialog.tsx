@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router';
 import { CornerLeftUp, Folder, FolderGit2 } from 'lucide-react';
 import type { ProjectColour } from '@puddle/shared';
 import { ColourPicker } from '../../components/colour-picker';
-import { appearanceColourClass } from '../../lib/appearance-colours';
+import { appearanceColourClass } from '../../lib/appearance/appearance-colours';
 import {
   Dialog,
   DialogContent,
@@ -23,10 +23,13 @@ import {
   useDirSuggestions,
   useHostInfo,
   useRepos,
-} from '../../lib/queries';
+} from '../../lib/queries/queries';
 import { ABBREV_MAX, deriveAbbrev, normaliseAbbrev } from '../../lib/project-abbrev';
-import { dynamicBaseBranchSupported, projectColourSupported } from '../../lib/protocol-support';
-import { useDebouncedValue } from '../../lib/use-debounced-value';
+import {
+  dynamicBaseBranchSupported,
+  projectColourSupported,
+} from '../../lib/transport/protocol-support';
+import { useDebouncedValue } from '../../lib/hooks/use-debounced-value';
 
 /** '/a/b/' → '/a/b'; keeps the root slash. */
 function normalisePath(path: string): string {

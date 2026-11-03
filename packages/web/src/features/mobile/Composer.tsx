@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { browserScope } from '../../lib/browser-transport';
-import { sendTerminalInput, useTerminalInputReady } from '../terminal/input';
+import { browserScope } from '../../lib/transport/browser-transport';
+import { sendTerminalInput, useTerminalInputReady } from '../terminal/input/input';
 
 import { Button } from '../../components/ui/button';
 import { TerminalKeys } from './TerminalKeys';

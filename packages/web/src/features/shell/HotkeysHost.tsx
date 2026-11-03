@@ -8,8 +8,8 @@ import {
   hotkeyNeedsCapture,
   registerHotkey,
   setHotkeyOverrides,
-} from '../../lib/hotkeys';
-import { useProfileSettings } from '../../lib/queries';
+} from '../../lib/navigation/hotkeys';
+import { useProfileSettings } from '../../lib/queries/queries';
 import { useCurrentProfileId } from '../profile/profile-store';
 
 /** A focused terminal owns its keys — the dispatcher yields ⌃A/⌃` etc. to it. */

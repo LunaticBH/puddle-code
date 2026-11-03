@@ -21,7 +21,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '../../components/ui/select';
-import { applyTheme, storedPreference, type ThemePreference } from '../../lib/theme';
+import { applyTheme, storedPreference, type ThemePreference } from '../../lib/appearance/theme';
 import { AccountSecurity } from './AccountAccess';
 import { authClient, authResult, serviceOrigin, serviceRequest } from './service';
 import { forgetBrowserHost, loadBrowserHost } from './identity-store';

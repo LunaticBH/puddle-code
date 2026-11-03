@@ -9,12 +9,12 @@ import {
   ContextMenuItem,
   ContextMenuTrigger,
 } from '../../components/ui/context-menu';
-import { browserTransport } from '../../lib/browser-transport';
-import { ApiError, apiFetchRaw } from '../../lib/api';
+import { browserTransport } from '../../lib/transport/browser-transport';
+import { ApiError, apiFetchRaw } from '../../lib/transport/api';
 import { downloadBlob } from '../../lib/download-blob';
-import { rootParam } from '../../lib/worktree-queries';
+import { rootParam } from '../../lib/queries/worktree-queries';
 import { cn } from '../../lib/utils';
-import { fetchPreviewAsset } from '../editor/preview-assets';
+import { fetchPreviewAsset } from '../editor/previews/preview-assets';
 import { FileTypeIcon } from '../explorer/file-icons';
 
 /** The shared menu supplies touch holds, movement cancellation and right-click. */

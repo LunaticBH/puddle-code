@@ -13,7 +13,7 @@ import {
 import type { LucideIcon } from 'lucide-react';
 import type { ReactElement } from 'react';
 import { Dialog, DialogContent, DialogTitle } from '../../components/ui/dialog';
-import { closeSettings, openSettings, useSettingsSection } from '../../lib/hash-route';
+import { closeSettings, openSettings, useSettingsSection } from '../../lib/navigation/hash-route';
 import { cn } from '../../lib/utils';
 import { AppearanceSection } from './sections/appearance';
 import { ProfileSection } from './sections/profile';

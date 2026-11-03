@@ -1,7 +1,7 @@
 import type { Session } from '@puddle/shared';
 import { toast } from 'sonner';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../../components/ui/tooltip';
-import { useSessionEnv } from '../../lib/queries';
+import { useSessionEnv } from '../../lib/queries/queries';
 
 const LIVE_STATUSES: Session['status'][] = ['running', 'waiting_input'];
 

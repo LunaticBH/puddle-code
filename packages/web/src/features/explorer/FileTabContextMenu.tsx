@@ -1,6 +1,6 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import { toast } from 'sonner';
-import type { EditorTab } from '../editor/editor-tabs';
+import type { EditorTab } from '../editor/tabs/editor-tabs';
 import { Button } from '../../components/ui/button';
 import {
   ContextMenu,
@@ -15,12 +15,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from '../../components/ui/dialog';
-import { useDaemonVersion, useHostInfo } from '../../lib/queries';
+import { useDaemonVersion, useHostInfo } from '../../lib/queries/queries';
 import {
   browseMutationsSupported,
   crossFiletreeTransferSupported,
-} from '../../lib/protocol-support';
-import { downloadPath } from '../../lib/worktree-queries';
+} from '../../lib/transport/protocol-support';
+import { downloadPath } from '../../lib/queries/worktree-queries';
 import {
   confirmedSameDaemonHost,
   finishExplorerCut,

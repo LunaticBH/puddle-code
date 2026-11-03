@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { profileId, projectId, sessionId } from './common.js';
-import { sessionSchema } from './sessions.js';
+import { sessionSchema } from './agents/sessions.js';
 
 /** How a compilable source is driven while its tab is open. */
 export const compilationModeSchema = z.enum(['on_demand', 'eager']);

@@ -12,9 +12,9 @@ import {
 } from '@puddle/shared';
 import { useWaitingNotifications } from '../../src/features/shell/use-waiting-notifications';
 import { Terminal } from '../../src/features/terminal/Terminal';
-import { wsManager } from '../../src/lib/ws';
+import { wsManager } from '../../src/lib/transport/ws';
 import { Workspace } from '../../src/features/workspace/Workspace';
-import { makeLeaf } from '../../src/features/workspace/layout-tree';
+import { makeLeaf } from '../../src/features/workspace/layout/layout-tree';
 import { profileStore } from '../../src/features/profile/profile-store';
 import { workingSetKey } from '../../src/features/workspace/use-ui-state';
 import { TooltipProvider } from '../../src/components/ui/tooltip';

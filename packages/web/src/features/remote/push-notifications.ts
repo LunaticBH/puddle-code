@@ -5,9 +5,9 @@ import {
   remoteServiceInfoSchema,
   versionResponseSchema,
 } from '@puddle/shared';
-import { setRemotePushReady } from '../../lib/remote-notification-status';
-import { notificationWorker } from '../../lib/notification-worker';
-import { waitForNotification } from '../../lib/notification-wait';
+import { setRemotePushReady } from '../../lib/notifications/remote-notification-status';
+import { notificationWorker } from '../../lib/notifications/notification-worker';
+import { waitForNotification } from '../../lib/notifications/notification-wait';
 import { serviceOrigin, serviceRequest } from './service';
 import type { RemoteClient } from './client';
 import { notificationKey, forgetNotificationKeys } from './notification-keys';

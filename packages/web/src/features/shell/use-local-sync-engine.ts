@@ -3,8 +3,8 @@ import {
   updateClientSettings,
   useClientSettings,
   type ClientSettings,
-} from '../../lib/client-settings';
-import { effectiveSyncEntry, useLocalSync, usePutLocalSync } from '../../lib/local-sync';
+} from '../../lib/settings/client-settings';
+import { effectiveSyncEntry, useLocalSync, usePutLocalSync } from '../../lib/settings/local-sync';
 import {
   useCreateScratchpad,
   usePatchProfile,
@@ -12,14 +12,19 @@ import {
   useProfileSettings,
   useProfiles,
   useScratchpad,
-} from '../../lib/queries';
+} from '../../lib/queries/queries';
 import {
   applyImport,
   collectExport,
   type SyncSinks,
   type SyncSources,
-} from '../../lib/settings-sync-manifest';
-import { applyTheme, onThemeChange, storedPreference, type ThemePreference } from '../../lib/theme';
+} from '../../lib/settings/settings-sync-manifest';
+import {
+  applyTheme,
+  onThemeChange,
+  storedPreference,
+  type ThemePreference,
+} from '../../lib/appearance/theme';
 import { useCurrentProfileId } from '../profile/profile-store';
 
 /**

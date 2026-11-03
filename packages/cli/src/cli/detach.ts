@@ -4,8 +4,8 @@ import { clientHome } from '../lib/paths.js';
 import { spawn } from 'node:child_process';
 import { closeSync, mkdirSync, openSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { openBrowser } from '../lib/browser.js';
-import { sleep } from '../lib/net.js';
+import { openBrowser } from '../lib/serve/browser.js';
+import { sleep } from '../lib/transport/net.js';
 import {
   checkCockpit,
   cockpitLogPath,

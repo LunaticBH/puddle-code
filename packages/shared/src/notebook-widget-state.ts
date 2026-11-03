@@ -1,4 +1,7 @@
-import type { NotebookWidgetMessage, NotebookWidgetState } from './api/notebook-widgets.js';
+import type {
+  NotebookWidgetMessage,
+  NotebookWidgetState,
+} from './api/notebooks/notebook-widgets.js';
 
 /** Apply Jupyter trait patches without decoding binary buffers or executing model code. */
 export function mergeWidgetMessage(

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { resolvePathResponseSchema, type ResolvePathResponse } from '@puddle/shared';
-import { api } from '../../lib/api';
+import { api } from '../../lib/transport/api';
 import { Button } from '../../components/ui/button';
 import {
   Dialog,

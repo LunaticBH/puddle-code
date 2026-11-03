@@ -5,7 +5,7 @@ import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 import { cockpitStatusSchema, type WsServerMessage } from '@puddle/shared';
-import { findFreePort } from '../src/lib/net.js';
+import { findFreePort } from '../src/lib/transport/net.js';
 
 export const root = fileURLToPath(new URL('../../../', import.meta.url));
 export const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));

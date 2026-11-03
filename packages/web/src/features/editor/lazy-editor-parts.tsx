@@ -1,8 +1,8 @@
 import { Suspense, lazy, type ComponentType } from 'react';
 import type { EditorPosition, RevealTarget } from '../workspace/editor-context';
 import type { LatexSynctexResponse } from '@puddle/shared';
-import type { EditorTab, EditorTabKind } from './editor-tabs';
-import type { HeldBuffer } from './ModelRefcount';
+import type { EditorTab, EditorTabKind } from './tabs/editor-tabs';
+import type { HeldBuffer } from './buffers/ModelRefcount';
 
 /**
  * Lazy wrappers for the tiling layout's Monaco-touching pieces (SPEC §8), so the
@@ -38,7 +38,7 @@ let ReadyRefcount: ComponentType<RefcountProps> | null = null;
 export async function warmEditorChunk(): Promise<void> {
   const [body, refcount] = await Promise.all([
     import('./PaneEditorBody'),
-    import('./ModelRefcount'),
+    import('./buffers/ModelRefcount'),
   ]);
   ReadyBody = body.PaneEditorBody;
   ReadyRefcount = refcount.ModelRefcount;
@@ -63,7 +63,7 @@ export function LazyPaneEditorBody(props: BodyProps) {
 }
 
 const RefcountInner = lazy(() =>
-  import('./ModelRefcount').then((m) => ({ default: m.ModelRefcount })),
+  import('./buffers/ModelRefcount').then((m) => ({ default: m.ModelRefcount })),
 );
 export function LazyModelRefcount({ buffers }: { buffers: HeldBuffer[] }) {
   if (ReadyRefcount) return <ReadyRefcount buffers={buffers} />;
@@ -75,7 +75,7 @@ export function LazyModelRefcount({ buffers }: { buffers: HeldBuffer[] }) {
 }
 
 const DirtyDotInner = lazy(() =>
-  import('./EditorTabClose').then((m) => ({ default: m.EditorDirtyDot })),
+  import('./tabs/EditorTabClose').then((m) => ({ default: m.EditorDirtyDot })),
 );
 /** The in-flow dirty dot after a chip's filename; nothing until the chunk lands. */
 export function LazyEditorDirtyDot(props: {
@@ -92,7 +92,7 @@ export function LazyEditorDirtyDot(props: {
 }
 
 const CloseInner = lazy(() =>
-  import('./EditorTabClose').then((m) => ({ default: m.EditorTabClose })),
+  import('./tabs/EditorTabClose').then((m) => ({ default: m.EditorTabClose })),
 );
 export function LazyEditorTabClose(props: {
   session: string;

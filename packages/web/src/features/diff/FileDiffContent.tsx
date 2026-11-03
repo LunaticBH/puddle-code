@@ -1,16 +1,16 @@
 import { useEffect, useMemo, useRef, type ReactNode } from 'react';
 import Editor, { DiffEditor } from '@monaco-editor/react';
 import type { DiffEntry, GitArea } from '@puddle/shared';
-import { useClientSettings } from '../../lib/client-settings';
-import { useFileAt, useIndexFile } from '../../lib/worktree-queries';
-import { ApiError } from '../../lib/api';
-import { CodeEditor } from '../editor/CodeEditor';
-import { ConflictSurface } from '../editor/ConflictSurface';
-import { bufferKey, releaseModel, retainModel } from '../editor/buffer-store';
-import { monaco, THEME_NAME } from '../editor/monaco-setup';
-import { editorIndentationOptions } from '../editor/monaco-options';
-import { useEditorBuffer } from '../editor/use-editor-buffer';
-import { useCodeViewState, useDiffViewState } from '../editor/monaco-view-state';
+import { useClientSettings } from '../../lib/settings/client-settings';
+import { useFileAt, useIndexFile } from '../../lib/queries/worktree-queries';
+import { ApiError } from '../../lib/transport/api';
+import { CodeEditor } from '../editor/monaco/CodeEditor';
+import { ConflictSurface } from '../editor/conflicts/ConflictSurface';
+import { bufferKey, releaseModel, retainModel } from '../editor/buffers/buffer-store';
+import { monaco, THEME_NAME } from '../editor/monaco/monaco-setup';
+import { editorIndentationOptions } from '../editor/monaco/monaco-options';
+import { useEditorBuffer } from '../editor/buffers/use-editor-buffer';
+import { useCodeViewState, useDiffViewState } from '../editor/monaco/monaco-view-state';
 
 /**
  * A muted one-line note filling the section body (loading, binary, errors).

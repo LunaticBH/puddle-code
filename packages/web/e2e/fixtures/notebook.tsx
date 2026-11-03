@@ -1,4 +1,4 @@
-import '../../src/features/editor/monaco-setup';
+import '../../src/features/editor/monaco/monaco-setup';
 import { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -6,12 +6,12 @@ import { DndContext } from '@dnd-kit/core';
 import type { CompilationProvider, LayoutLeaf } from '@puddle/shared';
 import { TooltipProvider } from '../../src/components/ui/tooltip';
 import { EditorProvider } from '../../src/features/workspace/editor-context';
-import { PaneTabStrip } from '../../src/features/workspace/PaneTabStrip';
+import { PaneTabStrip } from '../../src/features/workspace/panes/PaneTabStrip';
 import { PaneEditorBody } from '../../src/features/editor/PaneEditorBody';
-import { requestSave, saverKey } from '../../src/features/editor/save-registry';
-import { tabRefKey } from '../../src/features/workspace/layout-tree';
+import { requestSave, saverKey } from '../../src/features/editor/buffers/save-registry';
+import { tabRefKey } from '../../src/features/workspace/layout/layout-tree';
 import '../../src/styles/app.css';
-import { applyTheme } from '../../src/lib/theme';
+import { applyTheme } from '../../src/lib/appearance/theme';
 
 applyTheme('dark');
 

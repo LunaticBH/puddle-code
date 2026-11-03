@@ -1,4 +1,4 @@
-import type { Project } from './api/projects.js';
+import type { Project } from './api/workspace/projects.js';
 import { projectAbbrev } from './project-abbrev.js';
 
 /** One bounded title for both live browser alerts and encrypted background push. */

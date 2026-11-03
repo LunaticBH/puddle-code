@@ -1,11 +1,11 @@
 import { type DragEvent, useState } from 'react';
 import { Link } from 'react-router';
 import { ArchiveRestore, Archive as ArchiveIcon, Pencil } from 'lucide-react';
-import { toastError } from '../../lib/errors';
+import { toastError } from '../../lib/transport/errors';
 import type { Project, ProjectColour } from '@puddle/shared';
 import { ColourPicker } from '../../components/colour-picker';
-import { appearanceColourClass } from '../../lib/appearance-colours';
-import { projectColourSupported } from '../../lib/protocol-support';
+import { appearanceColourClass } from '../../lib/appearance/appearance-colours';
+import { projectColourSupported } from '../../lib/transport/protocol-support';
 import { Button } from '../../components/ui/button';
 import {
   ContextMenu,
@@ -23,7 +23,7 @@ import {
 import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
 import { ABBREV_MAX, normaliseAbbrev, projectAbbrev } from '../../lib/project-abbrev';
-import { useDaemonVersion, usePatchProject, useSessions } from '../../lib/queries';
+import { useDaemonVersion, usePatchProject, useSessions } from '../../lib/queries/queries';
 import { cn } from '../../lib/utils';
 
 import { ProjectCardContent, projectCardSurface } from './ProjectCardContent';

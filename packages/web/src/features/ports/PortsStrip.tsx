@@ -7,11 +7,11 @@ import {
   DropdownMenuTrigger,
 } from '../../components/ui/dropdown-menu';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../../components/ui/tooltip';
-import { useHostInfo, useSessionPorts } from '../../lib/queries';
-import { sshMode } from '../../lib/ssh-mode';
+import { useHostInfo, useSessionPorts } from '../../lib/queries/queries';
+import { sshMode } from '../../lib/transport/ssh-mode';
 import { sshForwardCommand } from './ssh-command';
 import { openBrowserLink } from './forward-link';
-import { toastError } from '../../lib/errors';
+import { toastError } from '../../lib/transport/errors';
 
 const LIVE_STATUSES: Session['status'][] = ['running', 'waiting_input'];
 

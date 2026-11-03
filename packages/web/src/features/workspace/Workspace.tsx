@@ -1,4 +1,4 @@
-import { runOpenNotebook } from '../editor/notebook-run-registry';
+import { runOpenNotebook } from '../editor/notebooks/notebook-run-registry';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router';
 import { useQueryClient } from '@tanstack/react-query';
@@ -17,26 +17,26 @@ import {
   type SessionKind,
   type TabRef,
 } from '@puddle/shared';
-import { createUntitled, deleteUntitled } from '../../lib/untitled-queries';
-import { deleteDraft, saveDraft } from '../../lib/drafts';
-import { renameEntry } from '../../lib/worktree-queries';
+import { createUntitled, deleteUntitled } from '../../lib/queries/untitled-queries';
+import { deleteDraft, saveDraft } from '../../lib/persistence/drafts';
+import { renameEntry } from '../../lib/queries/worktree-queries';
 import { basename, dirOf, joinPath } from '../explorer/explorer-paths';
-import { tabKind } from '../editor/editor-tabs';
-import { previewKind } from '../editor/preview-kind';
-import { compilationSourceKey, sourceExtension } from '../editor/compilation-kind';
-import { CompilationWatcher } from '../editor/CompilationWatcher';
-import { CompilationSettingsDialog } from '../editor/CompilationSettingsDialog';
-import { clearCompilationDiagnostics } from '../editor/compilation-diagnostics-store';
-import { reportCompilationFailure } from '../editor/compilation-errors';
-import { bumpMediaRefresh } from '../editor/media-refresh-store';
-import { saveCompilationInputs } from '../editor/save-registry';
-import { requestActiveTabSave } from '../editor/active-tab-save';
+import { tabKind } from '../editor/tabs/editor-tabs';
+import { previewKind } from '../editor/previews/preview-kind';
+import { compilationSourceKey, sourceExtension } from '../editor/compilation/compilation-kind';
+import { CompilationWatcher } from '../editor/compilation/CompilationWatcher';
+import { CompilationSettingsDialog } from '../editor/compilation/CompilationSettingsDialog';
+import { clearCompilationDiagnostics } from '../editor/compilation/compilation-diagnostics-store';
+import { reportCompilationFailure } from '../editor/compilation/compilation-errors';
+import { bumpMediaRefresh } from '../editor/previews/media-refresh-store';
+import { saveCompilationInputs } from '../editor/buffers/save-registry';
+import { requestActiveTabSave } from '../editor/buffers/active-tab-save';
 import {
   forgetUntitledContent,
   setUntitledSaveHandler,
   type UntitledSaveRequest,
-} from '../editor/untitled-save-store';
-import { UntitledSaveDialog } from './UntitledSaveDialog';
+} from '../editor/buffers/untitled-save-store';
+import { UntitledSaveDialog } from './tabs/UntitledSaveDialog';
 import {
   Dialog,
   DialogContent,
@@ -54,13 +54,17 @@ import {
   directoryTargetSupported,
   nativeConversationSyncSupported,
   untitledSupported,
-} from '../../lib/protocol-support';
+} from '../../lib/transport/protocol-support';
 import {
   setCompilationMode as setHostCompilationMode,
   useCompilationCapabilities,
   useRunCompilation,
-} from '../../lib/compilation-queries';
-import { clientSettings, updateClientSettings, useClientSettings } from '../../lib/client-settings';
+} from '../../lib/queries/compilation-queries';
+import {
+  clientSettings,
+  updateClientSettings,
+  useClientSettings,
+} from '../../lib/settings/client-settings';
 import { useSessionTitleRenderer } from '../profile/use-session-title';
 import {
   hostLabel,
@@ -76,10 +80,10 @@ import {
   useProjects,
   useRepos,
   refreshProjectConversations,
-} from '../../lib/queries';
-import { mergeOrder, orderByDrag, reorderIds } from './session-order';
+} from '../../lib/queries/queries';
+import { mergeOrder, orderByDrag, reorderIds } from './sessions/session-order';
 import { useNewSession } from '../shell/new-session-context';
-import type { EditorTab } from '../editor/editor-tabs';
+import type { EditorTab } from '../editor/tabs/editor-tabs';
 import {
   EditorProvider,
   useEditorHandler,
@@ -87,23 +91,23 @@ import {
   type RevealTarget,
 } from './editor-context';
 import { toast } from 'sonner';
-import { toastError } from '../../lib/errors';
+import { toastError } from '../../lib/transport/errors';
 import { warmEditorChunk } from '../editor/lazy-editor-parts';
 import { warmTerminalChunk } from '../terminal/LazyTerminal';
-import { wsManager } from '../../lib/ws';
-import { registerHotkey, useHotkeyLabel } from '../../lib/hotkeys';
+import { wsManager } from '../../lib/transport/ws';
+import { registerHotkey, useHotkeyLabel } from '../../lib/navigation/hotkeys';
 import { setScratchpadInsertHandler } from '../scratchpad/scratchpad-store';
 import { setLayoutBridge } from '../layouts/layouts-store';
 import {
   externalBrowseRoot,
   resolveFileLinkTarget,
   type FileLinkTarget,
-} from '../terminal/file-links';
+} from '../terminal/links/file-links';
 import { LocalPhonePane } from '../mobile/LocalPhonePane';
 import { KeepAliveHost } from './keep-alive';
-import { registerOpenPathHandler } from '../../lib/path-open';
-import { requestReveal } from '../../lib/reveal-in-tree';
-import { rememberClosedTab, takeClosedTab } from './closed-tabs';
+import { registerOpenPathHandler } from '../../lib/navigation/path-open';
+import { requestReveal } from '../../lib/navigation/reveal-in-tree';
+import { rememberClosedTab, takeClosedTab } from './tabs/closed-tabs';
 import {
   allLeaves,
   boundToLiveSession,
@@ -112,7 +116,7 @@ import {
   pruneTabs,
   tabRefKey,
   type DropEdge,
-} from './layout-tree';
+} from './layout/layout-tree';
 import {
   loadLayoutPatch,
   mergeShardedLayouts,
@@ -120,28 +124,28 @@ import {
   scopeUiState,
   splitToProjects,
   unionToProfile,
-} from './project-layout';
-import { layoutSignature } from './layout-signature';
+} from './layout/project-layout';
+import { layoutSignature } from './layout/layout-signature';
 import { projectAbbrev } from '../../lib/project-abbrev';
-import { NARROW_VIEWPORT, useMediaQuery } from '../../lib/use-media-query';
-import { layoutForPanels } from './panel-layout';
+import { NARROW_VIEWPORT, useMediaQuery } from '../../lib/hooks/use-media-query';
+import { layoutForPanels } from './layout/panel-layout';
 import {
   CollapsedSidebarRail,
   NavigatorSidebar,
   normalizeSidebarMode,
   type SidebarMode,
-} from './NavigatorSidebar';
-import { NewSessionDialog } from './NewSessionDialog';
+} from './sidebar/NavigatorSidebar';
+import { NewSessionDialog } from './sessions/NewSessionDialog';
 import {
   CollapsedSessionsRail,
   SessionSidebar,
   type SessionGroup,
   type SidebarSessionSelection,
-} from './SessionSidebar';
-import { nextSessionSelection, retainVisibleSessions } from './session-selection';
-import { TileTree } from './TileTree';
-import { TilingDnd } from './TilingDnd';
-import { useLayoutTree } from './useLayoutTree';
+} from './sessions/SessionSidebar';
+import { nextSessionSelection, retainVisibleSessions } from './sessions/session-selection';
+import { TileTree } from './layout/TileTree';
+import { TilingDnd } from './layout/TilingDnd';
+import { useLayoutTree } from './layout/useLayoutTree';
 import { useUiState } from './use-ui-state';
 import { workspaceTitle } from './workspace-title';
 
@@ -1425,7 +1429,7 @@ function WorkspaceInner() {
         // Load the lazy buffer module BEFORE touching disk. If the editor chunk
         // could not load, the file stays where it is and no dirty model is left
         // stranded under the old path.
-        const { rekeyBuffer } = await import('../editor/buffer-store');
+        const { rekeyBuffer } = await import('../editor/buffers/buffer-store');
         const result = await renameEntry(tab.session, tab.path, nextPath, tab.root);
         const snapshot = rekeyBuffer(tab.session, tab.path, result.path, tab.root);
         layoutRef.current.renameFile(tab, result.path);

@@ -3,8 +3,13 @@ import { createRoot } from 'react-dom/client';
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import '../../src/styles/app.css';
-import { TerminalRichOutput } from '../../src/features/terminal/TerminalRichOutput';
-import { applyTheme, cssTokenReader, onThemeChange, xtermThemeFromCss } from '../../src/lib/theme';
+import { TerminalRichOutput } from '../../src/features/terminal/rich-output/TerminalRichOutput';
+import {
+  applyTheme,
+  cssTokenReader,
+  onThemeChange,
+  xtermThemeFromCss,
+} from '../../src/lib/appearance/theme';
 
 declare global {
   interface Window {

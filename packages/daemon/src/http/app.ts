@@ -35,20 +35,20 @@ import { accountRoutes } from './routes/accounts.js';
 import { agentRoutes } from './routes/agents.js';
 import { configRoutes } from './routes/config.js';
 import type { NotebookKernels } from '../notebooks/kernels.js';
-import { notebookRoutes } from './routes/notebooks.js';
-import { compilationRoutes } from './routes/compilation.js';
+import { notebookRoutes } from './routes/execution/notebooks.js';
+import { compilationRoutes } from './routes/execution/compilation.js';
 import { fsRoutes } from './routes/fs.js';
 import { hostRoutes } from './routes/host.js';
 import { profileRoutes } from './routes/profiles.js';
 import { projectRoutes } from './routes/projects.js';
 import { repoRoutes } from './routes/repos.js';
 import { layoutRoutes } from './routes/layouts.js';
-import { latexRoutes } from './routes/latex.js';
+import { latexRoutes } from './routes/execution/latex.js';
 import { scratchpadRoutes } from './routes/scratchpad.js';
 import { sessionRoutes } from './routes/sessions.js';
 import { versionRoutes } from './routes/version.js';
-import { worktreeRoutes } from './routes/worktrees.js';
-import { puddlangRoutes } from './routes/puddlang.js';
+import { worktreeRoutes } from './routes/worktrees/worktrees.js';
+import { puddlangRoutes } from './routes/execution/puddlang.js';
 import type { PuddlangService } from '../puddlang/service.js';
 
 /** Everything the REST + WS surface needs; `api` is absent in narrow tests. */

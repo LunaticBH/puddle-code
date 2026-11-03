@@ -7,7 +7,7 @@ import {
   deleteEntry,
   renameEntry,
   transferEntry,
-} from '../../lib/worktree-queries';
+} from '../../lib/queries/worktree-queries';
 import { basename, joinPath, type VisibleRow } from './explorer-paths';
 import {
   sameFiletree,

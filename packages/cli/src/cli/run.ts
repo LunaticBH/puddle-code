@@ -4,15 +4,18 @@ import { runRemote } from './remote.js';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { attachSession } from '../lib/attach.js';
-import { openBrowser } from '../lib/browser.js';
-import { formatComponentVersions, installedComponentVersions } from '../lib/component-versions.js';
-import { connectRemote } from '../lib/connect.js';
-import { type RunningCockpit } from '../lib/cockpit.js';
-import { DaemonClient, readDaemonPort } from '../lib/daemon-client.js';
+import { attachSession } from '../lib/connection/attach.js';
+import { openBrowser } from '../lib/serve/browser.js';
+import {
+  formatComponentVersions,
+  installedComponentVersions,
+} from '../lib/installation/component-versions.js';
+import { connectRemote } from '../lib/connection/connect.js';
+import { type RunningCockpit } from '../lib/connection/cockpit.js';
+import { DaemonClient, readDaemonPort } from '../lib/connection/daemon-client.js';
 import { showLogs } from '../lib/logs.js';
-import { waitForHttp } from '../lib/net.js';
-import { openTunnel } from '../lib/tunnel.js';
+import { waitForHttp } from '../lib/transport/net.js';
+import { openTunnel } from '../lib/transport/tunnel.js';
 import {
   checkCockpit,
   cockpitLogPath,
@@ -22,8 +25,8 @@ import {
   writeCockpitRecord,
   type CockpitRecord,
 } from '../lib/registry.js';
-import { startLocal } from '../lib/start.js';
-import { statusReport } from '../lib/status.js';
+import { startLocal } from '../lib/connection/start.js';
+import { statusReport } from '../lib/connection/status.js';
 import { LocalTransport } from '../lib/transport/local.js';
 import { SshTransport } from '../lib/transport/ssh.js';
 import type { Transport } from '../lib/transport/transport.js';
@@ -339,7 +342,7 @@ export async function run(command: Command): Promise<number> {
         let session = command.session;
         if (session !== undefined) {
           // Accept the same id prefixes attach does; resolve via the API.
-          const { resolveSession } = await import('../lib/attach.js');
+          const { resolveSession } = await import('../lib/connection/attach.js');
           session = (await resolveSession(target.client, session)).id;
         }
         await showLogs(target.transport, {

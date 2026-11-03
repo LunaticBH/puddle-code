@@ -1,5 +1,5 @@
 import { useCallback } from 'react';
-import { useProfileSettings } from '../../lib/queries';
+import { useProfileSettings } from '../../lib/queries/queries';
 import { renderSessionTitle, type TitleSession } from '../../lib/session-display';
 import { useCurrentProfileId } from './profile-store';
 

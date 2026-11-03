@@ -1,9 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import { uiStateSnapshotSchema, type SavedLayout, type UiStateSnapshot } from '@puddle/shared';
-import { clientSettings, updateClientSettings } from '../../lib/client-settings';
-import { fetchProfileState, putProfileState, useAllSessions, useProjects } from '../../lib/queries';
-import { layoutSignature } from '../workspace/layout-signature';
-import { loadLayoutPatch } from '../workspace/project-layout';
+import { clientSettings, updateClientSettings } from '../../lib/settings/client-settings';
+import {
+  fetchProfileState,
+  putProfileState,
+  useAllSessions,
+  useProjects,
+} from '../../lib/queries/queries';
+import { layoutSignature } from '../workspace/layout/layout-signature';
+import { loadLayoutPatch } from '../workspace/layout/project-layout';
 import { parseWorkingSet, workingSetKey } from '../workspace/use-ui-state';
 import type { LayoutBridge } from './layouts-store';
 

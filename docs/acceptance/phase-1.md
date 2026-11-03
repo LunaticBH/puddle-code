@@ -2,7 +2,7 @@
 
 SPEC §14 Phase 1 acceptance, run manually against a real Claude Code install.
 The automated equivalent (with a deterministic fake agent) lives in
-`packages/daemon/test/e2e.test.ts` and runs in CI; this script exists to
+`packages/daemon/test/integration/e2e.test.ts` and runs in CI; this script exists to
 verify the pieces CI cannot: real `claude` flags, its TUI status patterns,
 and the systemd/launchd restart path.
 

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { ChildProcess } from 'node:child_process';
-import { daemonUpgradeMessage, type ConfirmDaemonUpgrade } from '../lib/handshake.js';
+import { daemonUpgradeMessage, type ConfirmDaemonUpgrade } from '../lib/connection/handshake.js';
 import { confirm } from './prompt.js';
 
 const REQUEST = 'puddle:confirm-daemon-upgrade';

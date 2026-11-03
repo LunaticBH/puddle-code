@@ -2,9 +2,9 @@ import { useCallback, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { CompilationFailure, CompilationRunResponse } from '@puddle/shared';
-import { CompilationWatcher } from '../../src/features/editor/CompilationWatcher';
-import { MediaViewer } from '../../src/features/editor/MediaViewer';
-import { bumpMediaRefresh } from '../../src/features/editor/media-refresh-store';
+import { CompilationWatcher } from '../../src/features/editor/compilation/CompilationWatcher';
+import { MediaViewer } from '../../src/features/editor/previews/MediaViewer';
+import { bumpMediaRefresh } from '../../src/features/editor/previews/media-refresh-store';
 import '../../src/styles/app.css';
 
 const query = new QueryClient();

@@ -1,18 +1,18 @@
 // Load-bearing: the Monaco bootstrap must import before anything mounts an
 // <Editor> (see EditorZone.tsx / monaco-setup.ts). Keep this first.
-import './monaco-setup';
+import './monaco/monaco-setup';
 
 import type { LatexSynctexResponse } from '@puddle/shared';
 import type { EditorPosition, RevealTarget } from '../workspace/editor-context';
-import { CodeEditor } from './CodeEditor';
+import { CodeEditor } from './monaco/CodeEditor';
 import { CommitTabBody } from '../history/CommitTabBody';
 import { DiffTabBody } from '../diff/DiffTabBody';
-import { UntitledTabBody } from './UntitledTabBody';
-import { FilePreview } from './FilePreview';
-import { mediaKind } from './media-kind';
-import { MediaViewer } from './MediaViewer';
-import { previewKind } from './preview-kind';
-import { tabKey, tabKind, type EditorTab } from './editor-tabs';
+import { UntitledTabBody } from './tabs/UntitledTabBody';
+import { FilePreview } from './previews/FilePreview';
+import { mediaKind } from './previews/media-kind';
+import { MediaViewer } from './previews/MediaViewer';
+import { previewKind } from './previews/preview-kind';
+import { tabKey, tabKind, type EditorTab } from './tabs/editor-tabs';
 
 /**
  * The body of one editor tab (SPEC §8) — a plain file editor (or media viewer),

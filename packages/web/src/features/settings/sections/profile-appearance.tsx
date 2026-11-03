@@ -1,9 +1,9 @@
 import { useState } from 'react';
-import { toastError } from '../../../lib/errors';
+import { toastError } from '../../../lib/transport/errors';
 import type { Profile } from '@puddle/shared';
 import { ColourPicker } from '../../../components/colour-picker';
 import { Popover, PopoverContent, PopoverTrigger } from '../../../components/ui/popover';
-import { usePatchProfile } from '../../../lib/queries';
+import { usePatchProfile } from '../../../lib/queries/queries';
 import { cn } from '../../../lib/utils';
 import { ProfileGlyph } from '../../profile/ProfileGlyph';
 import { PROFILE_ICONS } from '../../profile/profile-icons';

@@ -19,7 +19,7 @@ import {
 import { projectAbbrev } from '../../lib/project-abbrev';
 import { sessionDisplayName } from '../../lib/session-display';
 import { cn } from '../../lib/utils';
-import { appearanceColourClass } from '../../lib/appearance-colours';
+import { appearanceColourClass } from '../../lib/appearance/appearance-colours';
 import { SessionGlyph } from '../status/SessionGlyph';
 
 export function PhoneSessionRail({

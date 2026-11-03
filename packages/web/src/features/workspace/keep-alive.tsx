@@ -10,9 +10,9 @@ import {
 import { createPortal } from 'react-dom';
 import type { LayoutNode } from '@puddle/shared';
 // Type-only: keep-alive is eager chrome and must not pull the xterm chunk in.
-import type { FileLinkTarget } from '../terminal/file-links';
+import type { FileLinkTarget } from '../terminal/links/file-links';
 import { LazyTerminal } from '../terminal/LazyTerminal';
-import { allLeaves } from './layout-tree';
+import { allLeaves } from './layout/layout-tree';
 
 /**
  * Terminal keep-alive for the tiling layout (SPEC §8), the one load-bearing

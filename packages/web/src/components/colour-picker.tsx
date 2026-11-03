@@ -1,5 +1,5 @@
 import { PROFILE_ICON_COLOURS } from '@puddle/shared';
-import { appearanceColourClass } from '../lib/appearance-colours';
+import { appearanceColourClass } from '../lib/appearance/appearance-colours';
 import { cn } from '../lib/utils';
 
 /** The same compact, theme-aware swatches for profile icons and project names. */

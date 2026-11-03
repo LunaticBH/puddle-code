@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
 import { expect, it } from 'vitest';
-import { findFreePort } from '../src/lib/net.js';
+import { findFreePort } from '../src/lib/transport/net.js';
 import { env, fixture, root, stop, until, websocket } from './helpers.js';
 
 it('uses the production browser boundary in Vite development mode', async () => {

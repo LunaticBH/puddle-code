@@ -1,9 +1,15 @@
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
-import { terminalClipboard, writeTerminalClipboard } from '../../src/features/terminal/clipboard';
-import { registerFileLinks, type FileLinkTarget } from '../../src/features/terminal/file-links';
-import { registerUrlLinks } from '../../src/features/terminal/url-links';
-import { terminalSelectionText } from '../../src/features/terminal/copy-text';
+import {
+  terminalClipboard,
+  writeTerminalClipboard,
+} from '../../src/features/terminal/clipboard/clipboard';
+import {
+  registerFileLinks,
+  type FileLinkTarget,
+} from '../../src/features/terminal/links/file-links';
+import { registerUrlLinks } from '../../src/features/terminal/links/url-links';
+import { terminalSelectionText } from '../../src/features/terminal/clipboard/copy-text';
 
 const terminal = new Terminal({
   cols: 22,

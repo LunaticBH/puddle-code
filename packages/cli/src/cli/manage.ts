@@ -6,12 +6,12 @@ import { chmod, copyFile, mkdir, rename, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Session } from '@puddle/shared';
-import { installedVersion } from '../lib/bootstrap.js';
+import { installedVersion } from '../lib/installation/bootstrap.js';
 import {
   componentProtocolForVersion,
   recordDesktopInstallation,
-} from '../lib/component-versions.js';
-import { DaemonClient, readDaemonPort } from '../lib/daemon-client.js';
+} from '../lib/installation/component-versions.js';
+import { DaemonClient, readDaemonPort } from '../lib/connection/daemon-client.js';
 import {
   applyDesktopUpdate,
   checkForDesktopUpdate,
@@ -22,17 +22,17 @@ import {
   isNewerVersion,
   pruneDesktopUpdateCache,
   stageDesktopUpdate,
-} from '../lib/desktop-update.js';
-import { waitForHttp } from '../lib/net.js';
-import { latestReleaseVersion } from '../lib/releases.js';
-import { removeDaemon, sweepDirtyWorktrees } from '../lib/remove-daemon.js';
+} from '../lib/installation/desktop-update.js';
+import { waitForHttp } from '../lib/transport/net.js';
+import { latestReleaseVersion } from '../lib/installation/releases.js';
+import { removeDaemon, sweepDirtyWorktrees } from '../lib/installation/remove-daemon.js';
 import { checkCockpit, readCockpitRecord, removeCockpitRecord } from '../lib/registry.js';
-import { openTunnel } from '../lib/tunnel.js';
+import { openTunnel } from '../lib/transport/tunnel.js';
 import { LocalTransport } from '../lib/transport/local.js';
 import { SshTransport } from '../lib/transport/ssh.js';
 import type { Transport } from '../lib/transport/transport.js';
 import { CliError, type Logger } from '../lib/types.js';
-import { upgradeDaemon } from '../lib/upgrade.js';
+import { upgradeDaemon } from '../lib/installation/upgrade.js';
 import { cliVersion, pinnedDaemonVersion } from '../lib/version.js';
 import type { Command, Component } from './args.js';
 import { terminateCockpit } from './detach.js';

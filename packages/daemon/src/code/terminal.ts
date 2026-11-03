@@ -4,7 +4,7 @@ import type { CompilationFileTarget, Session } from '@puddle/shared';
 import type { CompilationRunOptions } from '../compilation/provider.js';
 import type { ProjectStore } from '../db/stores/projects.js';
 import { ApiError } from '../http/errors.js';
-import { NO_SESSION, type WorktreeDeps } from '../http/routes/worktree-shared.js';
+import { NO_SESSION, type WorktreeDeps } from '../http/routes/worktrees/worktree-shared.js';
 import type { PtyExitEvent, PtyManager } from '../pty/pty-manager.js';
 import type { SessionService } from '../sessions/service.js';
 import type { TerminalCommand } from '../sessions/terminal-command.js';

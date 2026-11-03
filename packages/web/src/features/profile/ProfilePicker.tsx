@@ -3,7 +3,7 @@ import { DEFAULT_BRANCH_PREFIX } from '@puddle/shared';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
-import { useCreateProfile, useProfiles } from '../../lib/queries';
+import { useCreateProfile, useProfiles } from '../../lib/queries/queries';
 import { cn } from '../../lib/utils';
 import { ProfileGlyph, profileColourClass } from './ProfileGlyph';
 import { selectProfile } from './profile-store';

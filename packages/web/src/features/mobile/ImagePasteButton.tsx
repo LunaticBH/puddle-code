@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { ImagePlus, LoaderCircle, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '../../components/ui/button';
-import { pasteImage, type ImagePasteProgress } from '../terminal/paste-image';
-import { IMAGE_ACCEPT } from '../terminal/prepare-image';
+import { pasteImage, type ImagePasteProgress } from '../terminal/clipboard/paste-image';
+import { IMAGE_ACCEPT } from '../terminal/clipboard/prepare-image';
 
 export function ImagePasteButton({
   session,

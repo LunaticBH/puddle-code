@@ -9,7 +9,7 @@ import {
   type PasteImageMime,
   type PasteImageResponse,
 } from '@puddle/shared';
-import type { BrowserTransport } from '../../lib/browser-transport';
+import type { BrowserTransport } from '../../lib/transport/browser-transport';
 
 const active = new WeakSet<BrowserTransport>();
 const LEGACY_IMAGE_BYTES = Math.floor(((REMOTE_POLICY.requestBytes - 1024) * 3) / 4);

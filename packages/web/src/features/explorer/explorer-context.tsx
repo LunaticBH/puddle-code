@@ -11,11 +11,18 @@ import {
 import { useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import type { CompilationFileTarget, GitStatus, Session, TreeResponse } from '@puddle/shared';
-import { useDaemonVersion, useHostInfo } from '../../lib/queries';
-import { clearPendingReveal, onReveal } from '../../lib/reveal-in-tree';
+import { useDaemonVersion, useHostInfo } from '../../lib/queries/queries';
+import { clearPendingReveal, onReveal } from '../../lib/navigation/reveal-in-tree';
 import { isSecondClick, type ClickStamp } from '../../lib/second-click';
-import { downloadPath, uploadFiles, useWorktreeGitStatus } from '../../lib/worktree-queries';
-import { crossFiletreeTransferSupported, sourceControlSupported } from '../../lib/protocol-support';
+import {
+  downloadPath,
+  uploadFiles,
+  useWorktreeGitStatus,
+} from '../../lib/queries/worktree-queries';
+import {
+  crossFiletreeTransferSupported,
+  sourceControlSupported,
+} from '../../lib/transport/protocol-support';
 import {
   confirmedSameDaemonHost,
   finishExplorerCut,

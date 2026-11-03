@@ -10,8 +10,8 @@ import {
   DialogTitle,
 } from '../../components/ui/dialog';
 import { ErrorBoundary } from '../../components/error-boundary';
-import { installBrowserTransport } from '../../lib/browser-transport';
-import { wsManager } from '../../lib/ws';
+import { installBrowserTransport } from '../../lib/transport/browser-transport';
+import { wsManager } from '../../lib/transport/ws';
 import { DeviceAccess } from './DeviceAccess';
 import { PhoneWorkspace } from '../mobile/PhoneWorkspace';
 import { watchPushNotifications } from './push-notifications';

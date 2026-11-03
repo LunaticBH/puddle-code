@@ -12,10 +12,10 @@ import {
   updateCompilationDefaults,
   useCompilationCapabilities,
   useCompilationDefaults,
-} from '../../../lib/compilation-queries';
-import { compilationDefaultsSupported } from '../../../lib/protocol-support';
-import { useDaemonVersion } from '../../../lib/queries';
-import { CompilationCommandForm } from '../../editor/CompilationCommandForm';
+} from '../../../lib/queries/compilation-queries';
+import { compilationDefaultsSupported } from '../../../lib/transport/protocol-support';
+import { useDaemonVersion } from '../../../lib/queries/queries';
+import { CompilationCommandForm } from '../../editor/compilation/CompilationCommandForm';
 import { useCurrentProfileId } from '../../profile/profile-store';
 import { SectionTitle, SettingRow } from '../parts';
 

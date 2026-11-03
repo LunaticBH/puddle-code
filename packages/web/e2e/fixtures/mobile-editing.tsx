@@ -1,11 +1,14 @@
 import { createRoot } from 'react-dom/client';
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
-import { attachIosTerminalInput } from '../../src/features/terminal/ios-input';
-import { attachTerminalTouchScroll } from '../../src/features/terminal/touch-scroll';
+import { attachIosTerminalInput } from '../../src/features/terminal/input/ios-input';
+import { attachTerminalTouchScroll } from '../../src/features/terminal/scroll/touch-scroll';
 import { TerminalKeys } from '../../src/features/mobile/TerminalKeys';
-import { consumeTerminalModifiers, registerTerminalInput } from '../../src/features/terminal/input';
-import { installBrowserTransport } from '../../src/lib/browser-transport';
+import {
+  consumeTerminalModifiers,
+  registerTerminalInput,
+} from '../../src/features/terminal/input/input';
+import { installBrowserTransport } from '../../src/lib/transport/browser-transport';
 import { PhoneDiff } from '../../src/features/mobile/PhoneDiff';
 import '../../src/features/remote/remote.css';
 import '../../src/styles/tokens.css';

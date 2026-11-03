@@ -17,7 +17,11 @@ import {
 } from '../compilation/process.js';
 import { KeyedMutex } from '../git/mutex.js';
 import { ApiError } from '../http/errors.js';
-import { containedPath, resolveFsRoot, type WorktreeDeps } from '../http/routes/worktree-shared.js';
+import {
+  containedPath,
+  resolveFsRoot,
+  type WorktreeDeps,
+} from '../http/routes/worktrees/worktree-shared.js';
 import { codeSearchDirectories, findCodeExecutable } from './discovery.js';
 import { CODE_RECIPES, recipeCommand, type CodeRecipe } from './recipes.js';
 import type { CodeTerminalLauncher } from './terminal.js';

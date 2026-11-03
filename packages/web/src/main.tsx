@@ -1,8 +1,8 @@
 import { createRoot } from 'react-dom/client';
-import { bootstrapToken } from './lib/auth';
-import { initClientSettings } from './lib/client-settings';
-import { captureHostParam } from './lib/editor-links';
-import { initTheme } from './lib/theme';
+import { bootstrapToken } from './lib/transport/auth';
+import { initClientSettings } from './lib/settings/client-settings';
+import { captureHostParam } from './lib/navigation/editor-links';
+import { initTheme } from './lib/appearance/theme';
 import './styles/app.css';
 
 initTheme();

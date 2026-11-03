@@ -1,7 +1,7 @@
 import { lazy, Suspense, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { MediaViewer } from '../../src/features/editor/MediaViewer';
-import { TabViewStateContext } from '../../src/features/editor/view-state-context';
+import { MediaViewer } from '../../src/features/editor/previews/MediaViewer';
+import { TabViewStateContext } from '../../src/features/editor/tabs/view-state-context';
 import '../../src/styles/app.css';
 const Surface = lazy(() =>
   import('./view-state-surfaces').then((module) => ({ default: module.Surface })),

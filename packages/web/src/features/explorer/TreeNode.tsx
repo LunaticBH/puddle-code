@@ -10,9 +10,9 @@ import {
 } from '../../components/ui/context-menu';
 import { HoverMarquee } from '../../components/hover-marquee';
 import { cn } from '../../lib/utils';
-import { useWorktreeTree } from '../../lib/worktree-queries';
-import { encodeTabTransfer, TAB_MIME } from '../workspace/tab-transfer';
-import { isCompilableSource } from '../editor/compilation-kind';
+import { useWorktreeTree } from '../../lib/queries/worktree-queries';
+import { encodeTabTransfer, TAB_MIME } from '../workspace/tabs/tab-transfer';
+import { isCompilableSource } from '../editor/compilation/compilation-kind';
 import { useExplorer } from './explorer-context';
 import {
   decodeDragPaths,

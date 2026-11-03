@@ -12,7 +12,7 @@ import {
   DialogTitle,
 } from '../../components/ui/dialog';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../../components/ui/tooltip';
-import { useDeleteBranch, usePruneWorktree, useRepoWorktrees } from '../../lib/queries';
+import { useDeleteBranch, usePruneWorktree, useRepoWorktrees } from '../../lib/queries/queries';
 import { cn } from '../../lib/utils';
 
 const LIVE = new Set(['starting', 'running', 'waiting_input']);

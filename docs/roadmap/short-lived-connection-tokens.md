@@ -211,14 +211,14 @@ that deleting the current browser value revokes historical copies.
 
 ## Implementation workstreams
 
-| Workstream                 | Existing code seams and deliverable                                                                                                                                        |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Host authority             | `daemon/src/security/`, `http/app.ts`, `ws/gateway.ts`, `proxy/`: lease registry, shared auth checks, resource ownership, expiry/revocation                                |
-| Bootstrap/control          | CLI `lib/transport/`, `cockpit.ts`, `daemon-client.ts`, `attached-daemon.ts`: protected helper/control channel and no remote master-token reads                            |
-| Cockpit lifecycle          | CLI `lib/start.ts`, `connect.ts`, `tunnel.ts`, `serve/`: credential substitution, authenticated WS bridging, generation-safe recovery                                      |
-| CLI and desktop consumers  | CLI `cli/run.ts`, `cli/manage.ts`, `lib/attach.ts`, `ws-client.ts`, registry/detach paths; desktop library consumers: preserve supported commands and startup/reopen flows |
-| Browser                    | Web `lib/auth.ts`, `api.ts`, `ws.ts`, `App.tsx`, token gate, proxy links and cockpit controls: new bootstrap and independent browser/upstream state                        |
-| Protocol and documentation | Shared schemas/version; SPEC §§2, 6, 9, 10; CLAUDE.md; changelog and manual acceptance script                                                                              |
+| Workstream                 | Existing code seams and deliverable                                                                                                                                                                 |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Host authority             | `daemon/src/security/`, `http/app.ts`, `ws/gateway.ts`, `proxy/`: lease registry, shared auth checks, resource ownership, expiry/revocation                                                         |
+| Bootstrap/control          | CLI `lib/transport/` and `lib/connection/` (`cockpit.ts`, `daemon-client.ts`, `attached-daemon.ts`): protected helper/control channel and no remote master-token reads                              |
+| Cockpit lifecycle          | CLI `lib/connection/start.ts`, `lib/connection/connect.ts`, `lib/transport/tunnel.ts`, `lib/serve/`: credential substitution, authenticated WS bridging, generation-safe recovery                   |
+| CLI and desktop consumers  | CLI `cli/run.ts`, `cli/manage.ts`, `lib/connection/attach.ts`, `lib/transport/ws-client.ts`, registry/detach paths; desktop library consumers: preserve supported commands and startup/reopen flows |
+| Browser                    | Web `lib/transport/` (`auth.ts`, `api.ts`, `ws.ts`), `App.tsx`, token gate, proxy links and cockpit controls: new bootstrap and independent browser/upstream state                                  |
+| Protocol and documentation | Shared schemas/version; SPEC §§2, 6, 9, 10; CLAUDE.md; changelog and manual acceptance script                                                                                                       |
 
 Keep business services and agent-specific lifecycle adapters independent of
 authentication transport. Avoid unrelated credential changes: agent-account

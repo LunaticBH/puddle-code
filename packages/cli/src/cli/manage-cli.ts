@@ -6,7 +6,7 @@ import {
   standaloneInstallation,
   upgradeStandaloneCli,
   removeStandaloneCli,
-} from '../lib/standalone-cli.js';
+} from '../lib/installation/standalone-cli.js';
 import { confirm } from './prompt.js';
 
 /** Preserve the installation channel when replacing the running CLI. */
