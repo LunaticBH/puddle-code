@@ -8,6 +8,7 @@ import {
 } from '@puddle/shared';
 import { api, ApiError } from '../../../lib/transport/api';
 import { useCurrentProfileId } from '../../profile/profile-store';
+import { hostStyleForPlatform } from '../../../lib/host-path';
 import { useHostInfo, useProfiles } from '../../../lib/queries/queries';
 import { Button } from '../../../components/ui/button';
 import { Disclosure } from '../../../components/ui/disclosure';
@@ -27,6 +28,8 @@ import { DeleteRegistrationDialog } from './DeleteRegistrationDialog';
 export function RemoteAccessSection() {
   const queryClient = useQueryClient();
   const host = useHostInfo();
+  // The relay connector does not run on Windows hosts in v1 (docs/windows.md).
+  const windowsHost = hostStyleForPlatform(host.data?.platform) === 'win32';
   const profile = useCurrentProfileId();
   const profiles = useProfiles();
   const profileName = profiles.data?.find((row) => row.id === profile)?.name ?? 'this profile';
@@ -47,7 +50,7 @@ export function RemoteAccessSection() {
     refetchOnReconnect: !busy,
     retry: false,
     gcTime: 0,
-    enabled: !!profile,
+    enabled: !!profile && !windowsHost,
   });
   const act = async (request: CockpitRemoteRequest): Promise<boolean> => {
     if (busy || !profile) return false;
@@ -105,13 +108,26 @@ export function RemoteAccessSection() {
   const data = status.data;
   const unavailable = status.error instanceof ApiError && status.error.status === 404;
   const disabled = busy || status.isError;
+  const title = (
+    <SectionTitle
+      note={`${profileName} on ${host.data?.displayName || host.data?.hostname || 'this host'} · only this profile’s projects and sessions`}
+    >
+      Remote access
+    </SectionTitle>
+  );
+  if (windowsHost) {
+    return (
+      <div>
+        {title}
+        <p role="status" className="mt-5 text-sm text-fg-secondary">
+          Remote access is not available on Windows hosts yet.
+        </p>
+      </div>
+    );
+  }
   return (
     <div>
-      <SectionTitle
-        note={`${profileName} on ${host.data?.displayName || host.data?.hostname || 'this host'} · only this profile’s projects and sessions`}
-      >
-        Remote access
-      </SectionTitle>
+      {title}
       <div className="mt-5 flex items-center justify-between gap-3">
         <span role="status" className="text-sm font-medium">
           {status.isError
