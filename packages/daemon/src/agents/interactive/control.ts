@@ -124,6 +124,7 @@ export function interactiveResource(
   context: LifecycleLaunchContext,
   configDir: string,
   interrupt: string,
+  platform: NodeJS.Platform = process.platform,
 ): LifecycleLaunchResource {
   if (!context.writeInput) throw new Error('Interactive control needs its owning terminal');
   const control = new InteractiveControl(context.writeInput, interrupt, !!context.opts.prompt);
@@ -133,7 +134,13 @@ export function interactiveResource(
     dispose: async () => {
       control.dispose();
       const hash = createHash('sha256').update(context.signalNonce).digest('hex');
-      await rm(join(configDir, `.puddle-turn-${hash}.json`), { force: true });
+      const removal = rm(join(configDir, `.puddle-turn-${hash}.json`), { force: true });
+      if (platform !== 'win32') return removal;
+      // A hook process still reading the file holds it open on Windows; the
+      // stale turn record is harmless, since its nonce never recurs.
+      await removal.catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== 'EBUSY' && error.code !== 'EPERM') throw error;
+      });
     },
   };
 }

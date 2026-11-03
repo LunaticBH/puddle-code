@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { sameNativeCwd } from '../native-cwd.js';
 
 /**
  * Codex's own session index — `$CODEX_HOME/state_<n>.sqlite`, a `threads` table
@@ -56,7 +57,11 @@ function stateDbPath(configDir: string): string | null {
  * rollout's first JSONL record is necessarily readable, so it is the primary
  * source for launch-time id capture; rollout scanning remains the fallback.
  */
-export function codexThreadIndex(configDir: string, cwd?: string): CodexThreadIndex {
+export function codexThreadIndex(
+  configDir: string,
+  cwd?: string,
+  platform: NodeJS.Platform = process.platform,
+): CodexThreadIndex {
   const path = stateDbPath(configDir);
   if (path === null || !existsSync(path)) return { available: false, threads: [] };
   let db: Database.Database | undefined;
@@ -73,16 +78,18 @@ export function codexThreadIndex(configDir: string, cwd?: string): CodexThreadIn
     const threadSource = columns.has('thread_source') ? 'thread_source' : 'NULL';
     const name = columns.has('name') ? 'name' : 'NULL';
     const title = columns.has('title') ? 'title' : 'NULL';
+    // SQL equality cannot match Windows spellings of one directory; filter below.
+    const sqlCwd = platform === 'win32' ? undefined : cwd;
     const rows = db
       .prepare(
         `select id, cwd, ${createdMs} as created_ms, rollout_path,
                 ${name} as name, ${title} as title,
                 ${threadSource} as thread_source, source
          from threads
-         ${cwd === undefined ? '' : 'where cwd = ?'}
+         ${sqlCwd === undefined ? '' : 'where cwd = ?'}
          order by created_ms desc, id desc`,
       )
-      .all(...(cwd === undefined ? [] : [cwd])) as Array<{
+      .all(...(sqlCwd === undefined ? [] : [sqlCwd])) as Array<{
       id: string;
       cwd: string;
       created_ms: number | null;
@@ -96,6 +103,10 @@ export function codexThreadIndex(configDir: string, cwd?: string): CodexThreadIn
       available: true,
       threads: rows
         .filter((row) => row.thread_source !== 'subagent' && !row.source.includes('"subagent"'))
+        .filter(
+          (row) =>
+            sqlCwd !== undefined || cwd === undefined || sameNativeCwd(row.cwd, cwd, platform),
+        )
         .map((row) => ({
           id: row.id,
           cwd: row.cwd,

@@ -1,6 +1,5 @@
 import { prepareClaudeInteractive } from './control.js';
 import { prepareClaudeHeadless } from './headless.js';
-import { execFile } from 'node:child_process';
 import {
   closeSync,
   existsSync,
@@ -15,9 +14,10 @@ import {
   type Dirent,
 } from 'node:fs';
 import { cp, open, readdir, stat } from 'node:fs/promises';
-import { join } from 'node:path';
-import { promisify } from 'node:util';
+import { basename, join } from 'node:path';
 import type { AgentAdapter, AgentUsage } from '../adapter.js';
+import { agentEnv, execAgent } from '../agent-process.js';
+import { sameNativeCwd } from '../native-cwd.js';
 import { claudeConversationShare } from './share.js';
 import { installStatusHooks } from './hooks.js';
 import { installStatusLine, readLiveUsage } from './statusline.js';
@@ -25,8 +25,6 @@ import { fetchSubscriptionUsage } from './usage-cli.js';
 import { lifecycleVersionAtLeast } from '../lifecycle-version.js';
 import { matchesAgentProcess } from '../process-match.js';
 import { lastJsonlOutput } from '../notification-output.js';
-
-const execFileAsync = promisify(execFile);
 
 /**
  * Per-file token subtotals keyed by absolute path, invalidated on
@@ -91,6 +89,12 @@ const EMPTY_USAGE: AgentUsage = {
  *   WORKTREE cwd the project dir is escaped from the MAIN repository root,
  *   not the worktree path — so conversation lookup scans every project dir
  *   rather than computing the escaped name.
+ * - Windows (checked against the native installer's claude.exe 2.1.248 on
+ *   Windows 11): `CLAUDE_CONFIG_DIR` relocates state as above (default
+ *   `%USERPROFILE%\.claude`), project dirs are named like `C--Users-…` and
+ *   the JSONL records backslash cwds, compared through sameNativeCwd. Hooks
+ *   use exec form and the status line is quoted for Git Bash or PowerShell;
+ *   see hook-command.ts.
  *
  * COPY-ON-SELECT, and why puddle cannot suppress it (investigated 2026-08-05,
  * against 2.1.222). Dragging a selection in the TUI copies it, and its
@@ -186,8 +190,8 @@ export const claudeCode: AgentAdapter = {
 
   async checkLoggedIn(account) {
     try {
-      const { stdout } = await execFileAsync('claude', ['auth', 'status'], {
-        env: { ...process.env, CLAUDE_CONFIG_DIR: account.config_dir },
+      const { stdout } = await execAgent('claude', ['auth', 'status'], {
+        env: agentEnv({ CLAUDE_CONFIG_DIR: account.config_dir }),
         timeout: 15_000,
       });
       const status = JSON.parse(stdout) as { loggedIn?: boolean };
@@ -206,6 +210,7 @@ export const claudeCode: AgentAdapter = {
     } catch {
       // A vanished worktree still matches on the recorded string.
     }
+    const matches = (cwd: string) => [...targets].some((target) => sameNativeCwd(cwd, target));
     let best: { ref: string; mtime: number } | null = null;
     for (const dir of readdirSync(projectsDir)) {
       let files: string[];
@@ -217,7 +222,7 @@ export const claudeCode: AgentAdapter = {
       for (const file of files) {
         if (!file.endsWith('.jsonl')) continue;
         const path = join(projectsDir, dir, file);
-        if (!conversationCwdMatches(path, targets)) continue;
+        if (!conversationCwdMatches(path, matches)) continue;
         const mtime = statSync(path).mtimeMs;
         // Newest wins: a worktree can host successive conversations.
         if (!best || mtime > best.mtime) best = { ref: file.slice(0, -'.jsonl'.length), mtime };
@@ -512,7 +517,7 @@ function pickTitle(text: string): string | null {
 }
 
 /** The conversation's cwd appears within the first few JSONL records. */
-function conversationCwdMatches(path: string, targets: Set<string>): boolean {
+function conversationCwdMatches(path: string, matches: (cwd: string) => boolean): boolean {
   let head: string;
   try {
     head = readFileSync(path, 'utf8').slice(0, 16_384);
@@ -522,7 +527,7 @@ function conversationCwdMatches(path: string, targets: Set<string>): boolean {
   for (const line of head.split('\n').slice(0, 10)) {
     try {
       const record = JSON.parse(line) as { cwd?: string };
-      if (record.cwd !== undefined && targets.has(record.cwd)) return true;
+      if (typeof record.cwd === 'string' && matches(record.cwd)) return true;
     } catch {
       // Partial trailing line inside the head window — ignore.
     }
@@ -613,7 +618,7 @@ async function readClaudeMetadata(
       const tailRead = await handle.read(tailBuffer, 0, tailBuffer.length, tailStart);
       const tail = tailBuffer.toString('utf8', 0, tailRead.bytesRead);
       const conversation = {
-        ref: path.split('/').pop()!.slice(0, -'.jsonl'.length),
+        ref: basename(path, '.jsonl'),
         cwd,
         title: pickTitle(tail) ?? pickTitle(head),
         parentRef: null,

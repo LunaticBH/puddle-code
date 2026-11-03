@@ -2,17 +2,13 @@ import type { LifecycleLaunchContext } from '../adapter.js';
 import { lifecycleVersionAtLeast } from '../lifecycle-version.js';
 import { prepareHeadless } from '../headless/control.js';
 import { record, schemaPrompt, type HeadlessDriver } from '../headless/codec.js';
+import { xdgEnv } from './xdg.js';
 
 /** Flags checked with OpenCode 1.18.10 `run --help`; events use its JSON run protocol. */
 export function openCodeDriver(context: LifecycleLaunchContext): HeadlessDriver {
   return {
     binary: 'opencode',
-    env: Object.fromEntries(
-      ['CONFIG', 'DATA', 'CACHE', 'STATE'].map((kind) => [
-        `XDG_${kind}_HOME`,
-        `${context.account.config_dir}/${kind.toLowerCase()}`,
-      ]),
-    ),
+    env: xdgEnv(context.account.config_dir),
     command: (ref, prompt, schema) => ({
       args: [
         'run',
