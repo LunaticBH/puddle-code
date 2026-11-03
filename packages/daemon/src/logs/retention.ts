@@ -1,7 +1,8 @@
-import { constants, lstatSync, renameSync, type Stats } from 'node:fs';
+import { constants, lstatSync, type Stats } from 'node:fs';
 import { lstat, open, readdir, unlink } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
+import { renameWithRetrySync } from '@puddle/shared/node/platform';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const COPY_BYTES = 64 * 1024;
@@ -15,6 +16,8 @@ export interface LogRetentionOptions {
   isBusy(stream: string, term: string): boolean;
   now?: number;
   stopped?: () => boolean;
+  /** Replacement rules; the host's own by default. */
+  platform?: NodeJS.Platform;
 }
 
 export interface LogRetentionResult {
@@ -54,6 +57,7 @@ export async function compactTerminalLogs(
   options: LogRetentionOptions,
 ): Promise<LogRetentionResult> {
   const result: LogRetentionResult = { compacted: 0, reclaimedBytes: 0, skipped: 0, failed: 0 };
+  const platform = options.platform ?? process.platform;
   if (options.retentionDays === 0) return result;
   if (
     !Number.isInteger(options.retentionDays) ||
@@ -101,6 +105,12 @@ export async function compactTerminalLogs(
           continue;
         }
         const source = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+        let sourceOpen = true;
+        const closeSource = async () => {
+          if (!sourceOpen) return;
+          sourceOpen = false;
+          await source.close();
+        };
         try {
           if (!unchanged(before, await source.stat())) {
             result.skipped++;
@@ -139,8 +149,12 @@ export async function compactTerminalLogs(
           } finally {
             await target.close();
           }
+          // Windows cannot replace a file that is still open, even by us, so
+          // the source closes before the guards; they still see the file as is.
+          if (platform === 'win32') await closeSource();
           // No await between these guards and rename: a daemon PTY cannot reopen
           // the log after the busy check but before its descriptor is replaced.
+          // (Windows retries a scanner's brief hold synchronously, for the same reason.)
           if (
             options.stopped?.() ||
             options.isBusy(stream.name, term) ||
@@ -151,12 +165,12 @@ export async function compactTerminalLogs(
             result.skipped++;
             continue;
           }
-          renameSync(temporary, file);
+          renameWithRetrySync(temporary, file, platform);
           temporary = null;
           result.compacted++;
           result.reclaimedBytes += before.size - options.replayBytes;
         } finally {
-          await source.close();
+          await closeSource();
         }
       } catch {
         result.failed++;

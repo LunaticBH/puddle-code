@@ -2,8 +2,14 @@ import { existsSync, chmodSync, mkdtempSync, readFileSync, statSync, writeFileSy
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { applyAgentPath, loadConfig, readConfig, saveConfig } from '../../src/config.js';
-import { ensureHome, resolvePaths } from '../../src/paths.js';
+import {
+  applyAgentPath,
+  loadConfig,
+  readConfig,
+  saveConfig,
+  WINDOWS_AGENT_PATH,
+} from '../../src/config.js';
+import { canonicalHome, ensureHome, resolvePaths } from '../../src/paths.js';
 import { ensureToken } from '../../src/security/token.js';
 
 function freshPaths() {
@@ -18,8 +24,18 @@ describe('resolvePaths', () => {
     chmodSync(paths.home, 0o755);
     writeFileSync(paths.configFile, 'existing configuration');
     ensureHome(paths);
-    expect(statSync(paths.home).mode & 0o777).toBe(0o700);
+    // Windows has no mode bits: shared/test/windows-security.test.ts covers its ACL.
+    if (process.platform !== 'win32') expect(statSync(paths.home).mode & 0o777).toBe(0o700);
     expect(readFileSync(paths.configFile, 'utf8')).toBe('existing configuration');
+  });
+
+  it('spells a Windows home canonically without resolving the home itself', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'puddle-home-parent-'));
+    const typed = `${parent.replaceAll('\\', '/')}/.puddle/`;
+    expect(canonicalHome(typed, 'linux')).toBe(typed);
+    if (process.platform !== 'win32') return; // the rest needs real Windows paths
+    expect(canonicalHome(typed.toLowerCase(), 'win32')).toBe(join(parent, '.puddle'));
+    expect(resolvePaths(typed).worktreesDir).toBe(join(parent, '.puddle', 'worktrees'));
   });
 
   it('lays out every path under the given home', () => {
@@ -67,7 +83,10 @@ describe('daemon config', () => {
       logRetentionDays: 3,
       replayBytes: 256 * 1024,
       uiStateRetentionDays: 90,
-      agentPath: '~/.local/bin:~/bin:/opt/homebrew/bin:/usr/local/bin',
+      agentPath:
+        process.platform === 'win32'
+          ? WINDOWS_AGENT_PATH
+          : '~/.local/bin:~/bin:/opt/homebrew/bin:/usr/local/bin',
       displayName: '',
     });
     const onDisk = JSON.parse(readFileSync(paths.configFile, 'utf8'));
@@ -135,31 +154,70 @@ describe('ensureToken', () => {
     const paths = freshPaths();
     const first = ensureToken(paths);
     expect(first).toMatch(/^[0-9a-f]{64}$/);
-    expect(statSync(paths.tokenFile).mode & 0o777).toBe(0o600);
+    // Windows has no mode bits; the private home's ACL guards the token there.
+    if (process.platform !== 'win32') expect(statSync(paths.tokenFile).mode & 0o777).toBe(0o600);
     expect(ensureToken(paths)).toBe(first);
   });
 });
 
 describe('applyAgentPath', () => {
   it('prepends tilde-expanded, de-duplicated dirs to PATH', () => {
+    const env: NodeJS.ProcessEnv = { PATH: '/usr/bin:/bin' };
+    applyAgentPath('~/.local/bin:/usr/bin', 'linux', env); // /usr/bin already present → not duplicated
+    expect(env.PATH).toBe(`${homedir()}/.local/bin:/usr/bin:/bin`);
+  });
+
+  it('is a no-op for an empty agentPath', () => {
+    const env: NodeJS.ProcessEnv = { PATH: '/usr/bin:/bin' };
+    applyAgentPath('   ', 'linux', env);
+    expect(env.PATH).toBe('/usr/bin:/bin');
+  });
+
+  it('applies to the live environment by default', () => {
     const saved = process.env.PATH;
     try {
-      process.env.PATH = '/usr/bin:/bin';
-      applyAgentPath('~/.local/bin:/usr/bin'); // /usr/bin already present → not duplicated
-      expect(process.env.PATH).toBe(`${homedir()}/.local/bin:/usr/bin:/bin`);
+      process.env.PATH = process.platform === 'win32' ? 'C:\\Windows' : '/usr/bin:/bin';
+      applyAgentPath('   ');
+      expect(process.env.PATH).toBe(process.platform === 'win32' ? 'C:\\Windows' : '/usr/bin:/bin');
     } finally {
       process.env.PATH = saved;
     }
   });
 
-  it('is a no-op for an empty agentPath', () => {
-    const saved = process.env.PATH;
-    try {
-      process.env.PATH = '/usr/bin:/bin';
-      applyAgentPath('   ');
-      expect(process.env.PATH).toBe('/usr/bin:/bin');
-    } finally {
-      process.env.PATH = saved;
-    }
+  it('uses ; on Windows, expands ~ and %VAR%, and keeps the Path spelling', () => {
+    const env: NodeJS.ProcessEnv = {
+      USERPROFILE: 'C:\\Users\\a',
+      APPDATA: 'C:\\Users\\a\\AppData\\Roaming',
+      Path: 'C:\\Windows;c:\\users\\a\\.local\\bin\\',
+    };
+    applyAgentPath(`${WINDOWS_AGENT_PATH};%UNSET_DIR%\\bin;~/tools`, 'win32', env);
+    expect(env).not.toHaveProperty('PATH');
+    expect(env.Path).toBe(
+      [
+        'C:\\Users\\a\\AppData\\Roaming\\npm',
+        'C:\\Users\\a\\.bun\\bin',
+        'C:\\Users\\a\\scoop\\shims',
+        'C:\\Users\\a\\tools',
+        'C:\\Windows',
+        'c:\\users\\a\\.local\\bin\\', // already present in another spelling: kept, not duplicated
+      ].join(';'),
+    );
+  });
+});
+
+describe('agentPath default', () => {
+  it('is the Windows search path on Windows, replacing an absent or POSIX value', () => {
+    const paths = freshPaths();
+    expect(readConfig(paths, 'win32').agentPath).toBe(WINDOWS_AGENT_PATH);
+    writeFileSync(
+      paths.configFile,
+      JSON.stringify({ agentPath: '~/.local/bin:~/bin:/opt/homebrew/bin:/usr/local/bin' }),
+    );
+    expect(readConfig(paths, 'win32').agentPath).toBe(WINDOWS_AGENT_PATH);
+    expect(readConfig(paths, 'linux').agentPath).toBe(
+      '~/.local/bin:~/bin:/opt/homebrew/bin:/usr/local/bin',
+    );
+    writeFileSync(paths.configFile, JSON.stringify({ agentPath: 'D:\\tools' }));
+    expect(readConfig(paths, 'win32').agentPath).toBe('D:\\tools');
   });
 });
