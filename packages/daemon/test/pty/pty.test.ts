@@ -153,6 +153,33 @@ describe('StatusDetector', () => {
   });
 });
 
+/**
+ * A PTY child that needs no shell: Node runs `source` (CommonJS) with
+ * `process.argv.slice(1)` holding `extra`. Keeps these tests about the PTY
+ * layer, and identical on POSIX and Windows.
+ */
+function nodeChild(source: string, ...extra: string[]): [string, string[]] {
+  return [process.execPath, ['-e', source, ...extra]];
+}
+
+/** Print `banner`, then echo stdin back like `cat`. */
+const echoAfter = (banner: string) =>
+  nodeChild(
+    `process.stdout.write(${JSON.stringify(`${banner}\n`)});` +
+      "process.stdin.on('data', (d) => process.stdout.write(d));",
+  );
+
+/** Print the terminal size as `stty size` does (rows, then columns), then wait. */
+const printSize = () =>
+  nodeChild(
+    "process.stdout.write(process.stdout.rows + ' ' + process.stdout.columns + '\\n');" +
+      'setInterval(() => {}, 1000);',
+  );
+
+/** Write `text` verbatim, then wait. */
+const writeThenWait = (text: string) =>
+  nodeChild('process.stdout.write(process.argv[1]); setInterval(() => {}, 1000);', text);
+
 describe('PtyManager', () => {
   function manager() {
     const logsDir = mkdtempSync(join(tmpdir(), 'puddle-logs-'));
@@ -166,7 +193,7 @@ describe('PtyManager', () => {
     let exitCode: number | null = null;
     ptys.on('data', (e: { data: string }) => chunks.push(e.data));
     ptys.on('exit', (e: { exitCode: number }) => (exitCode = e.exitCode));
-    ptys.spawn('s1', 'agent', 'bash', ['-c', 'echo hello-from-pty && cat'], { cwd: tmpdir() });
+    ptys.spawn('s1', 'agent', ...echoAfter('hello-from-pty'), { cwd: tmpdir() });
     await waitFor(() => chunks.join('').includes('hello-from-pty'));
     ptys.write('s1', 'agent', 'ping\n');
     await waitFor(() => chunks.join('').includes('ping'));
@@ -181,11 +208,9 @@ describe('PtyManager', () => {
 
   it('pidsFor returns the OS pids of every live term on a stream, scoped to that stream', async () => {
     const { ptys } = manager();
-    ptys.spawn('s3', 'agent', 'bash', ['-c', 'echo agent-ready && cat'], { cwd: tmpdir() });
-    ptys.spawn('s3', 'shell-1', 'bash', ['-c', 'echo shell-ready && cat'], { cwd: tmpdir() });
-    ptys.spawn('other-stream', 'agent', 'bash', ['-c', 'echo other-ready && cat'], {
-      cwd: tmpdir(),
-    });
+    ptys.spawn('s3', 'agent', ...echoAfter('agent-ready'), { cwd: tmpdir() });
+    ptys.spawn('s3', 'shell-1', ...echoAfter('shell-ready'), { cwd: tmpdir() });
+    ptys.spawn('other-stream', 'agent', ...echoAfter('other-ready'), { cwd: tmpdir() });
     await waitFor(() => ptys.liveTerms('s3').length === 2 && ptys.has('other-stream', 'agent'));
 
     const pids = ptys.pidsFor('s3');
@@ -206,14 +231,13 @@ describe('PtyManager', () => {
     const { ptys } = manager();
     const chunks: string[] = [];
     ptys.on('data', (e: { data: string }) => chunks.push(e.data));
-    const size = () => ['-c', 'stty size; cat'];
 
     // A viewer attached to an EXITED session sizes a stream with nothing live:
     // the size must survive to the resume, which is the whole point (a migration
     // or a resume replaces the PTY under an attached viewer, and nothing
     // re-sends the size — no fresh attach, no container change).
     ptys.resize('s7', 'agent', 100, 40);
-    ptys.spawn('s7', 'agent', 'bash', size(), { cwd: tmpdir() });
+    ptys.spawn('s7', 'agent', ...printSize(), { cwd: tmpdir() });
     await waitFor(() => /40\s+100/.test(chunks.join('')));
 
     // A resize while live is remembered the same way, for the NEXT process.
@@ -221,20 +245,20 @@ describe('PtyManager', () => {
     ptys.kill('s7', 'agent');
     await waitFor(() => !ptys.has('s7', 'agent'));
     chunks.length = 0;
-    ptys.spawn('s7', 'agent', 'bash', size(), { cwd: tmpdir() });
+    ptys.spawn('s7', 'agent', ...printSize(), { cwd: tmpdir() });
     await waitFor(() => /30\s+90/.test(chunks.join('')));
 
     // A stream nobody sized starts at the default, and `forget` returns a
     // retired stream (a deleted account's login PTY) to it.
     chunks.length = 0;
-    ptys.spawn('s8', 'agent', 'bash', size(), { cwd: tmpdir() });
+    ptys.spawn('s8', 'agent', ...printSize(), { cwd: tmpdir() });
     await waitFor(() => /32\s+120/.test(chunks.join('')));
     ptys.resize('s8', 'agent', 70, 20);
     ptys.forget('s8');
     ptys.kill('s8', 'agent');
     await waitFor(() => !ptys.has('s8', 'agent'));
     chunks.length = 0;
-    ptys.spawn('s8', 'agent', 'bash', size(), { cwd: tmpdir() });
+    ptys.spawn('s8', 'agent', ...printSize(), { cwd: tmpdir() });
     await waitFor(() => /32\s+120/.test(chunks.join('')));
     ptys.killAll();
   });
@@ -302,12 +326,36 @@ describe('EnvOscFilter', () => {
   });
 
   it('parses an absolute cwd report and rejects unsafe paths', () => {
-    const f = new EnvOscFilter();
+    const f = new EnvOscFilter('linux');
     const { data, deltas } = pushAll(f, [
-      `a${seq('cwd', '/worktree/nested')}b${seq('cwd', 'relative/path')}c`,
+      `a${seq('cwd', '/worktree/nested')}b${seq('cwd', 'relative/path')}c${seq('cwd', 'C:\\x')}`,
     ]);
     expect(data).toBe('abc');
     expect(deltas).toEqual([{ op: 'cwd', path: '/worktree/nested' }]);
+  });
+
+  it('accepts Windows drive, UNC and MSYS drive directories on win32 only', () => {
+    const f = new EnvOscFilter('win32');
+    const reports = [
+      'c:\\Users\\a\\wt', // PowerShell
+      'C:/Users/a/wt/sub', // Git Bash `pwd -W`
+      '/d/src/repo', // Git Bash $PWD
+      '/e',
+      '\\\\server\\share\\dir',
+      '//server/share/dir',
+      '\\rootless', // relative to the current drive: never absolute
+      '/tmp/nested', // an MSYS mount only Git Bash can resolve
+      'relative\\path',
+    ];
+    const { deltas } = pushAll(f, [reports.map((path) => seq('cwd', path)).join('')]);
+    expect(deltas.map((delta) => (delta.op === 'cwd' ? delta.path : delta.op))).toEqual([
+      'C:\\Users\\a\\wt',
+      'C:\\Users\\a\\wt\\sub',
+      'D:\\src\\repo',
+      'E:\\',
+      '\\\\server\\share\\dir',
+      '\\\\server\\share\\dir',
+    ]);
   });
 
   it('drops malformed payloads without corrupting surrounding text', () => {
@@ -349,15 +397,9 @@ describe('PtyManager shell reports', () => {
     ptys.on('data', (e: { data: string }) => chunks.push(e.data));
     ptys.on('env-delta', (e: PtyEnvDeltaEvent) => deltas.push(e));
     // Rk9P / YmFy are b64("FOO") / b64("bar").
-    ptys.spawn(
-      's9',
-      'shell-1',
-      'bash',
-      ['-c', String.raw`printf '\033]7733;set;Rk9P;YmFy\007'; echo visible; cat`],
-      {
-        cwd: tmpdir(),
-      },
-    );
+    ptys.spawn('s9', 'shell-1', ...writeThenWait('\u001b]7733;set;Rk9P;YmFy\u0007visible\r\n'), {
+      cwd: tmpdir(),
+    });
     await waitFor(() => deltas.length === 1 && chunks.join('').includes('visible'));
     expect(deltas[0]).toMatchObject({
       stream: 's9',
@@ -381,15 +423,12 @@ describe('PtyManager shell reports', () => {
     const deltas: PtyEnvDeltaEvent[] = [];
     ptys.on('cwd', (e) => cwds.push(e));
     ptys.on('env-delta', (e: PtyEnvDeltaEvent) => deltas.push(e));
-    ptys.spawn(
-      's10',
-      'shell-1',
-      'bash',
-      ['-c', String.raw`printf '\033]7733;cwd;L3RtcC9uZXN0ZWQ=\007'; cat`],
-      { cwd: tmpdir() },
-    );
+    // An absolute directory in this host's own form.
+    const nested = process.platform === 'win32' ? 'C:\\tmp\\nested' : '/tmp/nested';
+    const report = `\u001b]7733;cwd;${Buffer.from(nested).toString('base64')}\u0007`;
+    ptys.spawn('s10', 'shell-1', ...writeThenWait(report), { cwd: tmpdir() });
     await waitFor(() => cwds.length === 1);
-    expect(cwds).toEqual([{ stream: 's10', term: 'shell-1', cwd: '/tmp/nested' }]);
+    expect(cwds).toEqual([{ stream: 's10', term: 'shell-1', cwd: nested }]);
     expect(deltas).toEqual([]);
     ptys.kill('s10', 'shell-1');
   });
@@ -404,7 +443,7 @@ describe('LogStore', () => {
     expect(logs.readTail('sid', 'agent')).toBe('aaaaaaaaaaaaaaaa'); // capped at 16 bytes
     expect(logs.readTail('sid', 'missing')).toBe('');
     expect(logs.listTerms('sid').sort()).toEqual(['agent', 'shell-1']);
-    expect(logs.historyFile('sid')).toMatch(/\/sid\/shell-history$/);
+    expect(logs.historyFile('sid')).toMatch(/[\\/]sid[\\/]shell-history$/);
     expect(logs.listTerms('sid').sort()).toEqual(['agent', 'shell-1']);
   });
 
