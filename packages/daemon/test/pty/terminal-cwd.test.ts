@@ -2,7 +2,25 @@ import { mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { fixture, waitFor } from '../helpers/daemon-fixtures.js';
+import { stripAnsi } from '../../src/pty/ansi.js';
+import { fixture, waitFor, type Fixture } from '../helpers/daemon-fixtures.js';
+
+// The fake terminal is a real shell: cmd.exe on Windows, where `cd` prints the
+// directory (SHELL must name an existing executable there), else $SHELL.
+const windows = process.platform === 'win32';
+if (windows) process.env.SHELL = process.env.ComSpec;
+
+/** Ask the shell where it is; the answer lands in the terminal log. */
+function askDirectory(f: Fixture, id: string): void {
+  f.ptys.resize(id, 'agent', 400, 40); // wide enough that a deep temp path never wraps
+  f.ptys.write(id, 'agent', windows ? 'cd\r' : 'pwd\n');
+}
+
+/** Whether the terminal printed a directory ending in `relative` (`/`-separated). */
+function printed(f: Fixture, id: string, relative: string): boolean {
+  const native = windows ? relative.replaceAll('/', '\\') : relative;
+  return stripAnsi(f.logs.readTail(id, 'agent')).includes(native);
+}
 
 /**
  * "Open terminal in directory" (SPEC §8): the shell starts in a subdirectory of
@@ -29,10 +47,8 @@ describe('terminal session cwd', () => {
     // The session still belongs to the WORKTREE — only the shell's cwd differs.
     expect(term.worktree_path).toBe(owner.worktree_path);
 
-    // Ask the shell where it is; the fake terminal is a real $SHELL.
-    f.ptys.write(term.id, 'agent', 'pwd\n');
-    await waitFor(() => f.logs.readTail(term.id, 'agent').includes('nested/deep'));
-    expect(f.logs.readTail(term.id, 'agent')).toContain('nested/deep');
+    askDirectory(f, term.id);
+    await waitFor(() => printed(f, term.id, 'nested/deep'));
 
     await f.service.kill(term.id).catch(() => undefined);
     await f.service.kill(owner.id).catch(() => undefined);
@@ -59,8 +75,8 @@ describe('terminal session cwd', () => {
     // The restart case this exists for: kill the shell, resume, still there.
     await f.service.kill(term.id);
     await f.service.resume(term.id);
-    f.ptys.write(term.id, 'agent', 'pwd\n');
-    await waitFor(() => f.logs.readTail(term.id, 'agent').includes('nested/deep'));
+    askDirectory(f, term.id);
+    await waitFor(() => printed(f, term.id, 'nested/deep'));
 
     await f.service.kill(term.id).catch(() => undefined);
     await f.service.kill(owner.id).catch(() => undefined);
@@ -82,8 +98,8 @@ describe('terminal session cwd', () => {
 
     await f.service.kill(term.id);
     await f.service.resume(term.id);
-    f.ptys.write(term.id, 'agent', 'pwd\n');
-    await waitFor(() => f.logs.readTail(term.id, 'agent').includes('changed/later'));
+    askDirectory(f, term.id);
+    await waitFor(() => printed(f, term.id, 'changed/later'));
     await f.service.kill(term.id).catch(() => undefined);
   });
 

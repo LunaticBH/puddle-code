@@ -3,9 +3,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { fakeAdapter } from '../helpers/daemon-fixtures.js';
+import { stripAnsi } from '../../src/pty/ansi.js';
 import { reconcilePass } from '../../src/sessions/reconcile.js';
 import { fixture, waitFor } from '../helpers/daemon-fixtures.js';
 import { sh } from '../helpers/git-fixtures.js';
+
+// Shell tabs run the real shell. Windows: cmd.exe, which starts fastest and
+// which SHELL may name there because it is an existing executable.
+const windows = process.platform === 'win32';
+if (windows) process.env.SHELL = process.env.ComSpec;
 
 /** A config dir carrying the fake adapter's logged-in marker. */
 function credsDir(label: string): string {
@@ -263,7 +269,13 @@ describe('kill / resume / archive lifecycle', () => {
       f.logs.readTail(session.id, 'agent').includes(`RESUME ref=fake-ref-${session.id}`),
     );
     // resume of an exited (not interrupted) session carries no injected note
-    expect(f.logs.readTail(session.id, 'agent')).toContain('PROMPT<<>>');
+    // (ConPTY may deliver the resumed run's lines in separate chunks)
+    const resumedOutput = () => {
+      const tail = f.logs.readTail(session.id, 'agent');
+      return tail.slice(tail.lastIndexOf('RESUME ref='));
+    };
+    await waitFor(() => resumedOutput().includes('PROMPT<<'));
+    expect(resumedOutput()).toContain('PROMPT<<>>');
 
     await f.service.kill(session.id);
     // Archive keeps the worktree, branch, and logs — nothing is destroyed.
@@ -570,8 +582,11 @@ describe('shells', () => {
     });
     const term = f.service.spawnShell(session.id);
     expect(term).toBe('shell-1');
-    f.ptys.write(session.id, term, 'pwd\n');
-    await waitFor(() => f.logs.readTail(session.id, term).includes(session.worktree_path));
+    f.ptys.resize(session.id, term, 400, 40); // a deep temp path must not wrap
+    f.ptys.write(session.id, term, windows ? 'cd\r' : 'pwd\n');
+    await waitFor(() =>
+      stripAnsi(f.logs.readTail(session.id, term)).includes(session.worktree_path),
+    );
     expect(f.service.spawnShell(session.id)).toBe('shell-2');
     await f.service.kill(session.id);
   });
@@ -1131,9 +1146,15 @@ describe('captured env', () => {
     expect(spawnConfigCalls).toHaveLength(1);
     expect(spawnConfigCalls[0]?.session).toMatchObject({ captureEnv: true });
     expect(spawnConfigCalls[0]?.session?.historyFile).toMatch(
-      new RegExp(`/${session.id}/shell-history$`),
+      new RegExp(`[\\\\/]${session.id}[\\\\/]shell-history$`),
     );
-    f.ptys.write(session.id, term, 'echo probe-$CAPTURED_PROBE-hook-$PUDDLE_HOOK_MARKER\n');
+    f.ptys.write(
+      session.id,
+      term,
+      windows
+        ? 'echo probe-%CAPTURED_PROBE%-hook-%PUDDLE_HOOK_MARKER%\r'
+        : 'echo probe-$CAPTURED_PROBE-hook-$PUDDLE_HOOK_MARKER\n',
+    );
     await waitFor(() => f.logs.readTail(session.id, term).includes('probe-shell-sees-me-hook-1'));
     await f.service.kill(session.id);
   });
