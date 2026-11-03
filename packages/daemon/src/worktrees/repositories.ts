@@ -536,12 +536,28 @@ export async function stagePaths(
   const literal = literalPaths(root, paths);
   await underRepositoryLock(
     root,
-    () =>
-      git(['--literal-pathspecs', 'add', '-A', '--', ...literal], { cwd: root }).then(
-        () => undefined,
-      ),
+    () => withPathspecs(root, ['--literal-pathspecs', 'add', '-A'], literal).then(() => undefined),
     lock,
   );
+}
+
+/**
+ * Runs a git command over literal pathspecs. Windows passes them on stdin
+ * (`--pathspec-from-file=- --pathspec-file-nul`, Git 2.26+): a Windows command
+ * line holds at most 32,767 characters, which a few hundred deep paths exceed.
+ * POSIX keeps them in argv after `--`.
+ */
+export function withPathspecs(
+  cwd: string,
+  args: string[],
+  paths: readonly string[],
+  platform: NodeJS.Platform = process.platform,
+): Promise<string> {
+  if (platform !== 'win32') return git([...args, '--', ...paths], { cwd });
+  return git([...args, '--pathspec-from-file=-', '--pathspec-file-nul'], {
+    cwd,
+    input: paths.join('\0'),
+  });
 }
 
 export async function unstagePaths(
@@ -559,11 +575,9 @@ export async function unstagePaths(
         () => null,
       );
       if (head) {
-        await git(['--literal-pathspecs', 'reset', '-q', 'HEAD', '--', ...literal], { cwd: root });
+        await withPathspecs(root, ['--literal-pathspecs', 'reset', '-q', 'HEAD'], literal);
       } else {
-        await git(['--literal-pathspecs', 'rm', '--cached', '-r', '-q', '--', ...literal], {
-          cwd: root,
-        });
+        await withPathspecs(root, ['--literal-pathspecs', 'rm', '--cached', '-r', '-q'], literal);
       }
     },
     lock,
@@ -586,7 +600,12 @@ export async function commitRepository(
       if (!status.entries.some((entry) => entry.conflict || entry.x !== '.')) {
         throw ApiError.conflict('no_staged_changes', `there are no staged changes to commit`);
       }
-      await git(['commit', '-m', message], { cwd: root });
+      // Windows reads the message from stdin, clear of the command-line limit.
+      if (process.platform === 'win32') {
+        await git(['commit', '-F', '-'], { cwd: root, input: message });
+      } else {
+        await git(['commit', '-m', message], { cwd: root });
+      }
       return git(['rev-parse', 'HEAD'], { cwd: root });
     },
     lock,

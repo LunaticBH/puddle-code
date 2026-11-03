@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { openDatabase } from '../../src/db/db.js';
 import { RepoStore } from '../../src/db/stores/repos.js';
 import { SessionStore } from '../../src/db/stores/sessions.js';
@@ -196,5 +196,54 @@ describe('orphan detection', () => {
     expect(manager.findOrphanWorktrees(repo)).toEqual([
       join(paths.worktreesDir, String(repo.id), 'stray-dir'),
     ]);
+  });
+});
+
+describe('Windows worktree rules (injected platform, any host)', () => {
+  function windowsSetup(repoPath: string) {
+    const base = setup(repoPath);
+    const manager = new WorktreeManager({
+      paths: base.paths,
+      mutex: new KeyedMutex(),
+      repos: base.repos,
+      sessions: base.sessions,
+      platform: 'win32',
+    });
+    return { ...base, manager };
+  }
+
+  it('creates, lists, recognises and removes a worktree through the Windows paths', async () => {
+    const repoPath = initRepo();
+    const { manager, repo } = windowsSetup(repoPath);
+    const { worktreePath } = await manager.create({
+      repo,
+      sessionId: randomUUID(),
+      title: 'win',
+      branchPrefix: '',
+    });
+    const listed = await manager.listWorktrees(repo);
+    expect(listed.find((w) => w.is_primary)?.path).toBe(repoPath);
+    expect(listed.map((w) => w.branch)).toContain('win');
+    await manager.remove({ repo, worktreePath });
+    expect(existsSync(worktreePath)).toBe(false);
+    expect(sh(repoPath, 'branch', '--list', 'win')).toContain('win');
+  });
+
+  it('reads an info/exclude written with CRLF without appending a duplicate', async () => {
+    const repoPath = initRepo();
+    const { manager, repo } = windowsSetup(repoPath);
+    const exclude = join(repoPath, '.git', 'info', 'exclude');
+    mkdirSync(join(repoPath, '.git', 'info'), { recursive: true });
+    writeFileSync(exclude, '# local\r\n.puddle/\r\n');
+    await manager.create({ repo, sessionId: randomUUID(), title: 'crlf', branchPrefix: '' });
+    expect(readFileSync(exclude, 'utf8')).toBe('# local\r\n.puddle/\r\n');
+  });
+
+  it('matches a stored worktree path case-insensitively when finding orphans', async () => {
+    const { manager, repo, paths, sessions } = windowsSetup(initRepo());
+    const stored = join(paths.worktreesDir, String(repo.id), 'Stored-Dir');
+    mkdirSync(stored, { recursive: true });
+    vi.spyOn(sessions, 'allWorktreePaths').mockReturnValue([stored.toUpperCase()]);
+    expect(manager.findOrphanWorktrees(repo)).toEqual([]);
   });
 });

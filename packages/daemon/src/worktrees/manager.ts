@@ -6,18 +6,21 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  rmSync,
 } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
-import type { Repo, WorktreeInfo } from '@puddle/shared';
+import { normaliseHostPath, type Repo, type WorktreeInfo } from '@puddle/shared';
 import type { RepoStore } from '../db/stores/repos.js';
 import type { SessionStore } from '../db/stores/sessions.js';
-import { git } from '../git/exec.js';
+import { backgroundGitEnv, git } from '../git/exec.js';
 import { resolveDefaultBaseBranch } from '../git/base-branch.js';
 import { gitMutexKey, type KeyedMutex } from '../git/mutex.js';
+import { canonicalHostPath } from '../host-path.js';
 import { ApiError } from '../http/errors.js';
 import type { PuddlePaths } from '../paths.js';
 import { memorableName } from './names.js';
 import { promptSlug, slugify } from './slug.js';
+import { assertNotHeldOpen, worktreeBusy } from './windows-removal.js';
 
 export interface CreateWorktreeResult {
   worktreePath: string;
@@ -29,6 +32,8 @@ export interface CreateWorktreeResult {
 }
 
 export class WorktreeManager {
+  private readonly platform: NodeJS.Platform;
+
   constructor(
     private readonly deps: {
       paths: PuddlePaths;
@@ -36,8 +41,12 @@ export class WorktreeManager {
       mutex: KeyedMutex;
       repos: RepoStore;
       sessions: SessionStore;
+      /** Path and removal rules; the host's own by default. */
+      platform?: NodeJS.Platform;
     },
-  ) {}
+  ) {
+    this.platform = deps.platform ?? process.platform;
+  }
 
   /** Share the manager's canonical common-dir lock with source-control routes. */
   async runGitMutation<T>(repoRoot: string, run: () => Promise<T>): Promise<T> {
@@ -189,8 +198,14 @@ export class WorktreeManager {
     });
   }
 
-  /** realpath, tolerating a path that no longer exists (returns it unchanged). */
+  /**
+   * A path's identity for comparisons: its realpath, tolerating a path that no
+   * longer exists (returned unchanged). Windows compares canonical paths
+   * case-insensitively, so git's `C:/Users/...` spelling, a stored
+   * `C:\Users\...` and a differently cased registration are one worktree.
+   */
   private realOf(p: string): string {
+    if (this.platform === 'win32') return canonicalHostPath(p, 'win32').toLowerCase();
     try {
       return realpathSync(p);
     } catch {
@@ -203,7 +218,8 @@ export class WorktreeManager {
    * working tree) reports the repo's own clone path verbatim, and any worktree
    * a session already uses reports that session's stored path — so the paths
    * here match `sessions.worktree_path` byte-for-byte (avoiding symlink drift)
-   * and can be handed straight back as `join_worktree`.
+   * and can be handed straight back as `join_worktree`. Any other worktree is
+   * git's own spelling, made canonical on Windows (git prints `C:/x`).
    */
   async listWorktrees(repo: Repo): Promise<WorktreeInfo[]> {
     const raw = await git(['worktree', 'list', '--porcelain'], { cwd: repo.path });
@@ -220,7 +236,9 @@ export class WorktreeManager {
       if (path && !bare) {
         const real = this.realOf(path);
         const isPrimary = real === primaryReal;
-        const canonical = isPrimary ? repo.path : (sessionByReal.get(real) ?? path);
+        const canonical = isPrimary
+          ? repo.path
+          : (sessionByReal.get(real) ?? canonicalHostPath(path, this.platform));
         out.push({ path: canonical, branch, is_primary: isPrimary });
       }
       path = null;
@@ -350,8 +368,41 @@ export class WorktreeManager {
         );
       }
       const args = ['worktree', 'remove', ...(opts.force ? ['--force'] : []), opts.worktreePath];
+      if (this.platform === 'win32') {
+        await this.removeOnWindows(opts.repo, opts.worktreePath, args);
+        return;
+      }
       await git(args, { cwd: opts.repo.path });
     });
+  }
+
+  /**
+   * `git worktree remove` once nothing holds the tree open (see
+   * `assertNotHeldOpen`). Should a handle appear in between, git fails after
+   * dropping the registration; the leftover tree is then removed with
+   * retries, or reported as busy, and never left registered but half-deleted.
+   */
+  private async removeOnWindows(repo: Repo, worktreePath: string, args: string[]): Promise<void> {
+    assertNotHeldOpen(worktreePath);
+    try {
+      await git(args, { cwd: repo.path });
+      return;
+    } catch (error) {
+      const wanted = this.realOf(worktreePath);
+      const registered = (await this.listWorktrees(repo)).some(
+        (w) => this.realOf(w.path) === wanted,
+      );
+      // Still registered: git refused before deleting anything (dirty, locked).
+      if (registered || !existsSync(worktreePath)) throw error;
+    }
+    try {
+      // Linear backoff: about 1.5 s in all before the tree is reported busy.
+      rmSync(worktreePath, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    } catch {
+      throw worktreeBusy(worktreePath);
+    } finally {
+      await git(['worktree', 'prune'], { cwd: repo.path }).catch(() => undefined);
+    }
   }
 
   async isClean(worktreePath: string): Promise<boolean> {
@@ -371,16 +422,22 @@ export class WorktreeManager {
   findOrphanWorktrees(repo: Repo): string[] {
     const dir = join(this.deps.paths.worktreesDir, String(repo.id));
     if (!existsSync(dir)) return [];
-    const known = new Set(this.deps.sessions.allWorktreePaths());
+    // Windows: a stored path that differs in case or separators is still the same directory.
+    const key =
+      this.platform === 'win32'
+        ? (path: string) => normaliseHostPath(path).toLowerCase()
+        : (path: string) => path;
+    const known = new Set(this.deps.sessions.allWorktreePaths().map(key));
     return readdirSync(dir)
       .map((name) => join(dir, name))
-      .filter((path) => !known.has(path));
+      .filter((path) => !known.has(key(path)));
   }
 
+  /** Never prompts on Windows: these fetches run unattended (see `backgroundGitEnv`). */
   private async fetchCore(repo: Repo): Promise<void> {
     if (!repo.fetch_enabled) return;
     if (!(await this.hasOrigin(repo))) return; // no remote → freshness degrades silently (SPEC §4)
-    await git(['fetch', 'origin'], { cwd: repo.path });
+    await git(['fetch', 'origin'], { cwd: repo.path, env: backgroundGitEnv(this.platform) });
     this.deps.repos.setLastFetchedAt(repo.id, new Date().toISOString());
   }
 
@@ -446,7 +503,9 @@ export class WorktreeManager {
     mkdirSync(infoDir, { recursive: true });
     const excludeFile = join(infoDir, 'exclude');
     const current = existsSync(excludeFile) ? readFileSync(excludeFile, 'utf8') : '';
-    if (!current.split('\n').includes('.puddle/')) {
+    // Windows editors and autocrlf tooling leave CRLF lines; read through them.
+    const lines = current.split(this.platform === 'win32' ? /\r?\n/ : '\n');
+    if (!lines.includes('.puddle/')) {
       appendFileSync(
         excludeFile,
         (current.endsWith('\n') || current === '' ? '' : '\n') + '.puddle/\n',
