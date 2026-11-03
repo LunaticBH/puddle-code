@@ -3,6 +3,7 @@ import {
   actionForBinding,
   eventBinding,
   formatBinding,
+  formatPrimaryShortcut,
   hotkeyNeedsCapture,
   HOTKEY_ACTIONS,
   setHotkeyOverrides,
@@ -12,13 +13,17 @@ import {
 const byId = (id: string) => HOTKEY_ACTIONS.find((a) => a.id === id)!;
 
 /** A keydown as the DOM would report it (`eventBinding` reads only these). */
-const keydown = (code: string, mods: Partial<Record<'ctrl' | 'alt' | 'shift' | 'meta', true>>) =>
+const keydown = (
+  code: string,
+  mods: Partial<Record<'ctrl' | 'alt' | 'shift' | 'meta' | 'altGraph', true>>,
+) =>
   ({
     code,
     ctrlKey: mods.ctrl === true,
     altKey: mods.alt === true,
     shiftKey: mods.shift === true,
     metaKey: mods.meta === true,
+    getModifierState: (key: string) => key === 'AltGraph' && mods.altGraph === true,
   }) as KeyboardEvent;
 
 describe('shellDefaultBinding', () => {
@@ -121,5 +126,77 @@ describe('capture-phase ownership', () => {
     expect(hotkeyNeedsCapture(byId('editor.wordWrap'), true)).toBe(false);
     expect(hotkeyNeedsCapture(byId('editor.save'), true)).toBe(true);
     expect(hotkeyNeedsCapture(byId('editor.save'), false)).toBe(true);
+  });
+});
+
+describe('Windows and Linux clients', () => {
+  it('moves every default written for ⌘ onto Ctrl on Windows, in canonical order', () => {
+    expect(shellDefaultBinding(byId('palette.toggle'), false, 'windows')).toBe('ctrl+KeyK');
+    expect(shellDefaultBinding(byId('editor.save'), false, 'windows')).toBe('ctrl+KeyS');
+    expect(shellDefaultBinding(byId('nav.files'), false, 'windows')).toBe('ctrl+alt+KeyE');
+    expect(shellDefaultBinding(byId('sidebar.right'), false, 'windows')).toBe('ctrl+alt+Period');
+    expect(shellDefaultBinding(byId('tab.close'), true, 'windows')).toBe('ctrl+KeyW');
+    expect(shellDefaultBinding(byId('tab.reopen'), true, 'windows')).toBe('ctrl+shift+KeyT');
+    // Defaults that never used ⌘ are untouched.
+    expect(shellDefaultBinding(byId('tab.close'), false, 'windows')).toBe('ctrl+alt+KeyW');
+    expect(shellDefaultBinding(byId('tab.next'), true, 'windows')).toBe('ctrl+Tab');
+  });
+
+  it('keeps Mac and Linux defaults exactly as written', () => {
+    for (const client of ['mac', 'other'] as const) {
+      for (const action of HOTKEY_ACTIONS) {
+        for (const desktop of [false, true]) {
+          const written =
+            desktop && action.desktopBinding ? action.desktopBinding : action.defaultBinding;
+          expect(shellDefaultBinding(action, desktop, client)).toBe(written);
+        }
+      }
+    }
+  });
+
+  it('gives the Windows default sets no internal conflict', () => {
+    for (const desktop of [false, true]) {
+      const bindings = HOTKEY_ACTIONS.map((a) => shellDefaultBinding(a, desktop, 'windows'));
+      expect(new Set(bindings).size).toBe(bindings.length);
+    }
+  });
+
+  it('spells bindings out off a Mac', () => {
+    expect(formatBinding('ctrl+alt+KeyW', 'windows')).toBe('Ctrl+Alt+W');
+    expect(formatBinding('ctrl+shift+KeyT', 'windows')).toBe('Ctrl+Shift+T');
+    expect(formatBinding('meta+KeyK', 'windows')).toBe('Win+K');
+    expect(formatBinding('meta+KeyK', 'other')).toBe('Super+K');
+    expect(formatBinding('ctrl+Backquote', 'other')).toBe('Ctrl+`');
+    expect(formatBinding('ctrl+Tab', 'windows')).toBe('Ctrl+Tab');
+    expect(formatBinding('alt+Space', 'windows')).toBe('Alt+Space');
+    expect(formatBinding('ctrl+Enter', 'other')).toBe('Ctrl+Enter');
+    expect(formatBinding('', 'windows')).toBe('—');
+    // A Mac keeps its glyphs.
+    expect(formatBinding('ctrl+alt+KeyW', 'mac')).toBe('⌃⌥W');
+    expect(formatBinding('shift+meta+KeyT', 'mac')).toBe('⇧⌘T');
+  });
+
+  it('labels fixed ⌘ shortcuts with Ctrl off a Mac', () => {
+    expect(formatPrimaryShortcut('meta+KeyX', 'mac')).toBe('⌘X');
+    expect(formatPrimaryShortcut('alt+shift+meta+KeyC', 'mac')).toBe('⌥⇧⌘C');
+    expect(formatPrimaryShortcut('meta+KeyX', 'windows')).toBe('Ctrl+X');
+    expect(formatPrimaryShortcut('alt+meta+KeyC', 'other')).toBe('Ctrl+Alt+C');
+    expect(formatPrimaryShortcut('alt+shift+meta+KeyC', 'windows')).toBe('Ctrl+Alt+Shift+C');
+  });
+
+  it('never fires a shortcut for an AltGr character off a Mac', () => {
+    // Windows reports AltGr as Ctrl+Alt: AltGr+E types € on a German layout.
+    const altGr = keydown('KeyE', { ctrl: true, alt: true, altGraph: true });
+    expect(eventBinding(altGr, 'windows')).toBeNull();
+    expect(eventBinding(altGr, 'other')).toBeNull();
+    // A real Ctrl+Alt+E is still a shortcut.
+    expect(eventBinding(keydown('KeyE', { ctrl: true, alt: true }), 'windows')).toBe(
+      'ctrl+alt+KeyE',
+    );
+  });
+
+  it('leaves Mac key handling unchanged', () => {
+    const option = keydown('KeyE', { alt: true, meta: true, altGraph: true });
+    expect(eventBinding(option, 'mac')).toBe('alt+meta+KeyE');
   });
 });

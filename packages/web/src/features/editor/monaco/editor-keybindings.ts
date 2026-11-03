@@ -1,22 +1,22 @@
 import { clientSettings, updateClientSettings } from '../../../lib/settings/client-settings';
 import { hotkeyBinding } from '../../../lib/navigation/hotkeys';
-import { nextWordWrap } from './editor-keybindings-logic';
+import { CLIENT_PLATFORM } from '../../../lib/client-platform';
+import { monacoModifier, nextWordWrap } from './editor-keybindings-logic';
 import { monaco } from './monaco-setup';
 
 /**
  * Translate one canonical hotkey binding (`shift+meta+KeyS`) into a Monaco
  * keybinding number, or null if a code has no Monaco equivalent. `meta` maps to
- * CtrlCmd (⌘ on Mac), `ctrl` to WinCtrl.
+ * CtrlCmd (⌘ on Mac), `ctrl` to WinCtrl — swapped on a Windows client, see
+ * `monacoModifier`.
  */
 function toMonacoKeybinding(binding: string): number | null {
   const parts = binding.split('+');
   const code = parts.pop() ?? '';
   let mods = 0;
   for (const p of parts) {
-    if (p === 'meta') mods |= monaco.KeyMod.CtrlCmd;
-    else if (p === 'ctrl') mods |= monaco.KeyMod.WinCtrl;
-    else if (p === 'alt') mods |= monaco.KeyMod.Alt;
-    else if (p === 'shift') mods |= monaco.KeyMod.Shift;
+    const modifier = monacoModifier(p, CLIENT_PLATFORM);
+    if (modifier !== null) mods |= monaco.KeyMod[modifier];
   }
   const key = /^Key[A-Z]$/.test(code)
     ? (`Key${code.slice(3)}` as keyof typeof monaco.KeyCode)

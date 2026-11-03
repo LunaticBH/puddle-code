@@ -33,8 +33,12 @@ import {
   type SyncSources,
 } from '../../../lib/settings/settings-sync-manifest';
 import { applyTheme, storedPreference, type ThemePreference } from '../../../lib/appearance/theme';
+import { CLIENT_PLATFORM } from '../../../lib/client-platform';
 import { useCurrentProfileId } from '../../profile/profile-store';
 import { SectionTitle } from '../parts';
+
+/** Local sync lives in THIS machine's Puddle home (`%USERPROFILE%\.puddle` on Windows). */
+const LOCAL_HOME = CLIENT_PLATFORM === 'windows' ? '~\\.puddle' : '~/.puddle';
 
 /** The browser's remembered checklist, used until (and unless) local sync owns it. */
 const SELECTION_KEY = 'puddle.sync-selection';
@@ -210,8 +214,8 @@ export function SyncSection() {
           <>
             <p className="mb-2 mt-1 text-xs text-fg-muted">
               Sync selected groups through this machine’s{' '}
-              <span className="text-fg-secondary">~/.puddle</span>, so every Puddle window stays in
-              step for profiles named{' '}
+              <span className="text-fg-secondary">{LOCAL_HOME}</span>, so every Puddle window stays
+              in step for profiles named{' '}
               <span className="text-fg-secondary">{profile?.name ?? '…'}</span>.
             </p>
             <label className="flex items-center gap-2 text-sm text-fg">
