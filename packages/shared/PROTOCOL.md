@@ -1,5 +1,12 @@
 # The puddle communication protocol
 
+Protocol 25.7 adds optional `platform` (the daemon's `process.platform`) to GET
+`/api/host`; its absence means a POSIX host on an older daemon, and clients infer
+each path's style from the path itself. The private host control channel gains
+the strict `shutdown` request, answered by `shutting_down` before the daemon
+stops; Windows supervision uses it in place of signals, and older daemons answer
+`invalid_control`. Remote protocol and operation allowlists remain unchanged.
+
 Protocol 25.6 adds `logRetentionDays` to host configuration and its patch, defaulting
 to three days when omitted (zero disables age-based cleanup). New clients gate the
 setting on 25.6. Retention compacts inactive bulk output while preserving the entire

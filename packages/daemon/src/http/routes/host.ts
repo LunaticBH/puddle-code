@@ -14,6 +14,7 @@ export function hostRoutes(deps: { paths: PuddlePaths }): Hono {
       hostname: hostname().replace(/\.local$/, ''),
       home: homedir(),
       ...(displayName ? { displayName } : {}),
+      platform: process.platform,
     });
   });
 }

@@ -17,5 +17,10 @@ export const hostInfoSchema = z.object({
    * ssh commands always use the real `hostname`.
    */
   displayName: z.string().optional(),
+  /**
+   * The daemon's `process.platform` (protocol 25.7), e.g. `win32`. Absent
+   * means a POSIX host running an older daemon.
+   */
+  platform: z.string().optional(),
 });
 export type HostInfo = z.infer<typeof hostInfoSchema>;

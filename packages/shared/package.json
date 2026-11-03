@@ -17,6 +17,10 @@
     "./node/host-control": {
       "types": "./dist/node/host-control.d.ts",
       "default": "./dist/node/host-control.js"
+    },
+    "./node/platform": {
+      "types": "./dist/node/platform.d.ts",
+      "default": "./dist/node/platform.js"
     }
   },
   "scripts": {

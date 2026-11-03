@@ -8,12 +8,15 @@ import {
   compilationModeRequestSchema,
   compilationRunResponseSchema,
   compilationSettingsResponseSchema,
+  controlRequestSchema,
+  controlResponseSchema,
   updateCompilationSettingsRequestSchema,
   diffResponseSchema,
   diffStatusSchema,
   editorTabRefSchema,
   errorResponseSchema,
   fileResponseSchema,
+  hostInfoSchema,
   logResponseSchema,
   latexSynctexRequestSchema,
   latexSynctexResponseSchema,
@@ -32,8 +35,18 @@ import {
 } from '../src/index.js';
 
 describe('shared API schemas', () => {
-  it('declares protocol 25.0 for terminal-only programme execution', () => {
-    expect(PROTOCOL_VERSION).toEqual({ major: 25, minor: 6 });
+  it('declares protocol 25.7 for host platform reporting and control shutdown', () => {
+    expect(PROTOCOL_VERSION).toEqual({ major: 25, minor: 7 });
+  });
+
+  it('reports an optional host platform and a strict control shutdown', () => {
+    const host = { username: 'a', hostname: 'h', home: 'C:\\Users\\a' };
+    expect(hostInfoSchema.parse(host).platform).toBeUndefined();
+    expect(hostInfoSchema.parse({ ...host, platform: 'win32' }).platform).toBe('win32');
+    expect(controlRequestSchema.parse({ t: 'shutdown' })).toEqual({ t: 'shutdown' });
+    expect(controlRequestSchema.safeParse({ t: 'shutdown', force: true }).success).toBe(false);
+    expect(controlResponseSchema.parse({ t: 'shutting_down' })).toEqual({ t: 'shutting_down' });
+    expect(controlResponseSchema.safeParse({ t: 'shutting_down', at: 1 }).success).toBe(false);
   });
 
   it('accepts headless mode and rejects the previous scripted name', () => {

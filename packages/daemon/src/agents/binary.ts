@@ -1,5 +1,4 @@
-import { statSync } from 'node:fs';
-import { join } from 'node:path';
+import { findExecutable } from '@puddle/shared/node/platform';
 import { ApiError } from '../http/errors.js';
 import type { AgentAdapter } from './adapter.js';
 
@@ -25,13 +24,15 @@ const cache = new Map<string, { at: number; path: string | null }>();
 
 /**
  * Absolute path of `name` on the daemon's PATH, or null when it is not
- * installed. Results (including misses) are cached for {@link TTL_MS}.
+ * installed. Results (including misses) are cached for {@link TTL_MS}. On
+ * Windows the lookup honours PATHEXT, so `claude` finds `claude.exe` and an
+ * npm-installed `codex` finds `codex.cmd`.
  */
 export function resolveBinary(name: string): string | null {
   const hit = cache.get(name);
   const now = Date.now();
   if (hit && now - hit.at < TTL_MS) return hit.path;
-  const path = lookupOnPath(name);
+  const path = findExecutable(name);
   cache.set(name, { at: now, path });
   return path;
 }
@@ -59,25 +60,4 @@ export function assertBinaryAvailable(adapter: AgentAdapter): void {
 /** Drops every cached lookup — for tests, and for a future live `agentPath` edit. */
 export function clearBinaryCache(): void {
   cache.clear();
-}
-
-/** First executable regular file named `name` across PATH. Unix only. */
-function lookupOnPath(name: string): string | null {
-  // A name with a separator is a path, not something to search for.
-  if (name.includes('/')) return isExecutableFile(name) ? name : null;
-  for (const dir of (process.env.PATH ?? '').split(':')) {
-    if (!dir) continue;
-    const candidate = join(dir, name);
-    if (isExecutableFile(candidate)) return candidate;
-  }
-  return null;
-}
-
-function isExecutableFile(path: string): boolean {
-  try {
-    const st = statSync(path); // follows symlinks — most agent CLIs install as one
-    return st.isFile() && (st.mode & 0o111) !== 0;
-  } catch {
-    return false; // missing, or an unreadable parent dir
-  }
 }

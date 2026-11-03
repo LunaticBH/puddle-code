@@ -313,4 +313,5 @@
 // 25.4: bounded widget state, live comms and exact kernel-generation ownership.
 // 25.5: local/SSH storage diagnostics and explicit unsaved runtime metadata.
 // 25.6: configurable bulk terminal-log retention, preserving restoration tails.
-export const PROTOCOL_VERSION = { major: 25, minor: 6 } as const;
+// 25.7: host platform reporting and the private-control `shutdown` request.
+export const PROTOCOL_VERSION = { major: 25, minor: 7 } as const;

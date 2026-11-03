@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import {
   chmodSync,
@@ -11,13 +12,15 @@ import {
   openSync,
   readFileSync,
   realpathSync,
-  renameSync,
   rmSync,
   writeFileSync,
+  type Stats,
 } from 'node:fs';
 import { connect, createServer, type Server, type Socket } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 import { CONTROL_MAX_BYTES } from '../api/connection/connection-auth.js';
+import { system32Path } from './environment.js';
+import { renameWithRetrySync } from './rename.js';
 
 export const digest = (value: string): string => createHash('sha256').update(value).digest('hex');
 export const secret = (prefix = ''): string => prefix + randomBytes(32).toString('hex');
@@ -47,11 +50,8 @@ export function privateDirectory(path: string): void {
  */
 export function initialisePrivateHome(home: string): void {
   const path = resolve(home);
+  if (process.platform === 'win32') return initialiseWindowsHome(path);
   mkdirSync(path, { recursive: true, mode: 0o700 });
-  if (process.platform === 'win32') {
-    privatePath(path, true);
-    return;
-  }
   // Operate on the verified directory itself, without following a symlink or
   // chmodding a replacement path. Never adopt state another user could write.
   const fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
@@ -69,6 +69,71 @@ export function initialisePrivateHome(home: string): void {
   privatePath(path, true);
 }
 
+/**
+ * Windows has no mode bits: the profile's inherited ACL is owner-only, and
+ * a home this call creates additionally receives a protected DACL for the
+ * owner, SYSTEM and Administrators (docs/windows.md, decision 2). Reparse
+ * points are refused as the POSIX symlink rule refuses symlinks; Node
+ * reports junctions as symbolic links.
+ */
+function initialiseWindowsHome(path: string): void {
+  let existing: Stats | null = null;
+  try {
+    existing = lstatSync(path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+  if (existing?.isSymbolicLink()) {
+    throw new Error(`Puddle home must not be a symbolic link or junction: ${path}`);
+  }
+  mkdirSync(path, { recursive: true, mode: 0o700 });
+  privatePath(path, true);
+  if (!existing) restrictWindowsDirectory(path);
+}
+
+let windowsUserSid: string | undefined;
+let windowsAclWarned = false;
+
+/** Best effort: a failure is reported once as a process warning and never thrown. */
+function restrictWindowsDirectory(path: string): void {
+  try {
+    windowsUserSid ??= currentWindowsUserSid();
+    execFileSync(
+      system32Path('icacls.exe'),
+      [
+        path,
+        '/inheritance:r',
+        '/grant:r',
+        `*${windowsUserSid}:(OI)(CI)F`,
+        '*S-1-5-18:(OI)(CI)F',
+        '*S-1-5-32-544:(OI)(CI)F',
+      ],
+      { windowsHide: true, timeout: 10_000, stdio: 'ignore' },
+    );
+  } catch (err) {
+    if (windowsAclWarned) return;
+    windowsAclWarned = true;
+    process.emitWarning(
+      `Could not restrict the new Puddle home to its owner, so it keeps its inherited ` +
+        `permissions (${(err as Error).message}): ${path}`,
+      { code: 'PUDDLE_HOME_ACL' },
+    );
+  }
+}
+
+function currentWindowsUserSid(): string {
+  const output = execFileSync(system32Path('whoami.exe'), ['/user', '/fo', 'csv', '/nh'], {
+    windowsHide: true,
+    timeout: 10_000,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  // `"host\user","S-1-5-21-…"`
+  const sid = /"(S-1-\d+(?:-\d+)+)"\s*$/.exec(output.trim())?.[1];
+  if (!sid) throw new Error('whoami did not report a user SID');
+  return sid;
+}
+
 export function atomicPrivateJson(path: string, value: unknown): void {
   privateDirectory(dirname(path));
   const tmp = `${path}.${secret()}.tmp`;
@@ -80,7 +145,8 @@ export function atomicPrivateJson(path: string, value: unknown): void {
     closeSync(fd);
   }
   try {
-    renameSync(tmp, path);
+    // One plain rename on POSIX; Windows retries while a reader holds the target.
+    renameWithRetrySync(tmp, path);
   } finally {
     rmSync(tmp, { force: true });
   }
@@ -91,14 +157,50 @@ export function readPrivateJson(path: string): unknown {
   return JSON.parse(readFileSync(path, 'utf8')) as unknown;
 }
 
-/** Short paths also fit macOS's 104-byte sockaddr_un limit. */
+/**
+ * Short paths also fit macOS's 104-byte sockaddr_un limit. Named pipes live
+ * in one machine-wide namespace, so on Windows the name also carries the
+ * home's private nonce: other users, who cannot read the home, can neither
+ * connect to the pipe nor create it first.
+ */
 export function ipcPath(home: string, scope: string): string {
   initialisePrivateHome(home);
   const key = digest(`${realpathSync(home)}\0${scope}`).slice(0, 24);
-  if (process.platform === 'win32') return `\\\\.\\pipe\\puddle-${key}`;
+  if (process.platform === 'win32') return `\\\\.\\pipe\\puddle-${key}-${ipcNonce(home)}`;
   const dir = join('/tmp', `puddle-${process.getuid!()}-${key}`);
   privateDirectory(dir);
   return join(dir, 'control.sock');
+}
+
+const IPC_NONCE = /^[0-9a-f]{32}$/;
+
+/** `<home>\ipc-nonce`: 32 random hex characters, created exclusively by whichever process needs it first. */
+function ipcNonce(home: string): string {
+  const path = join(home, 'ipc-nonce');
+  const created = randomBytes(16).toString('hex');
+  try {
+    const fd = openSync(path, 'wx', 0o600);
+    try {
+      writeFileSync(fd, created);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    return created;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+  }
+  for (let attempt = 0; ; attempt++) {
+    const st = lstatSync(path);
+    if (st.isSymbolicLink() || !st.isFile()) {
+      throw new Error(`Puddle IPC nonce must be a regular file: ${path}`);
+    }
+    const value = readFileSync(path, 'utf8');
+    if (IPC_NONCE.test(value)) return value;
+    // A concurrent creator may not have written it yet.
+    if (value !== '' || attempt >= 50) throw new Error(`Puddle IPC nonce is malformed: ${path}`);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+  }
 }
 
 export async function listenPrivate(
@@ -131,9 +233,17 @@ export async function listenPrivate(
   }
   const server = createServer(onConnection);
   await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
+    // A served pipe cannot be probed and removed like a stale socket: its
+    // listener already owns the name.
+    const fail = (err: NodeJS.ErrnoException) =>
+      reject(
+        process.platform === 'win32' && err.code === 'EADDRINUSE'
+          ? new Error('Puddle control socket is already active', { cause: err })
+          : err,
+      );
+    server.once('error', fail);
     server.listen(path, () => {
-      server.off('error', reject);
+      server.off('error', fail);
       resolve();
     });
   });

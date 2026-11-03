@@ -29,6 +29,9 @@ export async function startHostControl(
         const parsed = controlRequestSchema.safeParse(value);
         if (!parsed.success) return fail();
         const message = parsed.data;
+        // Protocol 25.7 defines `shutdown`; until the daemon implements a
+        // graceful stop it answers exactly as a pre-25.7 daemon would.
+        if (message.t === 'shutdown') return fail();
         const ready = info();
         if (!ready) {
           send({ t: 'error', code: 'unavailable' });

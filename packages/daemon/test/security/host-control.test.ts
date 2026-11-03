@@ -68,19 +68,34 @@ describe('private host control', () => {
     expect(await rejected).toMatchObject({ t: 'error', code: 'rejected' });
   });
 
-  it('protects a live daemon socket and rejects insecure runtime directories', async () => {
+  it('refuses a second host control while one is live', async () => {
     const f = await fixture();
-    const path = ipcPath(f.home, 'host');
-    const inode = statSync(path).ino;
     await expect(startHostControl(f.home, f.registry, f.info)).rejects.toThrow('already active');
-    expect(statSync(path).ino).toBe(inode);
-    expect(statSync(path).mode & 0o777).toBe(0o600);
-    // Only the legacy Puddle home may migrate; IPC storage stays fail-closed.
-    const runtimeDir = dirname(path);
-    chmodSync(runtimeDir, 0o755);
-    expect(() => ipcPath(f.home, 'host')).toThrow('must be private');
-    chmodSync(runtimeDir, 0o700);
   });
+
+  it('answers shutdown as an unsupported control request for now', async () => {
+    const f = await fixture();
+    const received = reply(f.socket);
+    f.socket.write(JSON.stringify({ t: 'shutdown' }) + '\n');
+    expect(await received).toEqual({ t: 'error', code: 'invalid_control' });
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'protects a live daemon socket and rejects insecure runtime directories',
+    async () => {
+      const f = await fixture();
+      const path = ipcPath(f.home, 'host');
+      const inode = statSync(path).ino;
+      await expect(startHostControl(f.home, f.registry, f.info)).rejects.toThrow('already active');
+      expect(statSync(path).ino).toBe(inode);
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+      // Only the legacy Puddle home may migrate; IPC storage stays fail-closed.
+      const runtimeDir = dirname(path);
+      chmodSync(runtimeDir, 0o755);
+      expect(() => ipcPath(f.home, 'host')).toThrow('must be private');
+      chmodSync(runtimeDir, 0o700);
+    },
+  );
 
   it('bounds unterminated control frames and does not accept data credentials as control messages', async () => {
     const f = await fixture();

@@ -26,6 +26,12 @@ export const controlRequestSchema = z.discriminatedUnion('t', [
   z.object({ t: z.literal('open'), profile: profileId.optional() }).strict(),
   z.object({ t: z.literal('renew'), resources: z.array(resourceIdSchema).max(2048) }).strict(),
   z.object({ t: z.literal('close') }).strict(),
+  /**
+   * Graceful daemon stop over the private control channel (protocol 25.7),
+   * used by Windows supervision, which has no service manager to signal.
+   * Older daemons answer `invalid_control`.
+   */
+  z.object({ t: z.literal('shutdown') }).strict(),
 ]);
 export const hostInspectionSchema = z.object({
   t: z.literal('inspection'),
@@ -45,6 +51,8 @@ export const controlResponseSchema = z.discriminatedUnion('t', [
     })
     .strict(),
   hostInspectionSchema,
+  /** Acknowledges `shutdown`: the daemon stops once its state is closed (25.7). */
+  z.object({ t: z.literal('shutting_down') }).strict(),
   z
     .object({ t: z.literal('error'), code: z.enum(['unavailable', 'rejected', 'invalid_control']) })
     .strict(),

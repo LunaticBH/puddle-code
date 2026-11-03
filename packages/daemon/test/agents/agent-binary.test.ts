@@ -14,7 +14,31 @@ import { fakeAdapter } from '../helpers/daemon-fixtures.js';
 
 const ABSENT = 'puddle-nonexistent-agent';
 
-describe('agent binary resolution', () => {
+describe.skipIf(process.platform !== 'win32')('agent binary resolution on Windows', () => {
+  const originalPath = process.env.PATH;
+
+  beforeEach(() => clearBinaryCache());
+  afterEach(() => {
+    process.env.PATH = originalPath;
+    clearBinaryCache();
+  });
+
+  it('resolves npm shims and native executables through PATHEXT', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'puddle-bin-'));
+    process.env.PATH = dir;
+    expect(resolveBinary(ABSENT)).toBeNull();
+    writeFileSync(join(dir, `${ABSENT}.cmd`), '@echo off\r\n');
+    clearBinaryCache();
+    expect(resolveBinary(ABSENT)).toBe(join(dir, `${ABSENT}.cmd`));
+    // PATHEXT order prefers the native executable.
+    writeFileSync(join(dir, `${ABSENT}.exe`), '');
+    clearBinaryCache();
+    expect(resolveBinary(ABSENT)).toBe(join(dir, `${ABSENT}.exe`));
+    expect(resolveBinary(join(dir, ABSENT))).toBe(join(dir, `${ABSENT}.exe`));
+  });
+});
+
+describe.skipIf(process.platform === 'win32')('agent binary resolution', () => {
   const originalPath = process.env.PATH;
 
   beforeEach(() => clearBinaryCache());

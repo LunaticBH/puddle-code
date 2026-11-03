@@ -29,6 +29,7 @@ const shared = {
   external: ['electron', 'bufferutil', 'utf-8-validate'],
   alias: {
     '@puddle-code/cli/lib': join(repoRoot, 'packages/cli/src/lib/index.ts'),
+    '@puddle/shared/node/platform': join(repoRoot, 'packages/shared/src/node/platform.ts'),
     '@puddle/shared/node/host-control': join(repoRoot, 'packages/shared/src/node/host-control.ts'),
     '@puddle/shared/node': join(repoRoot, 'packages/shared/src/node/security.ts'),
     '@puddle/shared': join(repoRoot, 'packages/shared/src/index.ts'),
