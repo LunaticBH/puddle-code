@@ -1,5 +1,5 @@
 import { relayDaemonUpgradePrompt } from './daemon-upgrade-prompt.js';
-import { requestInvitation } from '../lib/auth/launcher.js';
+import { requestCockpitShutdown, requestInvitation } from '../lib/auth/launcher.js';
 import { clientHome } from '../lib/paths.js';
 import { spawn } from 'node:child_process';
 import { closeSync, mkdirSync, openSync, readFileSync } from 'node:fs';
@@ -10,6 +10,7 @@ import {
   checkCockpit,
   cockpitLogPath,
   isPidAlive,
+  isRecordedProcess,
   readCockpitRecord,
   removeCockpitRecord,
   type CockpitRecord,
@@ -81,7 +82,12 @@ export async function launchDetached(opts: {
 
   // Auth prompts need this terminal: open the ssh control master before
   // detaching, so the TTY-less child only ever attaches to a live master.
-  if (target !== 'local') await new SshTransport(target).open();
+  // Windows OpenSSH has no master, so the background child must authenticate
+  // every connection itself, without prompting.
+  if (target !== 'local') {
+    if (process.platform === 'win32') await requirePromptlessSsh(target);
+    else await new SshTransport(target).open();
+  }
 
   const logFile = cockpitLogPath(target);
   mkdirSync(dirname(logFile), { recursive: true });
@@ -89,6 +95,9 @@ export async function launchDetached(opts: {
   const argv = opts.argv ?? process.argv.slice(2);
   const child = spawn(process.execPath, [process.argv[1] ?? '', ...argv], {
     detached: true,
+    // A console-less child would open a window for every console program it
+    // starts (ssh, git); hidden, it starts them hidden too. No-op elsewhere.
+    windowsHide: true,
     stdio: ['ignore', fd, fd, 'ipc'],
     env: { ...process.env, [COCKPIT_CHILD_ENV]: '1' },
   });
@@ -185,6 +194,7 @@ export function spawnDetachedRefresh(target: string, argv: string[], refreshId: 
   delete env[COCKPIT_CHILD_ENV];
   const child = spawn(process.execPath, [process.argv[1] ?? '', ...argv], {
     detached: true,
+    windowsHide: true,
     stdio: ['ignore', fd, fd],
     env,
   });
@@ -192,8 +202,35 @@ export function spawnDetachedRefresh(target: string, argv: string[], refreshId: 
   child.unref();
 }
 
-/** SIGTERM (the cockpit's clean-shutdown path), escalate to SIGKILL after 10s. */
-export async function terminateCockpit(record: CockpitRecord): Promise<void> {
+/**
+ * The background cockpit has no terminal, and on Windows no ssh master to
+ * reuse: refuse up front unless key or agent authentication works without
+ * a prompt, instead of letting every reconnect fail in the log.
+ */
+async function requirePromptlessSsh(target: string): Promise<void> {
+  try {
+    await new SshTransport(target, { batchMode: true }).open();
+  } catch (err) {
+    if (!(err instanceof CliError)) throw err;
+    throw new CliError(
+      'ssh_unreachable',
+      `a background cockpit on Windows needs SSH to ${target} to work without prompts`,
+      'add an SSH key (and start the ssh-agent service), or stay attached with --foreground',
+    );
+  }
+}
+
+/**
+ * SIGTERM (the cockpit's clean-shutdown path), escalate to SIGKILL after 10s.
+ * Windows cannot deliver SIGTERM (process.kill is TerminateProcess there), so
+ * it asks over the launcher pipe instead, and forces only a process that is
+ * provably the recorded cockpit: pids are recycled quickly there.
+ */
+export async function terminateCockpit(
+  record: CockpitRecord,
+  platform: NodeJS.Platform = process.platform,
+): Promise<void> {
+  if (platform === 'win32') return terminateWindowsCockpit(record);
   try {
     process.kill(record.pid, 'SIGTERM');
   } catch {
@@ -211,9 +248,43 @@ export async function terminateCockpit(record: CockpitRecord): Promise<void> {
       // Gone between the check and the kill.
     }
   }
-  // Remove only the record we acted on: a new cockpit for the same target
-  // may have registered while we waited (the old one's shutdown already
-  // removed its own record) — its entry is not ours to delete.
+  removeRecordWeActedOn(record);
+}
+
+async function terminateWindowsCockpit(record: CockpitRecord): Promise<void> {
+  const identity = await isRecordedProcess(record, 'win32');
+  if (identity === false || !isPidAlive(record.pid, 'win32')) return removeRecordWeActedOn(record);
+  // Without the process table, only a cockpit that echoes its nonce is provably ours.
+  if (identity === null && (await checkCockpit(record, 'win32')) !== 'running') {
+    throw new CliError(
+      'cockpit_launch_failed',
+      `cannot confirm that pid ${record.pid} is the cockpit for ${record.target}`,
+      'stop it in Task Manager if it is, then run: puddle list',
+    );
+  }
+  if (record.launcherPath) {
+    await requestCockpitShutdown(clientHome(), record.launcherPath).catch(() => undefined);
+  }
+  // Leave the same headroom as the POSIX path for an attached daemon's drain.
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline && isPidAlive(record.pid, 'win32')) await sleep(100);
+  if (isPidAlive(record.pid, 'win32')) {
+    try {
+      // TerminateProcess; its ssh.exe children share libuv's kill-on-close job.
+      process.kill(record.pid);
+    } catch {
+      // Gone between the check and the kill.
+    }
+  }
+  removeRecordWeActedOn(record);
+}
+
+/**
+ * Remove only the record we acted on: a new cockpit for the same target may
+ * have registered while we waited (the old one's shutdown already removed its
+ * own record) — its entry is not ours to delete.
+ */
+function removeRecordWeActedOn(record: CockpitRecord): void {
   const current = readCockpitRecord(record.target);
   if (current === null || current.pid === record.pid) removeCockpitRecord(record.target);
 }

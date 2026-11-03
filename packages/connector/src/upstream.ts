@@ -7,7 +7,7 @@ import {
   type RemoteMessage,
   type PushPreference,
 } from '@puddle/shared';
-import { ipcPath, privatePath } from '@puddle/shared/node';
+import { checkIpcEndpoint, ipcPath } from '@puddle/shared/node';
 import { HostControlClient } from '@puddle/shared/node/host-control';
 import type { EncryptedChannel } from '@puddle/remote-transport';
 import { permittedRequest, permittedTerminal } from './policy.js';
@@ -36,7 +36,7 @@ export class RemoteUpstream {
     this.authority = new HostControlClient(
       async () => {
         const path = ipcPath(home, 'host');
-        privatePath(path);
+        checkIpcEndpoint(path);
         return connect(path);
       },
       false,

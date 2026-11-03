@@ -1,5 +1,5 @@
 import { connect } from 'node:net';
-import { ipcPath, jsonLines, privatePath } from '@puddle/shared/node';
+import { checkIpcEndpoint, ipcPath, jsonLines } from '@puddle/shared/node';
 import { readFile } from 'node:fs/promises';
 import { CliError } from '../types.js';
 import { join } from 'node:path';
@@ -65,11 +65,18 @@ export async function inspectLegacyHost(home: string): Promise<HostInspection | 
   }
 }
 
-/** Modern inspection also stays on the host; only validated summary data leaves it. */
-export async function inspectHostLocally(home: string): Promise<HostInspection | null> {
+/**
+ * Modern inspection also stays on the host; only validated summary data leaves it.
+ * A Windows home has no pipe to stat and no pre-pipe daemons, so a missing
+ * pipe there simply means no daemon.
+ */
+export async function inspectHostLocally(
+  home: string,
+  platform: NodeJS.Platform = process.platform,
+): Promise<HostInspection | null> {
   const path = ipcPath(home, 'host');
   try {
-    privatePath(path);
+    checkIpcEndpoint(path, platform);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return inspectLegacyHost(home);
     throw err;
@@ -112,7 +119,9 @@ export async function inspectHostLocally(home: string): Promise<HostInspection |
       ).length,
     });
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ECONNREFUSED') return inspectLegacyHost(home);
+    const code = (err as NodeJS.ErrnoException).code;
+    if (platform === 'win32' && code === 'ENOENT') return null;
+    if (code === 'ECONNREFUSED') return inspectLegacyHost(home);
     throw err;
   } finally {
     socket.destroy();

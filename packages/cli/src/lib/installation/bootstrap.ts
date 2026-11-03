@@ -1,8 +1,12 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { hostPaths } from '../paths.js';
+import { readCurrentVersion } from './current-link.js';
+import { installWindowsDaemon } from './windows-install.js';
+import { clientHome, hostPaths } from '../paths.js';
+import { isLocalWindows } from '../transport/local.js';
 import type { Transport } from '../transport/transport.js';
+import { windowsHostRefusal } from '../transport/windows-host.js';
 import { CliError, type Logger, silentLogger } from '../types.js';
 import { pinnedDaemonVersion, repoSlug } from '../version.js';
 
@@ -12,6 +16,11 @@ export interface BootstrapOptions {
   /** Local tarball path or URL (dev override / air-gapped hosts). */
   tarball?: string;
   logger?: Logger;
+  /**
+   * Windows only (install.sh always restarts its supervisor): false leaves a
+   * daemon that another launcher started meanwhile running.
+   */
+  replaceRunning?: boolean;
 }
 
 /**
@@ -21,6 +30,7 @@ export interface BootstrapOptions {
  * Null when nothing bootstrap-managed is installed.
  */
 export async function installedVersion(transport: Transport): Promise<string | null> {
+  if (isLocalWindows(transport)) return readCurrentVersion(clientHome(), 'win32') ?? null;
   const result = await transport.exec(`readlink ${hostPaths.current}`, { timeoutMs: 15_000 });
   if (result.code !== 0) return null;
   const match = /versions\/([^/\s]+)\s*$/.exec(result.stdout.trim());
@@ -38,6 +48,17 @@ export async function installDaemon(
   opts: BootstrapOptions = {},
 ): Promise<void> {
   const logger = opts.logger ?? silentLogger;
+  if (isLocalWindows(transport)) {
+    if (opts.tarball !== undefined && /^https?:\/\//.test(opts.tarball)) {
+      throw new CliError('bad_arguments', '--tarball must be a local file path');
+    }
+    return installWindowsDaemon({
+      ...(opts.version !== undefined ? { version: opts.version } : {}),
+      ...(opts.tarball !== undefined ? { tarball: opts.tarball } : {}),
+      ...(opts.replaceRunning !== undefined ? { replaceRunning: opts.replaceRunning } : {}),
+      logger,
+    });
+  }
   const version = opts.version ?? pinnedDaemonVersion();
   const script = readInstallScript();
 
@@ -52,7 +73,11 @@ export async function installDaemon(
       const localSums = `${opts.tarball}.sha256`;
       if (existsSync(localSums)) args.push('--sums', resolve(localSums));
     } else {
-      const base = opts.tarball.split('/').pop() ?? 'puddled.tar.gz';
+      // A Windows client's path may use either separator.
+      const base =
+        (process.platform === 'win32'
+          ? win32.basename(opts.tarball)
+          : opts.tarball.split('/').pop()) ?? 'puddled.tar.gz';
       // Home-relative on purpose: scp's sftp backend does no remote shell
       // expansion, and ssh exec's cwd is the home dir, so both resolve it.
       const destTarball = `.puddle/cache/${base}`;
@@ -94,6 +119,8 @@ export async function installDaemon(
     },
   });
   if (result.code !== 0) {
+    const refusal = windowsHostRefusal(transport, result);
+    if (refusal) throw refusal;
     throw new CliError(
       'not_installed',
       `the installer failed on ${transport.label} (exit ${result.code})`,

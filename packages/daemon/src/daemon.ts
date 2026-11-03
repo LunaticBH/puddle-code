@@ -67,6 +67,14 @@ export interface DaemonOptions {
   version?: string;
   /** Quiet window for waiting_input detection (tests shrink it). */
   statusQuietMs?: number;
+  /**
+   * Accept the host-control `shutdown` request (protocol 25.7): the daemon
+   * stops itself, then calls this (index.ts exits). Windows supervision has
+   * no service manager to signal. Without it the request is refused.
+   */
+  onShutdown?: () => void;
+  /** Injected for tests; selects the Windows shutdown order. */
+  platform?: NodeJS.Platform;
 }
 
 export interface RunningDaemon {
@@ -91,8 +99,25 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
     version: { version: string; protocol: typeof PROTOCOL_VERSION };
   } | null = null;
   const failedStartup: Array<() => void | Promise<void>> = [];
+  const platform = opts.platform ?? process.platform;
+  // A shutdown request can arrive between the bind and startDaemon's return
+  // (auto-resume runs in between); it then waits for the stop handle.
+  let stopDaemon: (() => Promise<void>) | null = null;
+  let shutdownRequested = false;
+  const onShutdown = opts.onShutdown;
+  const requestShutdown = onShutdown
+    ? () => {
+        shutdownRequested = true;
+        if (stopDaemon) void stopDaemon().then(onShutdown, onShutdown);
+      }
+    : undefined;
   try {
-    const closeControl = await startHostControl(paths.home, authority, () => controlInfo);
+    const closeControl = await startHostControl(
+      paths.home,
+      authority,
+      () => controlInfo,
+      requestShutdown,
+    );
     failedStartup.push(closeControl);
     ensureToken(paths);
     const db = openDatabase(paths.dbFile);
@@ -337,7 +362,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
       server.close();
       if ('closeAllConnections' in server) server.closeAllConnections();
     });
-    const port = await listenWithFallback(server, opts.port ?? config.port, '127.0.0.1');
+    const port = await listenWithFallback(server, opts.port ?? config.port, '127.0.0.1', platform);
     // Record where we actually bound so clients (and a returning `puddle launch`)
     // can find us even when the preferred port was taken.
     controlInfo = {
@@ -383,58 +408,68 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
     retention.start();
     failedStartup.push(() => retention.dispose());
 
+    let stopping: Promise<void> | null = null;
+    const stop = async () => {
+      await retention.dispose();
+      storage.dispose();
+      await puddlang.dispose();
+      stopPush();
+      controlInfo = null;
+      authority.dispose();
+      // The control pipe is Windows' single-instance lock: hold it until the
+      // database is closed, so "pipe gone" means "daemon gone". Without
+      // controlInfo it answers every request with `unavailable` meanwhile.
+      if (platform !== 'win32') await closeControl();
+      clearInterval(fetchTimer);
+      catalogue.dispose();
+      compilation.dispose();
+      await notebooks.dispose();
+      onboarding.dispose();
+      // Freeze session rows at their live statuses (reconcile → interrupted),
+      // then wait for PTY exits so nothing touches the db after close.
+      service.beginShutdown();
+      ptys.killAll();
+      const deadline = Date.now() + 3000;
+      while (ptys.liveCount() > 0) {
+        if (Date.now() > deadline) {
+          // ConPTY has no signals; its kill is already forceful.
+          ptys.killAll(undefined, platform === 'win32' ? undefined : 'SIGKILL');
+          await new Promise((r) => setTimeout(r, 200));
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      await ptys.closeTerminalStates();
+      logs.closeAll();
+      // Proxied WebSocket sockets (client + outbound upstream) are not covered
+      // by closeAllConnections and would hold the process open — detach the
+      // listener and tear the pairs down before closing the server.
+      detachProxy();
+      tracker.destroyAll();
+      await new Promise<void>((resolve) => {
+        wss.close();
+        server.close(() => resolve());
+        // Idle keep-alive and WS sockets would hold close() open forever.
+        if ('closeAllConnections' in server) {
+          (server as import('node:http').Server).closeAllConnections();
+        }
+      });
+      // After the socket is closed, not before: the file's presence means "up",
+      // so a reader mid-shutdown probes a dead port (→ restart), never a live
+      // one it then mis-trusts.
+      clearRuntime(paths);
+      db.close();
+      if (platform === 'win32') await closeControl();
+    };
+    stopDaemon = () => (stopping ??= stop());
+    if (shutdownRequested) requestShutdown!();
+
     return {
       port,
       authority,
       paths,
       service,
-      async stop() {
-        await retention.dispose();
-        storage.dispose();
-        await puddlang.dispose();
-        stopPush();
-        controlInfo = null;
-        authority.dispose();
-        await closeControl();
-        clearInterval(fetchTimer);
-        catalogue.dispose();
-        compilation.dispose();
-        await notebooks.dispose();
-        onboarding.dispose();
-        // Freeze session rows at their live statuses (reconcile → interrupted),
-        // then wait for PTY exits so nothing touches the db after close.
-        service.beginShutdown();
-        ptys.killAll();
-        const deadline = Date.now() + 3000;
-        while (ptys.liveCount() > 0) {
-          if (Date.now() > deadline) {
-            ptys.killAll(undefined, 'SIGKILL');
-            await new Promise((r) => setTimeout(r, 200));
-            break;
-          }
-          await new Promise((r) => setTimeout(r, 25));
-        }
-        await ptys.closeTerminalStates();
-        logs.closeAll();
-        // Proxied WebSocket sockets (client + outbound upstream) are not covered
-        // by closeAllConnections and would hold the process open — detach the
-        // listener and tear the pairs down before closing the server.
-        detachProxy();
-        tracker.destroyAll();
-        await new Promise<void>((resolve) => {
-          wss.close();
-          server.close(() => resolve());
-          // Idle keep-alive and WS sockets would hold close() open forever.
-          if ('closeAllConnections' in server) {
-            (server as import('node:http').Server).closeAllConnections();
-          }
-        });
-        // After the socket is closed, not before: the file's presence means "up",
-        // so a reader mid-shutdown probes a dead port (→ restart), never a live
-        // one it then mis-trusts.
-        clearRuntime(paths);
-        db.close();
-      },
+      stop: stopDaemon,
     };
   } catch (err) {
     controlInfo = null;
@@ -456,18 +491,26 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
  * bind race. Only EADDRINUSE falls back: EACCES (a misconfigured privileged
  * port) and every other error propagate, since those are configuration faults,
  * not contention. A `preferredPort` of 0 already means "any free port".
+ * Windows has no privileged ports: there EACCES means a port inside a range
+ * Hyper-V, WSL or Docker reserved, which is contention too.
  */
-function listenWithFallback(
+export function listenWithFallback(
   server: ServerType,
   preferredPort: number,
   hostname: string,
+  platform: NodeJS.Platform = process.platform,
 ): Promise<number> {
+  const contended = new Set(platform === 'win32' ? ['EADDRINUSE', 'EACCES'] : ['EADDRINUSE']);
   return new Promise((resolve, reject) => {
     let triedFallback = false;
     const onError = (err: NodeJS.ErrnoException) => {
-      if (err.code === 'EADDRINUSE' && !triedFallback && preferredPort !== 0) {
+      if (contended.has(err.code ?? '') && !triedFallback && preferredPort !== 0) {
         triedFallback = true;
-        console.warn(`port ${preferredPort} is in use — binding a free port instead`);
+        console.warn(
+          err.code === 'EADDRINUSE'
+            ? `port ${preferredPort} is in use — binding a free port instead`
+            : `port ${preferredPort} is reserved by Windows — binding a free port instead`,
+        );
         server.listen(0, hostname); // retry; onError stays attached for a second failure
         return;
       }

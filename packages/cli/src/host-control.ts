@@ -1,6 +1,6 @@
 import { connect } from 'node:net';
 import { controlRequestSchema, controlResponseSchema } from '@puddle/shared';
-import { ipcPath, jsonLines, privatePath } from '@puddle/shared/node';
+import { checkIpcEndpoint, ipcPath, jsonLines } from '@puddle/shared/node';
 import { clientHome } from './lib/paths.js';
 import { inspectHostLocally } from './lib/auth/host-inspection.js';
 
@@ -13,7 +13,7 @@ if (process.argv.includes('--inspect')) {
   process.stdout.write(JSON.stringify(inspection ?? { t: 'error', code: 'unavailable' }) + '\n');
 } else {
   const path = ipcPath(clientHome(), 'host');
-  privatePath(path);
+  checkIpcEndpoint(path);
   const socket = connect(path);
   const stop = () => {
     socket.destroy();

@@ -39,10 +39,22 @@ if (port !== undefined && (!Number.isInteger(port) || port < 1 || port > 65535))
 const daemon = await startDaemon({
   version,
   ...(port !== undefined ? { port } : {}),
+  // The private control channel's `shutdown` request; the daemon stops itself first.
+  onShutdown: () => {
+    console.log('shutdown requested over host control — sessions become interrupted');
+    process.exit(0);
+  },
 });
 console.log(`puddled ${version} listening on http://127.0.0.1:${daemon.port}`);
 
-for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+// Windows delivers no SIGTERM from another process (that is TerminateProcess);
+// closing a --foreground console sends SIGHUP and Ctrl-Break SIGBREAK, each
+// with a few seconds' grace.
+const signals: NodeJS.Signals[] =
+  process.platform === 'win32'
+    ? ['SIGINT', 'SIGTERM', 'SIGBREAK', 'SIGHUP']
+    : ['SIGINT', 'SIGTERM'];
+for (const signal of signals) {
   process.on(signal, () => {
     console.log(`${signal} received — shutting down (sessions become interrupted)`);
     void daemon.stop().then(() => process.exit(0));

@@ -86,8 +86,17 @@ async function openTarget(host: string | undefined) {
   };
 }
 
-/** Keep the process alive until Ctrl-C; second Ctrl-C hard-exits. */
-function runUntilInterrupted(stop: () => Promise<void>, farewell: string): Promise<void> {
+/**
+ * Keep the process alive until Ctrl-C; second Ctrl-C hard-exits. `request`
+ * receives the trigger for a launcher `shutdown` request, Windows' stand-in
+ * for SIGTERM, which there cannot reach another process. Closing a Windows
+ * console sends SIGHUP (Ctrl-Break SIGBREAK) with a few seconds' grace.
+ */
+function runUntilInterrupted(
+  stop: () => Promise<void>,
+  farewell: string,
+  request?: (trigger: () => void) => void,
+): Promise<void> {
   return new Promise((resolve) => {
     let stopping = false;
     process.on('SIGINT', () => {
@@ -99,6 +108,16 @@ function runUntilInterrupted(stop: () => Promise<void>, farewell: string): Promi
     process.on('SIGTERM', () => {
       void stop().then(resolve);
     });
+    const quietStop = () => {
+      if (stopping) return;
+      stopping = true;
+      void stop().then(resolve);
+    };
+    request?.(quietStop);
+    if (process.platform === 'win32') {
+      process.on('SIGHUP', quietStop);
+      process.on('SIGBREAK', quietStop);
+    }
   });
 }
 
@@ -311,6 +330,11 @@ export async function run(command: Command): Promise<number> {
             stdout: process.stdout,
             stderr: process.stderr,
             onResize: (cb) => {
+              // Windows consoles raise no SIGWINCH; the TTY stream reports resizes.
+              if (process.platform === 'win32') {
+                process.stdout.on('resize', cb);
+                return () => process.stdout.off('resize', cb);
+              }
               process.on('SIGWINCH', cb);
               return () => process.off('SIGWINCH', cb);
             },
@@ -423,6 +447,15 @@ async function runCockpit(
     );
   };
 
+  // `puddle kill`/`refresh` on Windows ask over the launcher pipe instead of SIGTERM.
+  let stopRequested: (() => void) | undefined;
+  let stopPending = false;
+  const onShutdownRequest = () => {
+    logger.info('stop requested — closing this cockpit');
+    if (stopRequested) stopRequested();
+    else stopPending = true;
+  };
+
   let cockpit: RunningCockpit;
   try {
     const common = {
@@ -431,12 +464,18 @@ async function runCockpit(
       confirmDaemonUpgrade,
       logger,
       onRefreshRequest,
+      onShutdownRequest,
       refreshId: process.env.PUDDLE_REFRESH_ID,
     };
     cockpit =
       command.target === 'local'
         ? await startLocal(common)
-        : await connectRemote({ ...common, host: command.target });
+        : await connectRemote({
+            ...common,
+            host: command.target,
+            // No terminal, and on Windows no ssh master: authenticate without prompts.
+            ...(detached && process.platform === 'win32' ? { sshBatchMode: true } : {}),
+          });
   } catch (err) {
     if (err instanceof CliError) {
       writeCockpitRecord({
@@ -476,6 +515,10 @@ async function runCockpit(
     cockpit.daemonLifetime === 'cockpit'
       ? `cockpit closed — daemon data remains on ${where}; interrupted sessions can resume on the next launch`
       : `cockpit closed — sessions keep running on ${where}`,
+    (trigger) => {
+      stopRequested = trigger;
+      if (stopPending) trigger();
+    },
   );
   return 0;
 }

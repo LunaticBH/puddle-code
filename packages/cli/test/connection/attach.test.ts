@@ -20,10 +20,24 @@ describe('puddle attach', () => {
   let sessionId: string;
 
   beforeAll(async () => {
+    // A Node agent, so attach is exercised on every platform: banner, READY
+    // for the waiting_input detector, then stdin echoed back.
+    const agent = join(mkdtempSync(join(tmpdir(), 'puddle-cli-attach-agent-')), 'agent.mjs');
+    writeFileSync(
+      agent,
+      "process.stdout.write('LAUNCH\\nREADY\\n');\nprocess.stdin.pipe(process.stdout);\n",
+    );
     daemon = await startDaemon({
       home: mkdtempSync(join(tmpdir(), 'puddle-cli-attach-')),
       port: 0,
-      adapters: [fakeAdapter()],
+      adapters: [
+        {
+          ...fakeAdapter(),
+          binary: process.execPath,
+          launchArgs: () => [agent],
+          resumeArgs: () => [agent],
+        },
+      ],
       version: 'attach-test',
       statusQuietMs: 150,
     });

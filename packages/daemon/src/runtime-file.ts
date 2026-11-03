@@ -1,4 +1,5 @@
-import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { renameWithRetrySync } from '@puddle/shared/node/platform';
 import type { PuddlePaths } from './paths.js';
 
 /**
@@ -16,11 +17,14 @@ export interface RuntimeInfo {
   pid: number;
 }
 
-/** Record the live port atomically (temp + rename) so a reader never sees a half-write. */
+/**
+ * Record the live port atomically (temp + rename) so a reader never sees a
+ * half-write. Windows retries the replacement while a reader holds the file.
+ */
 export function writeRuntime(paths: PuddlePaths, info: RuntimeInfo): void {
   const tmp = `${paths.runtimeFile}.${info.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(info, null, 2) + '\n', { mode: 0o600 });
-  renameSync(tmp, paths.runtimeFile);
+  renameWithRetrySync(tmp, paths.runtimeFile);
 }
 
 /** The recorded live port, or null when the file is absent or malformed. */

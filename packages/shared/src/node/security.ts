@@ -38,6 +38,18 @@ export function privatePath(path: string, directory = false): void {
   }
 }
 
+/**
+ * Check an `ipcPath` endpoint before connecting to it. A Unix socket is
+ * checked like any private file. A Windows named pipe has no filesystem
+ * metadata to check, and a stat would open it as a client: its privacy comes
+ * from the nonce in its name, which only readers of the home can know. A
+ * missing pipe surfaces as ENOENT from the connect itself.
+ */
+export function checkIpcEndpoint(path: string, platform: NodeJS.Platform = process.platform): void {
+  if (platform === 'win32') return;
+  privatePath(path);
+}
+
 export function privateDirectory(path: string): void {
   mkdirSync(path, { recursive: true, mode: 0o700 });
   privatePath(path, true);

@@ -1,5 +1,10 @@
 import { readdirSync, readFileSync, rmSync } from 'node:fs';
 import { atomicPrivateJson, privateDirectory } from '@puddle/shared/node';
+import {
+  isPidAlive as processAlive,
+  listWindowsProcesses,
+  type WindowsProcess,
+} from '@puddle/shared/node/platform';
 import { join } from 'node:path';
 import { clientHome } from './paths.js';
 
@@ -100,23 +105,55 @@ export function listCockpitRecords(): CockpitRecord[] {
   return records.sort((a, b) => a.target.localeCompare(b.target));
 }
 
-/** Signal-0 probe; embeddable (no TTY, no console) so it may live here. */
-export function isPidAlive(pid: number): boolean {
+/**
+ * Signal-0 probe; embeddable (no TTY, no console) so it may live here. On
+ * Windows EPERM means alive: the process exists but runs elevated or as
+ * another user.
+ */
+export function isPidAlive(pid: number, platform: NodeJS.Platform = process.platform): boolean {
+  return processAlive(pid, platform);
+}
+
+/**
+ * Windows recycles pids quickly, so a live pid proves little there: the
+ * process must also have been created no later than the record it claims
+ * (with a little slack for clock rounding). Null when the process table is
+ * unavailable. POSIX trusts the pid, as it always has.
+ */
+export async function isRecordedProcess(
+  record: Pick<CockpitRecord, 'pid' | 'startedAt'>,
+  platform: NodeJS.Platform = process.platform,
+  list: () => Promise<readonly WindowsProcess[]> = listWindowsProcesses,
+): Promise<boolean | null> {
+  if (platform !== 'win32') return true;
+  let processes: readonly WindowsProcess[];
   try {
-    process.kill(pid, 0);
-    return true;
+    processes = await list();
   } catch {
-    return false;
+    return null;
   }
+  const entry = processes.find((candidate) => candidate.pid === record.pid);
+  const started = Date.parse(record.startedAt);
+  return (
+    entry !== undefined &&
+    entry.createdAtMs !== null &&
+    Number.isFinite(started) &&
+    entry.createdAtMs <= started + 2_000
+  );
 }
 
 /**
  * Is the record's cockpit actually there? 'running' requires the process to
  * be alive AND the recorded origin to echo the recorded nonce — identity,
- * never reachability alone.
+ * never reachability alone. On Windows a pid that now names a younger
+ * process means the cockpit is gone.
  */
-export async function checkCockpit(record: CockpitRecord): Promise<CockpitLiveness> {
-  if (!isPidAlive(record.pid)) return 'dead';
+export async function checkCockpit(
+  record: CockpitRecord,
+  platform: NodeJS.Platform = process.platform,
+): Promise<CockpitLiveness> {
+  if (!isPidAlive(record.pid, platform)) return 'dead';
+  if ((await isRecordedProcess(record, platform)) === false) return 'dead';
   if (record.status === 'starting') return 'starting';
   if (record.status !== 'ready' || record.origin === undefined || record.nonce === undefined) {
     return 'unverified';

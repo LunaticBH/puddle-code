@@ -7,6 +7,7 @@ import {
   checkCockpit,
   cockpitLogPath,
   cockpitRecordPath,
+  isRecordedProcess,
   listCockpitRecords,
   readCockpitRecord,
   removeCockpitRecord,
@@ -77,5 +78,24 @@ describe('cockpit registry', () => {
     expect(await checkCockpit(record({ origin, nonce: 'the-nonce' }))).toBe('running');
     // Still bootstrapping → starting (no origin to verify yet).
     expect(await checkCockpit(record({ status: 'starting' }))).toBe('starting');
+  });
+
+  it('on Windows, trusts a live pid only for a process no younger than its record', async () => {
+    const startedAt = '2026-11-03T12:00:00.000Z';
+    const table = (createdAtMs: number | null) => async () => [
+      { pid: 77, ppid: 1, name: 'node.exe', command: 'node', commandLine: null, createdAtMs },
+    ];
+    const at = Date.parse(startedAt);
+    expect(await isRecordedProcess({ pid: 77, startedAt }, 'win32', table(at - 800))).toBe(true);
+    // Recycled: the pid now names a process started after the cockpit recorded itself.
+    expect(await isRecordedProcess({ pid: 77, startedAt }, 'win32', table(at + 60_000))).toBe(
+      false,
+    );
+    expect(await isRecordedProcess({ pid: 78, startedAt }, 'win32', table(at))).toBe(false);
+    expect(await isRecordedProcess({ pid: 77, startedAt }, 'win32', table(null))).toBe(false);
+    // Unknowable without the process table; POSIX keeps trusting the pid.
+    const broken = () => Promise.reject(new Error('PowerShell blocked'));
+    expect(await isRecordedProcess({ pid: 77, startedAt }, 'win32', broken)).toBeNull();
+    expect(await isRecordedProcess({ pid: 77, startedAt }, 'linux', broken)).toBe(true);
   });
 });

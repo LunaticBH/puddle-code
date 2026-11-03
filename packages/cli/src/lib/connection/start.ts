@@ -26,6 +26,8 @@ export interface StartOptions {
   /** POST /cockpit/refresh (the UI's refresh button) invokes this — the CLI
    *  layer supplies the process-spawning behaviour; lib stays process-free. */
   onRefreshRequest?: (refreshId: string) => void;
+  /** A launcher `shutdown` request (Windows `puddle kill`); requires onRefreshRequest. */
+  onShutdownRequest?: () => void;
   refreshId?: string;
 }
 
@@ -67,7 +69,12 @@ export async function startLocal(opts: StartOptions): Promise<RunningCockpit> {
       avoidPort: endpoint.port, // never squat the daemon's own port
       target: { host: '127.0.0.1', port: endpoint.port },
       ...(opts.onRefreshRequest !== undefined
-        ? { control: { onRefresh: opts.onRefreshRequest } }
+        ? {
+            control: {
+              onRefresh: opts.onRefreshRequest,
+              ...(opts.onShutdownRequest ? { onShutdown: opts.onShutdownRequest } : {}),
+            },
+          }
         : {}),
       localSync: { file: join(clientHome(), 'local-sync.json') },
       fileManager: localFileManager(),

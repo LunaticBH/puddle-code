@@ -7,7 +7,8 @@ import {
   remoteOriginSchema,
   remoteSecretSchema,
 } from '@puddle/shared';
-import { LocalTransport } from '../lib/transport/local.js';
+import { WINDOWS_REMOTE_ACCESS_UNSUPPORTED } from '../lib/host/remote-access.js';
+import { isLocalWindows, LocalTransport } from '../lib/transport/local.js';
 import { SshTransport } from '../lib/transport/ssh.js';
 import { hostPaths } from '../lib/paths.js';
 import { CliError } from '../lib/types.js';
@@ -116,6 +117,13 @@ async function registrationCode(): Promise<string> {
 export async function runRemote(command: RemoteCommand): Promise<number> {
   const transport = command.host ? new SshTransport(command.host) : new LocalTransport();
   try {
+    if (isLocalWindows(transport)) {
+      throw new CliError(
+        'unsupported_platform',
+        WINDOWS_REMOTE_ACCESS_UNSUPPORTED,
+        'manage a Linux or macOS host instead: puddle remote <action> user@host',
+      );
+    }
     if (transport instanceof SshTransport) await transport.open();
     const base = `${hostPaths.current}/bin/node ${hostPaths.current}/daemon/connector.mjs`;
     const check = await transport.exec(`test -f ${hostPaths.current}/daemon/connector.mjs`);

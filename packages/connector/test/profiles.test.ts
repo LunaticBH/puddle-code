@@ -47,8 +47,11 @@ it('keeps two accounts, invitations, approvals and recovery independent on one h
   cleanups.push(() => manager.close());
   const first = await inspectConnector(directory, one);
   const second = await inspectConnector(directory, two);
+  // The second profile's endpoint must survive the first one's recovery. A
+  // Unix socket proves it by inode; a Windows pipe has no identity to stat (a
+  // stat opens it as a client), so there the live status request below does.
   const secondSocket = ipcPath(directory, `remote-${two}`);
-  const secondInode = statSync(secondSocket).ino;
+  const secondInode = process.platform === 'win32' ? 0 : statSync(secondSocket).ino;
   expect(first.host).not.toBe(second.host);
   expect(first.peer).not.toBe(second.peer);
   const devicesOne = new DeviceStore(profileDirectory(directory, one));
@@ -77,7 +80,8 @@ it('keeps two accounts, invitations, approvals and recovery independent on one h
     },
     { timeout: 3000 },
   );
-  expect(statSync(secondSocket).ino).toBe(secondInode);
+  if (process.platform !== 'win32') expect(statSync(secondSocket).ino).toBe(secondInode);
+  expect((await administrativeRequest(directory, { t: 'status' }, two)).host).toBe(second.host);
   expect((await inspectConnector(directory, two)).peer).toBe(second.peer);
   await administrativeRequest(directory, { t: 'delete_registration' }, one);
   expect((await inspectConnector(directory, one)).configured).toBe(false);
@@ -122,7 +126,7 @@ it('deletes legacy registrations, revokes their browsers, and retires the relay 
   devices.close();
   const manager = await startConnectorManager(directory);
   cleanups.push(() => manager.close());
-  expect(statSync(directory).mode & 0o777).toBe(0o700);
+  if (process.platform !== 'win32') expect(statSync(directory).mode & 0o777).toBe(0o700);
   expect(existsSync(join(legacy, 'config.json'))).toBe(false);
   const migrated = new DeviceStore(legacy);
   try {

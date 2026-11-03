@@ -41,7 +41,11 @@ export interface UiServerOptions {
   /** Vite fronts this same gateway at its own listener port. */
   browserPort?: number;
   refreshId?: string;
-  control?: { onRefresh: (refreshId: string) => void };
+  control?: {
+    onRefresh: (refreshId: string) => void;
+    /** A launcher `shutdown` request: `puddle kill`/`refresh` on Windows, which has no SIGTERM. */
+    onShutdown?: () => void;
+  };
   localSync?: LocalSyncOptions;
   remoteAccess?: RemoteAccessControl;
   fileManager?: LocalFileManager;
@@ -200,7 +204,12 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
   const bridge = new WsBridge(browsers, authority, target);
   const createInvitation = () =>
     `${origin}/${opts.identity === 'local' ? '' : `?host=${encodeURIComponent(opts.identity)}`}#invite=${browsers.invite()}`;
-  const launcher = await startLauncher(home, `${opts.identity}:${origin}`, createInvitation);
+  const launcher = await startLauncher(
+    home,
+    `${opts.identity}:${origin}`,
+    createInvitation,
+    opts.control?.onShutdown,
+  );
   return {
     port,
     origin,
@@ -224,6 +233,12 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
   };
 }
 
+/**
+ * Windows has no privileged ports: EACCES there means a port inside a range
+ * that Hyper-V, WSL or Docker reserved, which is as taken as EADDRINUSE.
+ */
+const TAKEN = new Set(process.platform === 'win32' ? ['EADDRINUSE', 'EACCES'] : ['EADDRINUSE']);
+
 async function listen(
   server: Server,
   startPort: number,
@@ -236,7 +251,7 @@ async function listen(
     const ok = await new Promise<boolean>((resolve, rejectListen) => {
       const onError = (err: NodeJS.ErrnoException) => {
         server.off('listening', onListening);
-        if (err.code === 'EADDRINUSE') resolve(false);
+        if (TAKEN.has(err.code ?? '')) resolve(false);
         else rejectListen(err);
       };
       const onListening = () => {

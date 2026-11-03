@@ -38,9 +38,13 @@ export const cockpitRegistrationCheckSchema = z
   .object({ service: remoteOriginSchema, code: remoteSecretSchema })
   .strict();
 
-/** Deliberately excludes routing credentials, account tokens and host private keys. */
+/**
+ * Deliberately excludes routing credentials, account tokens and host private keys.
+ * `unsupported` (protocol 25.7): the host's platform has no connector
+ * supervision yet (Windows hosts, docs/windows.md).
+ */
 export const cockpitRemoteStatusSchema = z.object({
-  availability: z.enum(['ready', 'not_installed', 'upgrade_required']),
+  availability: z.enum(['ready', 'not_installed', 'upgrade_required', 'unsupported']),
   configured: z.boolean(),
   enabled: z.boolean(),
   connected: z.boolean(),

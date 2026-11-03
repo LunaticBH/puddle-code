@@ -9,6 +9,8 @@ const unit = (value: string) =>
   '"' + value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%') + '"';
 export function supervisorKind(home: string): 'systemd' | 'launchd' {
   const kind = readFileSync(join(home, 'supervisor'), 'utf8').trim();
+  // The Windows `detached` supervisor has no connector counterpart in v1.
+  if (kind === 'detached') throw new Error('Remote access is not supported on Windows hosts yet.');
   if (kind !== 'systemd' && kind !== 'launchd')
     throw new Error(
       'Persistent daemon supervision is required. Configure an external supervisor and use remote enable --foreground, then remote run.',

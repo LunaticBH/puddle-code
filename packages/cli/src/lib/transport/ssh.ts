@@ -1,8 +1,9 @@
 import { Duplex } from 'node:stream';
-import { spawn } from 'node:child_process';
+import type { ChildProcess, SpawnOptions } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import { clientHome } from '../paths.js';
 import { CliError } from '../types.js';
+import { spawnClient } from './spawn.js';
 import type { ExecOptions, ExecResult, Transport } from './transport.js';
 
 /** A remote command whose SSH channel deliberately stays open with it. */
@@ -25,6 +26,11 @@ export interface SshOptions {
    * The CLI leaves this unset and keeps using its inherited terminal.
    */
   askpassProgram?: string;
+  /**
+   * Never prompt (`-o BatchMode=yes`): for a Windows background cockpit,
+   * which has no terminal and, without ControlMaster, no master to reuse.
+   */
+  batchMode?: boolean;
 }
 
 /**
@@ -43,6 +49,7 @@ export class SshTransport implements Transport {
   private readonly controlArgs: string[];
   private readonly keepaliveArgs: string[];
   private readonly askpassProgram: string | undefined;
+  private readonly batchMode: boolean;
 
   constructor(
     readonly host: string,
@@ -52,6 +59,7 @@ export class SshTransport implements Transport {
     this.ssh = opts.sshBinary ?? 'ssh';
     this.scp = opts.scpBinary ?? 'scp';
     this.askpassProgram = opts.askpassProgram;
+    this.batchMode = opts.batchMode ?? false;
     const platform = opts.platform ?? process.platform;
     if (platform === 'win32') {
       // Windows OpenSSH has no multiplexing: every spawn may prompt again.
@@ -75,15 +83,38 @@ export class SshTransport implements Transport {
     // them an idle NAT/firewall silently drops the connection and the tunnel
     // dies on every quiet spell — 15s×3 detects a dead peer inside a minute.
     this.keepaliveArgs = ['-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3'];
+    if (this.batchMode) this.keepaliveArgs.push('-o', 'BatchMode=yes');
   }
 
   get hasControlMaster(): boolean {
     return this.controlArgs.length > 0;
   }
 
+  /**
+   * Whether ssh children start without a console window. Only a client with
+   * no terminal of its own (a background cockpit, a graphical embedder) hides
+   * them: on Windows a hidden child gets no console, so it could not prompt
+   * on the user's terminal. Ignored outside Windows.
+   */
+  get hidesWindows(): boolean {
+    return this.batchMode || this.askpassProgram !== undefined;
+  }
+
   /** Argv prefix every ssh/scp spawn shares. */
   args(...rest: string[]): string[] {
     return [...this.controlArgs, ...this.keepaliveArgs, ...rest];
+  }
+
+  /**
+   * Every ssh/scp child, with this client's environment. The program is
+   * resolved for the OS this runs on, whichever platform the argv targets.
+   */
+  private spawn(file: string, args: string[], options: SpawnOptions): ChildProcess {
+    return spawnClient(file, args, {
+      ...options,
+      env: this.spawnEnv(),
+      ...(this.hidesWindows ? { windowsHide: true } : {}),
+    });
   }
 
   /**
@@ -110,11 +141,10 @@ export class SshTransport implements Transport {
    */
   open(): Promise<void> {
     return new Promise((resolve, reject) => {
-      const child = spawn(this.ssh, this.args(this.host, 'true'), {
+      const child = this.spawn(this.ssh, this.args(this.host, 'true'), {
         // A GUI has no useful inherited terminal; OpenSSH calls its askpass
         // helper instead. The terminal CLI keeps byte-for-byte inheritance.
         stdio: this.askpassProgram === undefined ? 'inherit' : 'ignore',
-        env: this.spawnEnv(),
       });
       child.on('error', (err) =>
         reject(new CliError('ssh_unreachable', `could not run ${this.ssh}: ${err.message}`)),
@@ -138,9 +168,8 @@ export class SshTransport implements Transport {
   isAlive(): Promise<boolean> {
     if (!this.hasControlMaster) return Promise.resolve(true);
     return new Promise((resolve) => {
-      const child = spawn(this.ssh, this.args('-O', 'check', this.host), {
+      const child = this.spawn(this.ssh, this.args('-O', 'check', this.host), {
         stdio: 'ignore',
-        env: this.spawnEnv(),
       });
       child.on('error', () => resolve(false));
       child.on('close', (code) => resolve(code === 0));
@@ -159,9 +188,8 @@ export class SshTransport implements Transport {
     if (!this.hasControlMaster) return Promise.resolve();
     return new Promise((resolve) => {
       const spec = `${localPort}:127.0.0.1:${remotePort}`;
-      const child = spawn(this.ssh, this.args('-O', 'cancel', '-L', spec, this.host), {
+      const child = this.spawn(this.ssh, this.args('-O', 'cancel', '-L', spec, this.host), {
         stdio: 'ignore',
-        env: this.spawnEnv(),
       });
       child.on('error', () => resolve());
       child.on('close', () => resolve());
@@ -170,10 +198,13 @@ export class SshTransport implements Transport {
 
   exec(command: string, opts: ExecOptions = {}): Promise<ExecResult> {
     return new Promise((resolve) => {
-      const child = spawn(this.ssh, this.args(this.host, '--', `sh -c ${shellQuote(command)}`), {
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env: this.spawnEnv(),
-      });
+      const child = this.spawn(
+        this.ssh,
+        this.args(this.host, '--', `sh -c ${shellQuote(command)}`),
+        {
+          stdio: ['pipe', 'pipe', 'pipe'],
+        },
+      );
       let stdout = '';
       let stderr = '';
       let timer: NodeJS.Timeout | undefined;
@@ -181,12 +212,12 @@ export class SshTransport implements Transport {
         timer = setTimeout(() => child.kill('SIGKILL'), opts.timeoutMs);
         timer.unref();
       }
-      child.stdout.on('data', (chunk: Buffer) => {
+      child.stdout!.on('data', (chunk: Buffer) => {
         const text = chunk.toString();
         stdout += text;
         opts.onStdout?.(text);
       });
-      child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
+      child.stderr!.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
       child.on('error', (err) => {
         if (timer) clearTimeout(timer);
         resolve({ code: -1, stdout, stderr: stderr + String(err) });
@@ -195,9 +226,9 @@ export class SshTransport implements Transport {
         if (timer) clearTimeout(timer);
         resolve({ code: code ?? -1, stdout, stderr });
       });
-      child.stdin.on('error', () => {}); // EPIPE is reported by the command's exit status.
-      if (opts.stdin !== undefined) child.stdin.end(opts.stdin);
-      else child.stdin.end();
+      child.stdin!.on('error', () => {}); // EPIPE is reported by the command's exit status.
+      if (opts.stdin !== undefined) child.stdin!.end(opts.stdin);
+      else child.stdin!.end();
     });
   }
 
@@ -207,15 +238,14 @@ export class SshTransport implements Transport {
    * children when an SSH exec channel closes.
    */
   runAttached(command: string): RunningSshCommand {
-    const child = spawn(this.ssh, this.args(this.host, '--', `sh -c ${shellQuote(command)}`), {
+    const child = this.spawn(this.ssh, this.args(this.host, '--', `sh -c ${shellQuote(command)}`), {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: this.spawnEnv(),
     });
     let stdout = '';
     let stderr = '';
     const result = new Promise<ExecResult>((resolve) => {
-      child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString()));
-      child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
+      child.stdout!.on('data', (chunk: Buffer) => (stdout += chunk.toString()));
+      child.stderr!.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
       child.on('error', (err) => resolve({ code: -1, stdout, stderr: stderr + String(err) }));
       child.on('close', (code) => resolve({ code: code ?? -1, stdout, stderr }));
     });
@@ -235,10 +265,13 @@ export class SshTransport implements Transport {
   async copyTo(localPath: string, destPath: string): Promise<void> {
     await this.exec(`mkdir -p $(dirname ${destPath})`, { timeoutMs: 15_000 });
     await new Promise<void>((resolve, reject) => {
-      const child = spawn(this.scp, [...this.controlArgs, localPath, `${this.host}:${destPath}`], {
-        stdio: ['ignore', 'ignore', 'inherit'],
-        env: this.spawnEnv(),
-      });
+      const child = this.spawn(
+        this.scp,
+        [...this.controlArgs, localPath, `${this.host}:${destPath}`],
+        {
+          stdio: ['ignore', 'ignore', 'inherit'],
+        },
+      );
       child.on('error', reject);
       child.on('close', (code) => {
         if (code === 0) resolve();
@@ -248,16 +281,13 @@ export class SshTransport implements Transport {
   }
 
   openChannel(command: string): Duplex {
-    const child = spawn(
+    const child = this.spawn(
       this.ssh,
       this.args('-T', this.host, '--', `sh -c ${shellQuote(command)}`),
-      {
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env: this.spawnEnv(),
-      },
+      { stdio: ['pipe', 'pipe', 'pipe'] },
     );
-    const stream = Duplex.from({ readable: child.stdout, writable: child.stdin });
-    child.stderr.resume(); // diagnostics must not enter the credential protocol
+    const stream = Duplex.from({ readable: child.stdout!, writable: child.stdin! });
+    child.stderr!.resume(); // diagnostics must not enter the credential protocol
     child.once('error', () => stream.destroy(new Error('SSH control channel failed')));
     child.once('close', () => stream.destroy());
     stream.once('close', () => child.kill('SIGTERM'));

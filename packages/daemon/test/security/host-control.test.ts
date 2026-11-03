@@ -12,13 +12,16 @@ const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => {
   for (const close of cleanup.splice(0).reverse()) await close();
 });
-async function fixture() {
+async function fixture(opts: { onShutdown?: () => void; ready?: () => boolean } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'puddle-control-test-'));
   let clock = 0;
   const registry = new LeaseRegistry(() => clock);
   cleanup.push(() => registry.dispose());
-  const info = () => ({ port: 7434, version: { version: 'fixture', protocol: PROTOCOL_VERSION } });
-  cleanup.push(await startHostControl(home, registry, info));
+  const info = () =>
+    opts.ready?.() === false
+      ? null
+      : { port: 7434, version: { version: 'fixture', protocol: PROTOCOL_VERSION } };
+  cleanup.push(await startHostControl(home, registry, info, opts.onShutdown));
   const socket = connect(ipcPath(home, 'host'));
   cleanup.push(() => {
     socket.destroy();
@@ -73,11 +76,36 @@ describe('private host control', () => {
     await expect(startHostControl(f.home, f.registry, f.info)).rejects.toThrow('already active');
   });
 
-  it('answers shutdown as an unsupported control request for now', async () => {
+  it('answers shutdown as a pre-25.7 daemon would without a shutdown handler', async () => {
     const f = await fixture();
     const received = reply(f.socket);
     f.socket.write(JSON.stringify({ t: 'shutdown' }) + '\n');
     expect(await received).toEqual({ t: 'error', code: 'invalid_control' });
+  });
+
+  it('acknowledges shutdown before stopping, and revokes the requester’s lease', async () => {
+    let requested = 0;
+    const f = await fixture({ onShutdown: () => requested++ });
+    const granted = reply(f.socket);
+    f.socket.write(JSON.stringify({ t: 'open' }) + '\n');
+    const grant = await granted;
+    if (grant.t !== 'authority' || !grant.token) throw new Error('Missing authority');
+    const closed = new Promise<void>((resolve) => f.socket.once('close', () => resolve()));
+    const acknowledged = reply(f.socket);
+    f.socket.write(JSON.stringify({ t: 'shutdown' }) + '\n');
+    expect(await acknowledged).toEqual({ t: 'shutting_down' });
+    await closed;
+    expect(requested).toBe(1);
+    expect(f.registry.valid(grant.token)).toBe(false);
+  });
+
+  it('refuses shutdown while the daemon is still starting', async () => {
+    let requested = 0;
+    const f = await fixture({ onShutdown: () => requested++, ready: () => false });
+    const received = reply(f.socket);
+    f.socket.write(JSON.stringify({ t: 'shutdown' }) + '\n');
+    expect(await received).toEqual({ t: 'error', code: 'unavailable' });
+    expect(requested).toBe(0);
   });
 
   it.skipIf(process.platform === 'win32')(

@@ -1,13 +1,7 @@
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  readlinkSync,
-  renameSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { PROTOCOL_VERSION } from '@puddle/shared';
+import { readCurrentVersion } from './current-link.js';
 import { findInstalledDesktopApp } from './desktop-update.js';
 import { clientHome } from '../paths.js';
 import { cliVersion } from '../version.js';
@@ -212,15 +206,6 @@ export function recordDesktopInstallation(
   }
 }
 
-function daemonVersion(home: string): string | undefined {
-  try {
-    const target = readlinkSync(join(home, 'bin', 'current'));
-    return /(?:^|\/)versions\/([^/\s]+)$/.exec(target)?.[1];
-  } catch {
-    return undefined;
-  }
-}
-
 function daemonProtocol(home: string, version: string): SpeakingProtocol | undefined {
   try {
     const raw = readFileSync(join(home, 'bin', 'current', 'PROTOCOL'), 'utf8').trim();
@@ -255,7 +240,8 @@ export async function installedComponentVersions(
     protocol: PROTOCOL_VERSION,
   };
 
-  const installedDaemon = daemonVersion(home);
+  // The link lives on this machine's filesystem, whichever platform is being described.
+  const installedDaemon = readCurrentVersion(home);
   const installedDaemonProtocol =
     installedDaemon === undefined ? undefined : daemonProtocol(home, installedDaemon);
   const connectorProtocol =
