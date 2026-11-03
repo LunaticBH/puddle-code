@@ -1,0 +1,5 @@
+# Keep LF in every checkout. Windows clones with core.autocrlf=true would
+# otherwise embed CRLF shell installers and fail prettier/eslint checks.
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
