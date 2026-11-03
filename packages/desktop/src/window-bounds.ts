@@ -22,11 +22,17 @@ export interface DisplayGeometry {
 
 const PREFERRED = { width: 1440, height: 900 };
 
-/** Initial cockpit geometry; macOS always meets the work area's bottom edge. */
+/**
+ * Initial cockpit geometry; macOS always meets the work area's bottom edge.
+ * Windows laptops at 125-150% scaling have work areas of roughly 1280x680 to
+ * 1536x816 device-independent pixels, so the preferred size is clamped and
+ * centred there too.
+ */
 export function initialCockpitBounds(
   platform: NodeJS.Platform,
   workArea?: DisplayWorkArea,
 ): WindowBounds {
+  if (platform === 'win32' && workArea !== undefined) return centredBounds(workArea);
   if (platform !== 'darwin' || workArea === undefined) return PREFERRED;
   const width = Math.min(PREFERRED.width, workArea.width);
   const height = Math.min(PREFERRED.height, workArea.height);
@@ -38,6 +44,17 @@ export function initialCockpitBounds(
     // two-pixel strip after integer centring (floor above, remainder below).
     x: workArea.x + Math.floor((workArea.width - width) / 2),
     y: workArea.y + workArea.height - height,
+  };
+}
+
+function centredBounds(workArea: DisplayWorkArea): WindowBounds {
+  const width = Math.min(PREFERRED.width, workArea.width);
+  const height = Math.min(PREFERRED.height, workArea.height);
+  return {
+    width,
+    height,
+    x: workArea.x + Math.floor((workArea.width - width) / 2),
+    y: workArea.y + Math.floor((workArea.height - height) / 2),
   };
 }
 

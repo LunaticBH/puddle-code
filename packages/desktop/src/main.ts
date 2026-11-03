@@ -40,6 +40,7 @@ import { restoredCockpitBounds, type DisplayGeometry } from './window-bounds.js'
 import { readX11Workspace, restoreX11Workspace } from './x11-workspace.js';
 import { refreshNavigation } from './refresh-navigation.js';
 import { DesktopNotifications } from './notifications.js';
+import { windowsUpdateTarget } from './update-target.js';
 
 /**
  * The desktop shell (SPEC §10): an Electron main process that drives the SAME
@@ -65,6 +66,11 @@ import { DesktopNotifications } from './notifications.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const LOCAL = 'local';
+
+// Windows shows a toast only when the process's AppUserModelID matches the
+// Start Menu shortcut's, which the NSIS installer sets to the appId
+// (electron-builder.yml). It must be set before any notification.
+if (process.platform === 'win32') app.setAppUserModelId('code.puddle.desktop');
 
 const logger: Logger = {
   info: (message) => console.log(`[Puddle] ${message}`),
@@ -114,14 +120,18 @@ function packagedDesktopPath(): string {
 
 function sshAskpass(): Promise<RunningSshAskpass> {
   if (sshAskpassPromise === null) {
+    // ELECTRON_RUN_AS_NODE cannot be trusted to resolve a script inside an
+    // asar archive, so the executable helpers are unpacked at packaging.
+    const unpacked = (file: string) =>
+      app.isPackaged
+        ? join(process.resourcesPath, 'app.asar.unpacked', 'dist', file)
+        : join(here, file);
     const starting = startSshAskpass({
       home: clientHome(),
       electronPath: process.execPath,
-      // ELECTRON_RUN_AS_NODE cannot be trusted to resolve a script inside an
-      // asar archive, so the one executable helper is unpacked at packaging.
-      helperPath: app.isPackaged
-        ? join(process.resourcesPath, 'app.asar.unpacked', 'dist', 'askpass-helper.cjs')
-        : join(here, 'askpass-helper.cjs'),
+      helperPath: unpacked('askpass-helper.cjs'),
+      // Windows OpenSSH needs a real executable; see ssh-askpass-shim.cs.
+      ...(process.platform === 'win32' ? { windowsShimPath: unpacked('ssh-askpass.exe') } : {}),
       prompt: sshAuthPrompter.prompt,
     });
     sshAskpassPromise = starting;
@@ -203,6 +213,13 @@ function raise(win: BrowserWindow): void {
   if (win.isDestroyed()) return;
   if (win.isMinimized()) win.restore();
   win.show();
+  if (process.platform === 'win32') {
+    // Windows' foreground lock would only flash the taskbar button for a
+    // background app (a second launch, a notification click).
+    win.setAlwaysOnTop(true);
+    win.focus();
+    win.setAlwaysOnTop(false);
+  }
   win.focus();
   app.focus({ steal: true });
 }
@@ -240,6 +257,7 @@ function createWindow(
     // measured against a screenshot of the 40px bar this replaces, where y:14
     // put the light centres within a pixel of the name's. The two numbers are
     // one decision: change the bar height and this moves with it.
+    // Windows and Linux keep the native frame and its menu bar.
     ...(process.platform === 'darwin'
       ? {
           titleBarStyle: 'hidden' as const,
@@ -540,6 +558,7 @@ function installTarget(): string | null {
     const bundle = app.getPath('exe').replace(/(\.app)\/Contents\/.*$/, '$1');
     return bundle.endsWith('.app') ? bundle : null;
   }
+  if (process.platform === 'win32') return windowsUpdateTarget(process.execPath);
   return process.env.APPIMAGE ?? null; // set by the AppImage runtime
 }
 
@@ -641,7 +660,10 @@ function buildMenu(): void {
         { label: 'New Window', accelerator: 'CmdOrCtrl+Shift+N', click: openHostPicker },
         { type: 'separator' },
         { role: 'minimize' },
-        { role: 'zoom' },
+        // `zoom` is a macOS role; Windows gets the frame's own maximise button.
+        ...(process.platform === 'win32'
+          ? []
+          : [{ role: 'zoom' } satisfies MenuItemConstructorOptions]),
         ...(process.platform === 'darwin'
           ? [
               { type: 'separator' } satisfies MenuItemConstructorOptions,

@@ -1,5 +1,6 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess, type StdioOptions } from 'node:child_process';
 import { dirname } from 'node:path';
+import { resolveSpawn, setEnv } from '@puddle/shared/node/platform';
 import { CliError, type Logger } from '../lib/types.js';
 import { cliVersion, repoSlug } from '../lib/version.js';
 import {
@@ -19,7 +20,7 @@ export function upgradeCli(version: string | undefined, logger: Logger): Promise
   const spec = `@puddle-code/cli@${version ?? 'latest'}`;
   logger.info(`puddle CLI ${cliVersion()} — asking npm for ${version ?? 'the latest release'}`);
   return new Promise((resolve, reject) => {
-    const child = spawn('npm', ['install', '-g', spec], { stdio: 'inherit' });
+    const child = spawnNpm(['install', '-g', spec], 'inherit');
     child.on('error', () =>
       reject(
         new CliError(
@@ -58,7 +59,7 @@ export async function removeCli(yes: boolean, logger: Logger): Promise<number> {
   // Only an npm-global install can be removed the way it arrived; a repo
   // checkout or a linked dev build is not ours to delete.
   const managed = await new Promise<boolean>((resolve) => {
-    const child = spawn('npm', ['ls', '-g', '@puddle-code/cli', '--depth=0'], { stdio: 'ignore' });
+    const child = spawnNpm(['ls', '-g', '@puddle-code/cli', '--depth=0'], 'ignore');
     child.on('error', () => resolve(false));
     child.on('exit', (code) => resolve(code === 0));
   });
@@ -79,7 +80,7 @@ export async function removeCli(yes: boolean, logger: Logger): Promise<number> {
     return 0;
   }
   return new Promise((resolve, reject) => {
-    const child = spawn('npm', ['uninstall', '-g', '@puddle-code/cli'], { stdio: 'inherit' });
+    const child = spawnNpm(['uninstall', '-g', '@puddle-code/cli'], 'inherit');
     child.on('error', () => reject(new CliError('not_installed', 'npm is not on PATH')));
     child.on('exit', (code) => {
       if (code === 0) {
@@ -89,5 +90,29 @@ export async function removeCli(yes: boolean, logger: Logger): Promise<number> {
         reject(new CliError('not_installed', `npm uninstall exited with ${code ?? 'a signal'}`));
       }
     });
+  });
+}
+
+/**
+ * npm is a batch shim on Windows, which Node no longer starts without a shell.
+ * resolveSpawn runs the shim's script with node.exe instead, so a requested
+ * version never reaches cmd.exe; on POSIX this is a plain spawn('npm').
+ */
+export function spawnNpm(
+  args: string[],
+  stdio: StdioOptions,
+  platform: NodeJS.Platform = process.platform,
+): ChildProcess {
+  const resolved = resolveSpawn('npm', args, { platform });
+  const extra = resolved.env;
+  let env: NodeJS.ProcessEnv | undefined;
+  if (extra !== undefined) {
+    env = { ...process.env };
+    for (const [key, value] of Object.entries(extra)) setEnv(env, key, value, platform);
+  }
+  return spawn(resolved.file, resolved.args, {
+    stdio,
+    ...(resolved.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
+    ...(env !== undefined ? { env } : {}),
   });
 }

@@ -1,11 +1,13 @@
 import { fork } from 'node:child_process';
 import { join } from 'node:path';
+import { nodeBinary } from './node-runtime.mjs';
 
 /** Exercise the shipped runner and both imports without a daemon or agent. */
 export async function smokePuddlang(stage) {
   const child = fork(join(stage, 'daemon/runner.js'), [], {
-    execPath: join(stage, 'bin/node'),
+    execPath: nodeBinary(stage),
     cwd: stage,
+    // On Windows libuv still copies SystemRoot, TEMP and the profile variables.
     env: {},
     execArgv: [],
     stdio: ['ignore', 'ignore', 'pipe', 'ipc'],

@@ -1,13 +1,12 @@
 import { request } from 'node:http';
+import { askpassKind, askpassPrompt } from './askpass-prompt.js';
 
 const endpoint = process.env.PUDDLE_DESKTOP_ASKPASS_URL;
 const token = process.env.PUDDLE_DESKTOP_ASKPASS_TOKEN;
 const target = process.env.PUDDLE_DESKTOP_SSH_TARGET;
-const prompt = process.argv[2] ?? 'SSH authentication';
-const kind =
-  process.env.SSH_ASKPASS_PROMPT === 'confirm' || /\(yes\/no(?:\/[^)]+)?\)\??\s*$/i.test(prompt)
-    ? 'confirm'
-    : 'secret';
+const raw = process.argv[2] ?? 'SSH authentication';
+const kind = askpassKind(raw, process.env);
+const prompt = askpassPrompt(raw);
 
 if (endpoint === undefined || token === undefined || target === undefined) process.exit(1);
 
@@ -51,10 +50,14 @@ call.on('error', () => {
 });
 // OpenSSH can exit while its askpass child is still waiting for an answer.
 // Drop the HTTP request so the desktop also discards its orphaned dialogue.
+// On Windows the parent is ssh-askpass.exe, which watches ssh itself, and a
+// process's recorded parent id never changes there.
 const sshPid = process.ppid;
 const parentCheck = setInterval(() => {
   try {
-    if (sshPid <= 1 || process.ppid !== sshPid) throw new Error('SSH parent exited');
+    if (sshPid <= 1 || (process.platform !== 'win32' && process.ppid !== sshPid)) {
+      throw new Error('SSH parent exited');
+    }
     process.kill(sshPid, 0);
   } catch {
     call.destroy();

@@ -17,6 +17,15 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const version = JSON.parse(readFileSync(join(root, 'packages/cli/package.json'), 'utf8')).version;
+if (process.platform === 'win32') {
+  const { testWindowsCliArchive } = await import('./lib/test-cli-tarball-windows.mjs');
+  await testWindowsCliArchive(
+    root,
+    version,
+    resolve(process.argv[2] ?? join(root, `dist-release/puddle-cli-v${version}-win32-x64.zip`)),
+  );
+  process.exit(0);
+}
 const archive = resolve(
   process.argv[2] ??
     join(root, `dist-release/puddle-cli-v${version}-${process.platform}-${process.arch}.tar.gz`),

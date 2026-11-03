@@ -20,8 +20,28 @@ describe('desktop cockpit launch bounds', () => {
     });
   });
 
-  it('keeps non-macOS launch sizing independent of display geometry', () => {
+  it('keeps Linux launch sizing independent of display geometry', () => {
     expect(initialCockpitBounds('linux')).toEqual({ width: 1440, height: 900 });
+    expect(initialCockpitBounds('linux', { x: 0, y: 0, width: 1280, height: 680 })).toEqual({
+      width: 1440,
+      height: 900,
+    });
+  });
+
+  it('clamps and centres a Windows window inside a scaled laptop work area', () => {
+    expect(initialCockpitBounds('win32', { x: 0, y: 0, width: 1280, height: 680 })).toEqual({
+      x: 0,
+      y: 0,
+      width: 1280,
+      height: 680,
+    });
+    expect(initialCockpitBounds('win32', { x: -1920, y: 0, width: 1920, height: 1040 })).toEqual({
+      x: -1680,
+      y: 70,
+      width: 1440,
+      height: 900,
+    });
+    expect(initialCockpitBounds('win32')).toEqual({ width: 1440, height: 900 });
   });
 });
 

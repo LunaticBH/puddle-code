@@ -12,8 +12,8 @@ allowBuilds:
   '@fortawesome/fontawesome-free': false
   better-sqlite3: true
   electron: true
-  # Windows-installer helper (electron-builder transitive); its postinstall
-  # only fetches Squirrel binaries we don't use — flip on for Windows builds.
+  # Squirrel.Windows helper (electron-builder transitive); its postinstall
+  # only fetches Squirrel binaries. Windows builds use NSIS, so it stays off.
   electron-winstaller: false
   esbuild: true
   node-pty: true

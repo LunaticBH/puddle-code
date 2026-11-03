@@ -7,10 +7,11 @@
  * built web UI is copied under dist/public — one codebase, two downstream
  * builds (SPEC §10).
  */
-import { cpSync, existsSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
+import { compileAskpassShim } from './askpass-shim.mjs';
 
 const pkgRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const repoRoot = resolve(pkgRoot, '..', '..');
@@ -72,6 +73,14 @@ cpSync(join(pkgRoot, 'src/connect-prompt.html'), join(pkgRoot, 'dist/connect-pro
 cpSync(join(pkgRoot, 'src/host-picker.html'), join(pkgRoot, 'dist/host-picker.html'));
 cpSync(join(pkgRoot, 'src/ssh-auth-prompt.html'), join(pkgRoot, 'dist/ssh-auth-prompt.html'));
 cpSync(join(repoRoot, 'scripts/install.sh'), join(pkgRoot, 'dist/install.sh'));
+// .gitattributes keeps it LF, but a checkout made before it may still hold
+// CRLF, which the remote sh that runs it rejects.
+const installer = readFileSync(join(pkgRoot, 'dist/install.sh'), 'utf8');
+if (installer.includes('\r\n')) {
+  writeFileSync(join(pkgRoot, 'dist/install.sh'), installer.replaceAll('\r\n', '\n'));
+}
+// Windows OpenSSH runs SSH_ASKPASS as a real executable (src/ssh-askpass-shim.cs).
+if (process.platform === 'win32') compileAskpassShim(join(pkgRoot, 'dist/ssh-askpass.exe'));
 
 const webDist = join(repoRoot, 'packages/web/dist');
 if (!existsSync(join(webDist, 'index.html'))) {
