@@ -8,9 +8,14 @@ import {
   type RemoteAdminResponse,
 } from '@puddle/shared';
 import { hostPaths } from '../paths.js';
+import { isLocalWindows } from '../transport/local.js';
 import type { Transport } from '../transport/transport.js';
 
 const binary = `${hostPaths.current}/bin/node ${hostPaths.current}/daemon/connector.mjs`;
+
+/** Windows hosts have no connector supervision in v1 (docs/windows.md). */
+export const WINDOWS_REMOTE_ACCESS_UNSUPPORTED =
+  'Remote access is not supported on Windows hosts yet.';
 
 /** Fixed host commands only; browser values travel exclusively through JSON stdin. */
 export class RemoteAccessControl {
@@ -20,6 +25,9 @@ export class RemoteAccessControl {
     availability: CockpitRemoteStatus['availability'];
     canDeleteRegistration: boolean;
   }> {
+    if (isLocalWindows(this.transport)) {
+      return { availability: 'unsupported', canDeleteRegistration: false };
+    }
     const result = await this.transport.exec(
       `if test -f ${hostPaths.current}/daemon/connector.mjs; then ${binary} --version; else exit 44; fi`,
       { timeoutMs: 10_000 },
@@ -61,6 +69,8 @@ export class RemoteAccessControl {
     const request = cockpitRemoteRequestSchema.parse(value);
     profileId.parse(profile);
     const capabilities = await this.capabilities();
+    if (capabilities.availability === 'unsupported')
+      throw new Error(WINDOWS_REMOTE_ACCESS_UNSUPPORTED);
     if (capabilities.availability !== 'ready')
       throw new Error('Upgrade the daemon on this host to manage remote access here.');
     if (request.t === 'delete_registration' && !capabilities.canDeleteRegistration)

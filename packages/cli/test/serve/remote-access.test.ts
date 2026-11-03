@@ -1,6 +1,7 @@
 const profile = 'a'.repeat(10);
 import { describe, expect, it, vi } from 'vitest';
 import { RemoteAccessControl } from '../../src/lib/host/remote-access.js';
+import { LocalTransport } from '../../src/lib/transport/local.js';
 import type { ExecOptions, Transport } from '../../src/lib/transport/transport.js';
 
 function fixture() {
@@ -109,5 +110,21 @@ describe('desktop remote control boundary', () => {
       ).rejects.toThrow();
     }
     expect(exec).not.toHaveBeenCalled();
+  });
+
+  it('reports remote access as unsupported on a Windows host without running anything', async () => {
+    const control = new RemoteAccessControl(new LocalTransport({ platform: 'win32' }));
+    expect(await control.status(profile)).toEqual({
+      availability: 'unsupported',
+      canDeleteRegistration: false,
+      configured: false,
+      enabled: false,
+      connected: false,
+      supervisor: null,
+      devices: [],
+    });
+    await expect(control.request({ t: 'status' }, () => true, profile)).rejects.toThrow(
+      'not supported on Windows hosts',
+    );
   });
 });

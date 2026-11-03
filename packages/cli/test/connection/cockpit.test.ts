@@ -26,24 +26,29 @@ describe('ensureDaemon identity probe', () => {
     delete process.env.PUDDLE_HOME;
   });
 
-  it("refuses to treat a daemon that rejects this host's token as ours", async () => {
-    // Home B: a different token, but config points at daemon A's port — the
-    // shape of the port-collision incident (another cockpit or foreign
-    // daemon answering on the expected port).
-    const homeB = mkdtempSync(join(tmpdir(), 'puddle-cockpit-b-'));
-    mkdirSync(join(homeB, '.puddle'), { recursive: true, mode: 0o700 });
-    writeFileSync(join(homeB, '.puddle', 'token'), 'b'.repeat(64) + '\n');
-    writeFileSync(
-      join(homeB, '.puddle', 'config.json'),
-      JSON.stringify({ port: daemonPort, configVersion: 2 }) + '\n',
-    );
-    process.env.PUDDLE_HOME = join(homeB, '.puddle');
+  // The legacy token-and-port probe exists only for pre-pipe POSIX releases;
+  // Windows finds its daemon solely through the home's private pipe.
+  it.skipIf(process.platform === 'win32')(
+    "refuses to treat a daemon that rejects this host's token as ours",
+    async () => {
+      // Home B: a different token, but config points at daemon A's port — the
+      // shape of the port-collision incident (another cockpit or foreign
+      // daemon answering on the expected port).
+      const homeB = mkdtempSync(join(tmpdir(), 'puddle-cockpit-b-'));
+      mkdirSync(join(homeB, '.puddle'), { recursive: true, mode: 0o700 });
+      writeFileSync(join(homeB, '.puddle', 'token'), 'b'.repeat(64) + '\n');
+      writeFileSync(
+        join(homeB, '.puddle', 'config.json'),
+        JSON.stringify({ port: daemonPort, configVersion: 2 }) + '\n',
+      );
+      process.env.PUDDLE_HOME = join(homeB, '.puddle');
 
-    await expect(ensureDaemon(new LocalTransport(), {})).rejects.toMatchObject({
-      code: 'port_in_use',
-      message: expect.stringContaining('rejects its local'),
-    });
-  });
+      await expect(ensureDaemon(new LocalTransport(), {})).rejects.toMatchObject({
+        code: 'port_in_use',
+        message: expect.stringContaining('rejects its local'),
+      });
+    },
+  );
 
   it("accepts the daemon when the token matches (probe = 'ok')", async () => {
     process.env.PUDDLE_HOME = daemon.paths.home;

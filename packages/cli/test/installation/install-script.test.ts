@@ -49,7 +49,9 @@ function fixture() {
   return { temp, puddleHome, install };
 }
 
-describe('install.sh tree validation', () => {
+// install.sh runs only on POSIX hosts: Windows installs with windows-install.ts
+// (covered by windows-install.test.ts).
+describe.skipIf(process.platform === 'win32')('install.sh tree validation', () => {
   it('creates a private home with an ordinary caller umask', () => {
     const { puddleHome, install } = fixture();
     install();

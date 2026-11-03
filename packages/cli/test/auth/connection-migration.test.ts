@@ -53,7 +53,10 @@ afterEach(async () => {
   if (savedHome === undefined) delete process.env.PUDDLE_HOME;
   else process.env.PUDDLE_HOME = savedHome;
 });
-it('honours --no-upgrade before replacing a legacy host', async () => {
+// Pre-pipe daemons were only ever released for Linux and macOS, so Windows
+// never inspects a legacy host (windows-start.test.ts covers its start path).
+const legacyIt = it.skipIf(process.platform === 'win32');
+legacyIt('honours --no-upgrade before replacing a legacy host', async () => {
   await expect(ensureDaemon(new LocalTransport(), { noUpgrade: true })).rejects.toMatchObject({
     code: 'upgrade_failed',
   });
@@ -61,14 +64,14 @@ it('honours --no-upgrade before replacing a legacy host', async () => {
   expect(statSync(home).mode & 0o777).toBe(0o700);
   expect(readFileSync(join(home, 'token'), 'utf8').trim()).toBe(master);
 });
-it('reports newer protocols without attempting an install', async () => {
+legacyIt('reports newer protocols without attempting an install', async () => {
   major = PROTOCOL_VERSION.major + 1;
   await expect(ensureDaemon(new LocalTransport(), {})).rejects.toMatchObject({
     code: 'cli_outdated',
   });
   expect(install).not.toHaveBeenCalled();
 });
-it('keeps local recovery authority when an upgrade fails', async () => {
+legacyIt('keeps local recovery authority when an upgrade fails', async () => {
   await expect(
     ensureDaemon(new LocalTransport(), { confirmDaemonUpgrade: async () => true }),
   ).rejects.toThrow('installation failed');

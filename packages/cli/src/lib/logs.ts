@@ -1,6 +1,8 @@
-import { hostPaths } from './paths.js';
+import { clientHome, hostPaths } from './paths.js';
+import { isLocalWindows } from './transport/local.js';
 import type { Transport } from './transport/transport.js';
 import { CliError } from './types.js';
+import { showWindowsLogs } from './windows-logs.js';
 
 export interface LogsOptions {
   /** Session id (or unique prefix already resolved by the caller). */
@@ -10,6 +12,8 @@ export interface LogsOptions {
   follow?: boolean;
   /** Where output lines go (the bin passes process.stdout.write). */
   write: (chunk: string) => void;
+  /** Ends a Windows `follow` (embedders and tests; the bin follows until Ctrl-C). */
+  signal?: AbortSignal;
 }
 
 /**
@@ -18,6 +22,7 @@ export interface LogsOptions {
  * (ws/gateway.ts delivers every attach's dimensions).
  */
 export async function showLogs(transport: Transport, opts: LogsOptions): Promise<void> {
+  if (isLocalWindows(transport)) return showWindowsLogs(clientHome(), opts);
   if (opts.session !== undefined) {
     const file = `${hostPaths.logs}/${opts.session}/${opts.term ?? 'agent'}.log`;
     const command = opts.follow ? `tail -f -c 262144 ${file}` : `tail -c 262144 ${file}`;

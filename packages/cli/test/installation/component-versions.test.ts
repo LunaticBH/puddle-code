@@ -9,6 +9,18 @@ import {
   releasedProtocol,
 } from '../../src/lib/installation/component-versions';
 
+/**
+ * `bin/current → versions/9.8.7` as each installer writes it: a relative
+ * symlink on POSIX, a directory junction (no privilege needed) on Windows.
+ */
+function linkCurrent(home: string): void {
+  symlinkSync(
+    'versions/9.8.7',
+    join(home, 'bin', 'current'),
+    process.platform === 'win32' ? 'junction' : undefined,
+  );
+}
+
 describe('installed component versions', () => {
   it('reads exact daemon metadata and legacy macOS desktop protocol history offline', async () => {
     const root = mkdtempSync(join(tmpdir(), 'puddle-component-versions-'));
@@ -19,7 +31,7 @@ describe('installed component versions', () => {
     mkdirSync(join(home, 'bin'), { recursive: true });
     mkdirSync(desktop, { recursive: true });
     writeFileSync(join(daemon, 'PROTOCOL'), '99.2\n');
-    symlinkSync('versions/9.8.7', join(home, 'bin', 'current'));
+    linkCurrent(home);
 
     const components = await installedComponentVersions({
       home,
@@ -95,7 +107,7 @@ it('displays connector metadata as a suffix without changing the daemon compatib
   mkdirSync(directory, { recursive: true });
   writeFileSync(join(directory, 'PROTOCOL'), '21.3\n');
   writeFileSync(join(directory, 'CONNECTOR_PROTOCOL'), '4\n');
-  symlinkSync('versions/9.8.7', join(home, 'bin', 'current'));
+  linkCurrent(home);
   const components = await installedComponentVersions({ home, platform: 'linux' });
   expect(components[1]).toMatchObject({ protocol: { major: 21, minor: 3 }, connectorProtocol: 4 });
   expect(formatComponentVersions(components)).toContain('daemon  9.8.7 (protocol 21.3c4)');

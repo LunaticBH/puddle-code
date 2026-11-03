@@ -7,8 +7,10 @@ import {
 import { runHandshake, type ConfirmDaemonUpgrade } from './handshake.js';
 import { acquireAuthority, type HostConnection } from '../auth/connection-authority.js';
 import { inspectHost } from '../auth/control-channel.js';
+import { controlPipePresent } from '../installation/windows-daemon.js';
 import { sleep } from '../transport/net.js';
-import { hostPaths } from '../paths.js';
+import { clientHome, hostPaths } from '../paths.js';
+import { isLocalWindows } from '../transport/local.js';
 import type { Transport } from '../transport/transport.js';
 import { CliError, type CliEvent, type Logger, silentLogger } from '../types.js';
 
@@ -69,8 +71,11 @@ export async function ensureDaemon(
   },
 ): Promise<DaemonEndpoint> {
   const logger = opts.logger ?? silentLogger;
+  const localWindows = isLocalWindows(transport);
+  // Defender scans a freshly unpacked Windows runtime on its first start.
   const startTimeoutMs =
-    opts.startTimeoutMs ?? (opts.attachedFallback === undefined ? 20_000 : 5_000);
+    opts.startTimeoutMs ??
+    (opts.attachedFallback !== undefined ? 5_000 : localWindows ? 60_000 : 20_000);
   let mismatch: CliError | undefined;
   try {
     const authority = await acquireAuthority(transport);
@@ -84,8 +89,8 @@ export async function ensureDaemon(
     return null;
   });
   if (!inspection && mismatch) throw mismatch;
-  const install = async () => {
-    await installDaemon(transport, opts);
+  const install = async (replaceRunning = true) => {
+    await installDaemon(transport, { ...opts, ...(replaceRunning ? {} : { replaceRunning }) });
     return waitAfterInstall(transport, opts, logger, true, startTimeoutMs);
   };
   if (inspection) {
@@ -113,10 +118,41 @@ export async function ensureDaemon(
       throw err;
     }
   }
+  if (localWindows) return startLocalWindows(transport, logger, startTimeoutMs, install);
   if ((await installedVersion(transport)) !== null) {
     logger.info(`restarting puddled on ${transport.label}`);
   }
   return install();
+}
+
+/**
+ * Windows never competes with a daemon that holds the home's control pipe:
+ * one that is starting, or too busy to answer, is waited for rather than
+ * replaced (an ambiguous probe is not an absent daemon). Otherwise install
+ * or start it, leaving alone one that another launcher starts meanwhile.
+ */
+async function startLocalWindows(
+  transport: Transport,
+  logger: Logger,
+  timeoutMs: number,
+  install: (replaceRunning: boolean) => Promise<DaemonEndpoint>,
+): Promise<DaemonEndpoint> {
+  if (await controlPipePresent(clientHome())) {
+    logger.info('puddled is starting on this machine — waiting for it');
+    try {
+      const started = await waitForStartedDaemon(transport, timeoutMs);
+      return { ...started, bootstrapped: false, daemonLifetime: 'persistent' };
+    } catch (err) {
+      if (!(err instanceof CliError) || err.code !== 'daemon_start_timeout') throw err;
+      throw new CliError(
+        'daemon_unreachable',
+        'puddled holds its control pipe on this machine but does not answer',
+        'see its output with: puddle logs — restart it with: puddle upgrade daemon',
+      );
+    }
+  }
+  if ((await installedVersion(transport)) !== null) logger.info('starting puddled on this machine');
+  return install(false);
 }
 
 async function waitAfterInstall(
