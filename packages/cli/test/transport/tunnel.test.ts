@@ -1,15 +1,15 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { findFreePort, tcpListening } from '../../src/lib/transport/net.js';
 import { openTunnel, type Tunnel } from '../../src/lib/transport/tunnel.js';
 import { SshTransport } from '../../src/lib/transport/ssh.js';
 import type { CliEvent } from '../../src/lib/types.js';
+import { fakeSshBinary } from '../helpers/fake-ssh.js';
 
-const FAKE_SSH = join(dirname(fileURLToPath(import.meta.url)), '..', 'helpers', 'fake-ssh.mjs');
+let FAKE_SSH: string;
 // The full suite runs many process-heavy integration tests in parallel. Keep
 // this test's deliberately-silent outage inside a generous TEST grace even
 // when the fake SSH child is starved; production's two-second grace is
@@ -30,12 +30,16 @@ describe('tunnel outage announcements', () => {
   let tunnel: Tunnel | null = null;
 
   beforeAll(async () => {
-    chmodSync(FAKE_SSH, 0o755);
+    FAKE_SSH = fakeSshBinary();
     process.env.PUDDLE_HOME = join(clientHome, '.puddle');
     process.env.FAKE_SSH_KILL = killFile;
     // A stand-in for the remote daemon port the forward points at.
     upstreamPort = await findFreePort();
-    upstream = createServer((sock) => sock.end());
+    upstream = createServer((sock) => {
+      // A forward killed mid-connection resets it (TerminateProcess on Windows).
+      sock.on('error', () => {});
+      sock.end();
+    });
     await new Promise<void>((r) => upstream.listen(upstreamPort, '127.0.0.1', r));
   });
 

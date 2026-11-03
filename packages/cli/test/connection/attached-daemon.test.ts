@@ -17,7 +17,10 @@ import { SshTransport } from '../../src/lib/transport/ssh.js';
 
 const FAKE_SSH = join(dirname(fileURLToPath(import.meta.url)), '..', 'helpers', 'fake-ssh.mjs');
 
-describe('SSH-attached daemon', () => {
+// The fake ssh runs the remote POSIX host's sh commands on this machine, and
+// SSH hosts are POSIX by definition (Windows hosts are refused, see
+// windows-host.test.ts), so this cannot run on a Windows test machine.
+describe.skipIf(process.platform === 'win32')('SSH-attached daemon', () => {
   const clientHome = mkdtempSync(join(tmpdir(), 'puddle-attached-client-'));
   const hostHome = mkdtempSync(join(tmpdir(), 'puddle-attached-host-'));
   const puddleHome = join(hostHome, '.puddle');

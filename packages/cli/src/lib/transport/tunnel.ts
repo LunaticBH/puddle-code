@@ -1,7 +1,17 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import { findFreePort, sleep, tcpListening, waitForTcp } from './net.js';
+import { spawnClient } from './spawn.js';
 import type { SshTransport } from './ssh.js';
 import { CliError, type CliEvent, type Logger, silentLogger } from '../types.js';
+
+/** An `ssh -N -L` client, spawned the way the transport spawns its own children. */
+function spawnForwardClient(ssh: SshTransport, binary: string, args: string[]): ChildProcess {
+  return spawnClient(binary, args, {
+    stdio: ['ignore', 'ignore', 'inherit'],
+    env: ssh.spawnEnv(),
+    ...(ssh.hidesWindows ? { windowsHide: true } : {}),
+  });
+}
 
 export interface Tunnel {
   /** The forward's local end — pure transport, never user-visible. */
@@ -48,10 +58,10 @@ export async function openCallbackForward(
     return null;
   };
   if (await tcpListening(port)) return skip('local port busy');
-  const child = spawn(
+  const child = spawnForwardClient(
+    ssh,
     opts.sshBinary ?? 'ssh',
     ssh.args('-N', '-L', `${port}:127.0.0.1:${port}`, ssh.host),
-    { stdio: ['ignore', 'ignore', 'inherit'], env: ssh.spawnEnv() },
   );
   if (!(await waitForTcp(port, 5000))) {
     child.kill('SIGTERM');
@@ -131,10 +141,10 @@ export async function openTunnel(
 
   const spawnForward = async (port: number): Promise<boolean> => {
     if (stopping) return false;
-    const child = spawn(
+    const child = spawnForwardClient(
+      ssh,
       sshBinary,
       ssh.args('-N', '-L', `${port}:127.0.0.1:${remotePort}`, ssh.host),
-      { stdio: ['ignore', 'ignore', 'inherit'], env: ssh.spawnEnv() },
     );
     state.child = child;
     // Readiness by the forward, not the client: the local end accepts and the
