@@ -5,7 +5,7 @@ import { NOTEBOOK_WIDGET_BRIDGE } from './widget-bridge.js';
 /**
  * Installed Jupyter owns wire messages and language kernels. This small private
  * bridge keeps its KernelManager alive independently of notebook executions.
- * Passed through stdin to Python: no generated module or shell command.
+ * Passed to Python with -c: no generated module or shell command.
  */
 export const NOTEBOOK_BRIDGE = String.raw`
 import asyncio, json, os, signal, sys, tempfile
@@ -166,7 +166,12 @@ async def shutdown():
         client.stop_channels()
     manager = None
     emit({'event': 'stopped'})
-    runtime.cleanup()
+    try:
+        runtime.cleanup()
+    except OSError:
+        # A kernel that is still exiting may hold its connection file on Windows.
+        if sys.platform != 'win32':
+            raise
 
 async def monitor():
     while not closing:

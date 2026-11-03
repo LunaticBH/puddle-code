@@ -5,14 +5,23 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it, onTestFinished } from 'vitest';
+import { killProcessTree } from '@puddle/shared/node/platform';
 import type { RepoStore } from '../../src/db/stores/repos.js';
 import type { SessionStore } from '../../src/db/stores/sessions.js';
 import { NO_SESSION } from '../../src/http/routes/worktrees/worktree-shared.js';
-import { NotebookKernels } from '../../src/notebooks/kernels.js';
+import { NotebookKernels, pythonFor } from '../../src/notebooks/kernels.js';
+import { pythonEnvironment } from '../../src/notebooks/python-env.js';
 import { CodeProvider } from '../../src/code/provider.js';
 import { findCodeExecutable } from '../../src/code/discovery.js';
 import { CODE_RECIPES } from '../../src/code/recipes.js';
 import { runCompilationCommand } from '../../src/compilation/process.js';
+
+const windows = process.platform === 'win32';
+
+it('keeps the bridge script within the Windows command-line limit', () => {
+  // `python -u -c <bridge>`: CreateProcess accepts at most 32,767 characters.
+  expect(NOTEBOOK_BRIDGE.length).toBeLessThan(30_000);
+});
 
 // Integration with installed Jupyter, without starting puddled or a server.
 // Minimal CI hosts skip it; the ordinary provider suite uses deterministic runners.
@@ -20,20 +29,19 @@ it.skipIf(!findCodeExecutable(['jupyter-nbconvert']))(
   'executes in the selected venv without a global nbconvert executable',
   async () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'puddle-python-kernel-')));
-    const executable = findCodeExecutable(['jupyter-nbconvert'])!;
-    const python =
-      /^#!(\S*python\S*)/.exec(readFileSync(executable, 'utf8'))?.[1] ??
-      findCodeExecutable(['python3', 'python'])!;
+    const python = await pythonFor(findCodeExecutable(['jupyter-nbconvert'])!);
     const deps = { sessions: {} as SessionStore, repos: {} as RepoStore };
     const kernels = new NotebookKernels(deps);
     onTestFinished(async () => {
       await kernels.dispose();
       rmSync(root, { recursive: true, force: true });
     });
+    const env = pythonEnvironment(python);
     await runCompilationCommand({
       file: python,
       args: ['-m', 'venv', '--without-pip', '--system-site-packages', join(root, 'custom env')],
       cwd: root,
+      ...(env ? { env } : {}),
     });
     const source = { session: NO_SESSION, root, path: 'environment.ipynb' };
     writeFileSync(
@@ -62,7 +70,7 @@ it.skipIf(!findCodeExecutable(['jupyter-nbconvert']))(
     expect(selected).toMatchObject({
       state: 'idle',
       environment: {
-        python: join(root, 'custom env/bin/python'),
+        python: join(root, 'custom env', windows ? 'Scripts/python.exe' : 'bin/python'),
         ipykernel: true,
         nbconvert: true,
       },
@@ -194,10 +202,7 @@ it.skipIf(!findCodeExecutable(['jupyter-nbconvert']))(
 it.skipIf(!findCodeExecutable(['jupyter-nbconvert'])).each(['ready', 'starting'] as const)(
   'stops a %s kernel when its daemon pipe disappears',
   async (phase) => {
-    const executable = findCodeExecutable(['jupyter-nbconvert'])!;
-    const python =
-      /^#!(\S*python\S*)/.exec(readFileSync(executable, 'utf8'))?.[1] ??
-      findCodeExecutable(['python3', 'python'])!;
+    const python = await pythonFor(findCodeExecutable(['jupyter-nbconvert'])!);
     const root = mkdtempSync(join(tmpdir(), 'puddle-kernel-eof-'));
     const kernelDirectory = join(root, 'share', 'kernels', 'slow');
     mkdirSync(kernelDirectory, { recursive: true });
@@ -211,7 +216,7 @@ it.skipIf(!findCodeExecutable(['jupyter-nbconvert'])).each(['ready', 'starting']
     );
     const child = spawn(python, ['-u', '-c', NOTEBOOK_BRIDGE], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, JUPYTER_PATH: join(root, 'share') },
+      env: { ...(pythonEnvironment(python) ?? process.env), JUPYTER_PATH: join(root, 'share') },
     });
     const exited = once(child, 'exit');
     let pid: number | null = null;
@@ -238,7 +243,8 @@ it.skipIf(!findCodeExecutable(['jupyter-nbconvert'])).each(['ready', 'starting']
       child.stdin.end();
       if (child.exitCode === null) {
         child.kill('SIGKILL');
-        if (pid) {
+        if (pid && windows) void killProcessTree(pid);
+        else if (pid) {
           try {
             process.kill(-pid, 'SIGKILL');
           } catch {

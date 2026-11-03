@@ -1,5 +1,5 @@
 import { open, realpath, stat } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, resolve, win32 } from 'node:path';
 import {
   type CompilationFileTarget,
   type NotebookKernelAction,
@@ -25,6 +25,7 @@ import type {
   NotebookIntelligenceResponse,
 } from '@puddle/shared';
 import { NotebookEnvironments } from './environments.js';
+import { launcherPython } from './python-env.js';
 import { NotebookWidgets } from './widgets.js';
 import type {
   NotebookWidgetComm,
@@ -371,7 +372,7 @@ export class NotebookKernels {
     if (this.disposed) throw new Error('Notebook kernels are closed');
     // Notebook commands configure nbconvert's execution options. Arbitrary
     // scripts cannot participate in Jupyter's persistent-kernel lifecycle.
-    const name = basename(command.file);
+    const name = programName(command.file);
     const args = name.startsWith('jupyter-nbconvert')
       ? command.args
       : name === 'jupyter' && command.args[0] === 'nbconvert'
@@ -385,7 +386,7 @@ export class NotebookKernels {
         'Use jupyter-nbconvert, jupyter nbconvert or python -m nbconvert for notebook execution.',
       );
     const file =
-      !isAbsolute(command.file) && command.file.includes('/')
+      !isAbsolute(command.file) && hasSeparator(command.file)
         ? resolve(dirname(source), command.file)
         : command.file;
     const canonical = await realpath(source);
@@ -543,11 +544,31 @@ export class NotebookKernels {
   }
 }
 
+/**
+ * A command's program name for classification. Windows compares names as its
+ * file system does: without `.exe` and ignoring case.
+ */
+export function programName(file: string, platform: NodeJS.Platform = process.platform): string {
+  if (platform !== 'win32') return basename(file);
+  return win32.basename(file).toLowerCase().replace(/\.exe$/, '');
+}
+
+/** Whether a relative command names a path (`./venv/bin/jupyter`, `.\venv\Scripts\jupyter`). */
+function hasSeparator(file: string, platform: NodeJS.Platform = process.platform): boolean {
+  return platform === 'win32' ? /[\\/]/.test(file) : file.includes('/');
+}
+
 /** Prefer the environment that installed nbconvert, instead of another PATH Python. */
-async function pythonFor(executable: string): Promise<string> {
+export async function pythonFor(
+  executable: string,
+  platform: NodeJS.Platform = process.platform,
+): Promise<string> {
   const resolved = isAbsolute(executable) ? executable : findCodeExecutable([executable]);
   if (!resolved) throw new Error(`${executable} is not installed on this host`);
-  if (basename(resolved).startsWith('python')) return resolved;
+  if (programName(resolved, platform).startsWith('python')) return resolved;
+  // Windows console scripts are launcher executables without a shebang line.
+  const launched = platform === 'win32' ? launcherPython(resolved) : null;
+  if (launched) return launched;
   const handle = await open(resolved, 'r');
   let header: string;
   try {
@@ -559,7 +580,9 @@ async function pythonFor(executable: string): Promise<string> {
   }
   const shebang = /^#!\s*(\S+)/.exec(header)?.[1];
   if (shebang && isAbsolute(shebang) && basename(shebang).startsWith('python')) return shebang;
-  const python = findCodeExecutable(['python3', 'python']);
+  const python = findCodeExecutable(
+    platform === 'win32' ? ['python', 'python3'] : ['python3', 'python'],
+  );
   if (!python) throw new Error('Python with Jupyter packages is not installed on this host');
   return python;
 }
