@@ -8,11 +8,18 @@ import { ipcPath, jsonLines, listenPrivate } from '@puddle/shared/node';
 import type { Socket } from 'node:net';
 import type { LeaseRegistry } from './leases.js';
 
-/** Socket directory ownership is the bootstrap authority; HTTP tokens cannot enter here. */
+/**
+ * Socket directory ownership is the bootstrap authority; HTTP tokens cannot enter here.
+ *
+ * `onShutdown` enables the protocol 25.7 `shutdown` request: whoever can open
+ * the private channel may already mint leases, so it may also stop the
+ * daemon. Without it the request is answered as a pre-25.7 daemon would.
+ */
 export async function startHostControl(
   home: string,
   registry: LeaseRegistry,
   info: () => { port: number; version: VersionResponse } | null,
+  onShutdown?: () => void,
 ) {
   const sockets = new Set<Socket>();
   const server = await listenPrivate(ipcPath(home, 'host'), (socket) => {
@@ -29,13 +36,18 @@ export async function startHostControl(
         const parsed = controlRequestSchema.safeParse(value);
         if (!parsed.success) return fail();
         const message = parsed.data;
-        // Protocol 25.7 defines `shutdown`; until the daemon implements a
-        // graceful stop it answers exactly as a pre-25.7 daemon would.
-        if (message.t === 'shutdown') return fail();
+        if (message.t === 'shutdown' && !onShutdown) return fail();
         const ready = info();
         if (!ready) {
           send({ t: 'error', code: 'unavailable' });
           socket.end();
+          return;
+        }
+        if (message.t === 'shutdown') {
+          // Acknowledge first: stopping closes this channel with the others.
+          socket.end(JSON.stringify({ t: 'shutting_down' } satisfies ControlResponse) + '\n');
+          if (generation) registry.revoke(generation);
+          onShutdown!();
           return;
         }
         if (message.t === 'close') {

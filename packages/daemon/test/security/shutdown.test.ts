@@ -1,0 +1,109 @@
+import { EventEmitter } from 'node:events';
+import { existsSync, mkdtempSync } from 'node:fs';
+import { connect } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, expect, it } from 'vitest';
+import { controlResponseSchema } from '@puddle/shared';
+import { ipcPath, jsonLines } from '@puddle/shared/node';
+import { listenWithFallback, startDaemon } from '../../src/daemon.js';
+
+function request(path: string, message: object) {
+  return new Promise<ReturnType<typeof controlResponseSchema.parse>>((resolve, reject) => {
+    const socket = connect(path);
+    socket.once('error', reject);
+    jsonLines(
+      socket,
+      (value) => {
+        resolve(controlResponseSchema.parse(value));
+        socket.destroy();
+      },
+      () => reject(new Error('Invalid response')),
+    );
+    socket.write(JSON.stringify(message) + '\n');
+  });
+}
+
+function reachable(path: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = connect(path);
+    socket.once('connect', () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once('error', () => resolve(false));
+  });
+}
+
+describe('host-control shutdown (protocol 25.7)', () => {
+  for (const platform of ['linux', 'win32'] as const) {
+    it(`stops the daemon and only then reports it stopped (${platform} order)`, async () => {
+      const home = mkdtempSync(join(tmpdir(), 'puddle-shutdown-'));
+      let resolveStopped!: () => void;
+      const stopped = new Promise<void>((resolve) => (resolveStopped = resolve));
+      const daemon = await startDaemon({
+        home,
+        port: 0,
+        adapters: [],
+        version: 'shutdown-test',
+        platform,
+        onShutdown: () => resolveStopped(),
+      });
+      const path = ipcPath(home, 'host');
+      expect(existsSync(join(home, 'runtime.json'))).toBe(true);
+      expect(await request(path, { t: 'shutdown' })).toEqual({ t: 'shutting_down' });
+      await stopped;
+      // Everything is closed by the time the supervisor is told: no live
+      // record, and the control endpoint (Windows' single-instance lock) gone.
+      expect(existsSync(join(home, 'runtime.json'))).toBe(false);
+      expect(await reachable(path)).toBe(false);
+      // A later explicit stop is the same, already finished, stop.
+      await daemon.stop();
+    });
+  }
+
+  it('refuses shutdown when the embedder supplies no handler', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'puddle-shutdown-'));
+    const daemon = await startDaemon({ home, port: 0, adapters: [], version: 'shutdown-test' });
+    try {
+      expect(await request(ipcPath(home, 'host'), { t: 'shutdown' })).toEqual({
+        t: 'error',
+        code: 'invalid_control',
+      });
+    } finally {
+      await daemon.stop();
+    }
+  });
+});
+
+describe('the daemon port bind', () => {
+  /** A server whose first bind fails with `code`, then binds port 4242. */
+  function fakeServer(code: string) {
+    let attempts = 0;
+    const server = Object.assign(new EventEmitter(), {
+      listen(port: number) {
+        attempts++;
+        queueMicrotask(() =>
+          attempts === 1 && port !== 0
+            ? server.emit('error', Object.assign(new Error(code), { code }))
+            : server.emit('listening'),
+        );
+      },
+      address: () => ({ port: 4242 }),
+    });
+    return server;
+  }
+  type Server = Parameters<typeof listenWithFallback>[0];
+
+  it('falls back off a port Windows reserved (EACCES there is contention)', async () => {
+    const server = fakeServer('EACCES') as unknown as Server;
+    await expect(listenWithFallback(server, 7434, '127.0.0.1', 'win32')).resolves.toBe(4242);
+  });
+
+  it('keeps EACCES fatal on POSIX, where it means a privileged port', async () => {
+    const server = fakeServer('EACCES') as unknown as Server;
+    await expect(listenWithFallback(server, 80, '127.0.0.1', 'linux')).rejects.toMatchObject({
+      code: 'EACCES',
+    });
+  });
+});
