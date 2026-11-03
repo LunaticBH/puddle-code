@@ -16,9 +16,11 @@ import { controlResponseSchema } from '@puddle/shared';
 import { ipcPath, jsonLines } from '@puddle/shared/node';
 import {
   deleteEnv,
+  getEnv,
   isPidAlive,
   killProcessTree,
   listWindowsProcesses,
+  setEnv,
   type WindowsProcess,
 } from '@puddle/shared/node/platform';
 import { sleep } from '../transport/net.js';
@@ -75,13 +77,23 @@ export function windowsRuntime(home: string, version: string): WindowsRuntime {
   };
 }
 
-/** The environment a detached daemon starts with. */
-export function daemonEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+/**
+ * The environment a detached daemon starts with. An overridden PUDDLE_HOME
+ * is passed on absolute: the daemon runs in the user's home directory, where
+ * a relative one would name another home.
+ */
+export function daemonEnvironment(
+  source: NodeJS.ProcessEnv = process.env,
+  home?: string,
+): NodeJS.ProcessEnv {
   const env = { ...source };
   for (const key of Object.keys(env)) {
     if (/^CLAUDE_CODE_/i.test(key)) delete env[key];
   }
   for (const name of INHERITED_MARKERS) deleteEnv(env, name, 'win32');
+  if (home !== undefined && getEnv(env, 'PUDDLE_HOME', 'win32') !== undefined) {
+    setEnv(env, 'PUDDLE_HOME', win32.resolve(home), 'win32');
+  }
   return env;
 }
 
@@ -106,7 +118,7 @@ export async function startWindowsDaemon(
       windowsHide: true,
       cwd: homedir(),
       stdio: ['ignore', out, err],
-      env: daemonEnvironment(opts.env),
+      env: daemonEnvironment(opts.env, home),
     });
     const pid = await new Promise<number>((resolve, reject) => {
       child.once('error', (error) =>

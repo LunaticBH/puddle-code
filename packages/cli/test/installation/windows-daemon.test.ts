@@ -68,6 +68,16 @@ describe('the detached Windows supervisor', () => {
     expect(env).toEqual({ Path: 'C:\\Windows', PUDDLE_HOME: 'C:\\h' });
   });
 
+  it('passes an overridden home on absolute, since the daemon runs elsewhere', () => {
+    expect(daemonEnvironment({ puddle_home: '.puddle-dev' }, 'C:\\work\\.puddle-dev')).toEqual({
+      puddle_home: 'C:\\work\\.puddle-dev',
+    });
+    // The default home stays implicit, as under a POSIX supervisor.
+    expect(daemonEnvironment({ Path: 'C:\\Windows' }, 'C:\\Users\\a\\.puddle')).toEqual({
+      Path: 'C:\\Windows',
+    });
+  });
+
   it('recognises only this home’s daemons, by their command line', () => {
     const home = 'C:\\Users\\a\\.puddle';
     const daemon =
