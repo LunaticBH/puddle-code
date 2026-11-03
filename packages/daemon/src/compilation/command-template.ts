@@ -2,8 +2,17 @@ import { ApiError } from '../http/errors.js';
 
 const SHELL_OPERATORS = new Set(['&&', '||', '|', ';', '>', '>>', '<', '<<']);
 
-/** Parse one human-editable command without invoking a shell. */
-export function parseCommandTemplate(template: string): string[] {
+/**
+ * Parse one human-editable command without invoking a shell. POSIX follows
+ * sh quoting: `\` escapes outside single quotes. Windows paths are full of
+ * backslashes (`C:\Tools\gcc.exe`), so there `\` is always literal and only
+ * quotes group words; a quote character is written inside the other kind.
+ */
+export function parseCommandTemplate(
+  template: string,
+  platform: NodeJS.Platform = process.platform,
+): string[] {
+  const escapes = platform !== 'win32';
   const words: string[] = [];
   let word = '';
   let quote: "'" | '"' | null = null;
@@ -29,7 +38,7 @@ export function parseCommandTemplate(template: string): string[] {
       started = true;
       continue;
     }
-    if (char === '\\' && quote !== "'") {
+    if (escapes && char === '\\' && quote !== "'") {
       escaped = true;
       started = true;
       continue;
@@ -65,8 +74,9 @@ export function parseCommandTemplate(template: string): string[] {
 export function expandCommandTemplate(
   template: string,
   values: Readonly<Record<string, string>>,
+  platform: NodeJS.Platform = process.platform,
 ): { file: string; args: string[] } {
-  const words = parseCommandTemplate(template).map((word) =>
+  const words = parseCommandTemplate(template, platform).map((word) =>
     word.replace(/\{\{([a-z][a-z0-9_]*)\}\}/g, (_match, name: string) => {
       const value = values[name];
       if (value === undefined) {
@@ -82,11 +92,28 @@ export function expandCommandTemplate(
 }
 
 /** Render discovered argv as an editable command while preserving token boundaries. */
-export function commandTemplate(file: string, args: readonly string[]): string {
-  return [file, ...args].map(quoteCommandWord).join(' ');
+export function commandTemplate(
+  file: string,
+  args: readonly string[],
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const quote = platform === 'win32' ? quoteWindowsCommandWord : quoteCommandWord;
+  return [file, ...args].map(quote).join(' ');
 }
 
 function quoteCommandWord(word: string): string {
   if (/^[A-Za-z0-9_@%+=:,./{}-]+$/.test(word)) return word;
   return `'${word.replaceAll("'", `'\\''`)}'`;
+}
+
+/** Windows grammar: backslashes need no quoting, and `"` is the familiar quote. */
+function quoteWindowsCommandWord(word: string): string {
+  if (/^[A-Za-z0-9_@%+=:,./\\{}-]+$/.test(word)) return word;
+  if (!word.includes('"')) return `"${word}"`;
+  if (!word.includes("'")) return `'${word}'`;
+  // Both quote kinds: adjacent quoted segments form one word.
+  return word
+    .split('"')
+    .map((part) => `"${part}"`)
+    .join(`'"'`);
 }

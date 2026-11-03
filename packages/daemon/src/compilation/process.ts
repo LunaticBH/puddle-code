@@ -1,4 +1,11 @@
-import { spawn } from 'node:child_process';
+import {
+  spawn,
+  type SpawnOptionsWithStdioTuple,
+  type StdioNull,
+  type StdioPipe,
+} from 'node:child_process';
+import { killProcessTree, resolveSpawn } from '@puddle/shared/node/platform';
+import { withEnvironment } from './environment.js';
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_OUTPUT_BYTES = 2 * 1024 * 1024;
@@ -33,6 +40,8 @@ export class CompilationCommandError extends Error {
   }
 }
 
+type CompilationSpawnOptions = SpawnOptionsWithStdioTuple<StdioNull, StdioPipe, StdioPipe>;
+
 const liveCommands = new Set<ReturnType<typeof spawn>>();
 
 /** Terminate compiler process groups when their owning daemon shuts down. */
@@ -47,6 +56,46 @@ export function disposeCompilationCommands(): void {
 }
 
 /**
+ * How `command` is started without a shell. POSIX makes it lead a new
+ * process group, which cancellation signals as a whole. Windows has no
+ * process groups to signal: the command stays attached so that, with
+ * `windowsHide`, it and every console grandchild share one hidden console
+ * (a detached command's grandchildren would each open a visible window), and
+ * cancellation stops the tree with taskkill. npm-style `.cmd` shims and other
+ * batch files are resolved first, since Node will not start them directly.
+ * Throws `UnsafeCmdArgumentError` for a batch file whose arguments cmd.exe
+ * cannot carry.
+ */
+export function compilationSpawn(
+  command: CompilationCommand,
+  platform: NodeJS.Platform = process.platform,
+): { file: string; args: string[]; options: CompilationSpawnOptions } {
+  const stdio: CompilationSpawnOptions['stdio'] = ['ignore', 'pipe', 'pipe'];
+  if (platform !== 'win32') {
+    return {
+      file: command.file,
+      args: command.args,
+      options: { cwd: command.cwd, env: command.env, detached: true, stdio },
+    };
+  }
+  const resolved = resolveSpawn(command.file, command.args, {
+    platform,
+    env: command.env ?? process.env,
+  });
+  return {
+    file: resolved.file,
+    args: resolved.args,
+    options: {
+      cwd: command.cwd,
+      env: resolved.env ? withEnvironment(resolved.env, command.env, platform) : command.env,
+      stdio,
+      windowsHide: true,
+      ...(resolved.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
+    },
+  };
+}
+
+/**
  * Run one compiler command without a shell, with bounded time/output and an
  * isolated process group so cancellation also reaches processes started by providers.
  */
@@ -54,12 +103,20 @@ export const runCompilationCommand: CompilationCommandRunner = (command) =>
   new Promise((resolve, reject) => {
     const timeoutMs = command.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const maxOutputBytes = command.maxOutputBytes ?? DEFAULT_OUTPUT_BYTES;
-    const child = spawn(command.file, command.args, {
-      cwd: command.cwd,
-      env: command.env,
-      detached: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    let plan: ReturnType<typeof compilationSpawn>;
+    try {
+      plan = compilationSpawn(command);
+    } catch (error) {
+      reject(
+        new CompilationCommandError(
+          `Could not start Compilation command: ${(error as Error).message}`,
+          command,
+          { exitCode: 1, stdout: '', stderr: '' },
+        ),
+      );
+      return;
+    }
+    const child = spawn(plan.file, plan.args, plan.options);
     liveCommands.add(child);
     let stdout = Buffer.alloc(0);
     let stderr = Buffer.alloc(0);
@@ -140,8 +197,17 @@ export const runCompilationCommand: CompilationCommandRunner = (command) =>
     });
   });
 
-function terminateGroup(child: ReturnType<typeof spawn>, signal: NodeJS.Signals): void {
+function terminateGroup(
+  child: ReturnType<typeof spawn>,
+  signal: NodeJS.Signals,
+  platform: NodeJS.Platform = process.platform,
+): void {
   if (child.pid === undefined) return;
+  if (platform === 'win32') {
+    // Always forced: without /F, taskkill only asks GUI windows to close.
+    void killProcessTree(child.pid, { platform });
+    return;
+  }
   try {
     process.kill(-child.pid, signal);
   } catch {
