@@ -1,9 +1,10 @@
 import { existsSync, statSync } from 'node:fs';
-import { isAbsolute, join, normalize, sep } from 'node:path';
+import { isAbsolute, join, normalize, posix, sep, win32 } from 'node:path';
 import type { Context } from 'hono';
-import type { Session } from '@puddle/shared';
+import { isInsideHostPath, windowsNameProblem, type Session } from '@puddle/shared';
 import type { RepoStore } from '../../../db/stores/repos.js';
 import type { SessionStore } from '../../../db/stores/sessions.js';
+import { canonicalHostPath, isNativeAbsolute, rootBareDrive } from '../../../host-path.js';
 import type { WorktreeManager } from '../../../worktrees/manager.js';
 import { ApiError } from '../../errors.js';
 import { expandTilde } from '../../tilde.js';
@@ -45,7 +46,8 @@ export interface WorktreeDeps {
 }
 
 /** Validate a client-supplied absolute directory (`?root=`), tilde expanded. */
-function absoluteDir(raw: string): string {
+export function absoluteDir(raw: string, platform: NodeJS.Platform = process.platform): string {
+  if (platform === 'win32') return absoluteWindowsDir(raw);
   const root = normalize(expandTilde(raw));
   if (!isAbsolute(root)) {
     throw ApiError.badRequest('invalid_root', `'root' must be an absolute path`);
@@ -56,6 +58,27 @@ function absoluteDir(raw: string): string {
   // Canonical: no trailing separator, except for the filesystem root itself,
   // which IS one. Keeps roots comparable and the containment prefix honest.
   return root.length > 1 && root.endsWith(sep) ? root.slice(0, -1) : root;
+}
+
+/**
+ * Windows roots are drive or UNC paths in either separator (`\x` and `/x`
+ * would silently mean the daemon's current drive). A bare `C:` is the drive
+ * root, which is also where browsing stops: there is no virtual list of
+ * drives. The result is canonical (decision 11) and, like POSIX, keeps a
+ * trailing separator only when it is a drive or share root.
+ */
+function absoluteWindowsDir(raw: string): string {
+  const root = rootBareDrive(expandTilde(raw, 'win32'), 'win32');
+  if (!isNativeAbsolute(root, 'win32')) {
+    throw ApiError.badRequest('invalid_root', `'root' must be an absolute path`);
+  }
+  if (!existsSync(root) || !statSync(root).isDirectory()) {
+    throw ApiError.notFound('root', raw);
+  }
+  const canonical = canonicalHostPath(root, 'win32');
+  return canonical.endsWith('\\') && canonical !== win32.parse(canonical).root
+    ? canonical.slice(0, -1)
+    : canonical;
 }
 
 /**
@@ -150,7 +173,12 @@ export function browseRoot(c: Context, worktreeRoot: string): string {
  * relaxation of an earlier realpath-based escape guard — puddle runs as the
  * user, who already has shell access to whatever a worktree symlink points at.
  */
-export function containedPath(root: string, rel: string): string {
+export function containedPath(
+  root: string,
+  rel: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  if (platform === 'win32') return containedWindowsPath(root, rel);
   if (isAbsolute(rel)) {
     // The code stays `path_outside_worktree` (a wire contract since 3.x) even
     // under a `?root=` override, where "worktree" is really "the browse root".
@@ -168,4 +196,81 @@ export function containedPath(root: string, rel: string): string {
     throw ApiError.badRequest('path_outside_worktree', `path escapes ${root}`);
   }
   return candidate;
+}
+
+/**
+ * The Windows confinement check: `rel` may use either separator, but neither a
+ * drive (`C:\x`, or the drive-relative `D:x`) nor a root (`\x`). Containment
+ * compares segments case-insensitively across separators, so a root stored as
+ * `C:/x/wt` or `c:\x\WT` still contains its own children.
+ */
+function containedWindowsPath(root: string, rel: string): string {
+  if (win32.isAbsolute(rel) || /^[A-Za-z]:/.test(rel)) {
+    throw ApiError.badRequest('path_outside_worktree', `path must be relative to ${root}`);
+  }
+  const candidate = win32.normalize(win32.join(root, rel));
+  if (!isInsideHostPath(root, candidate)) {
+    throw ApiError.badRequest('path_outside_worktree', `path escapes ${root}`);
+  }
+  return candidate;
+}
+
+/**
+ * `containedPath` for a path about to be CREATED (a new file, a rename or copy
+ * destination, an upload): on Windows every segment must also be a name
+ * Windows can store, or the request fails with 400 `invalid_name` before
+ * anything is written. Existing entries stay readable whatever their names.
+ */
+export function containedWritePath(
+  root: string,
+  rel: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const candidate = containedPath(root, rel, platform); // escapes are reported as escapes
+  if (platform === 'win32') assertStorableName(rel);
+  return candidate;
+}
+
+/** Throws 400 `invalid_name` unless every segment of `rel` is a name Windows can store. */
+export function assertStorableName(rel: string): void {
+  for (const segment of rel.split(/[\\/]/)) {
+    const problem = segment === '' ? null : windowsNameProblem(segment);
+    if (problem) {
+      throw ApiError.badRequest('invalid_name', `'${rel}' cannot be created: ${problem}`);
+    }
+  }
+}
+
+/**
+ * Relative-path guard for the git blob routes (`file-at`, `index-file`,
+ * `git-original`): the path keys a git blob, not a filesystem entry, so
+ * `containedPath`'s root doesn't apply here — the path may not exist on disk
+ * at all (e.g. a file deleted since `ref`). A normalise-then-prefix check
+ * against a virtual root is enough to reject an absolute path or a
+ * `..`-escape. Windows works in `path.posix` on the `/` spelling, because the
+ * result names a git path (`<ref>:<path>`), never a host path.
+ */
+export function gitRelativePath(rel: string, platform: NodeJS.Platform = process.platform): string {
+  if (platform === 'win32') return posixGitPath(rel.replaceAll('\\', '/'), /^[A-Za-z]:/.test(rel));
+  if (isAbsolute(rel)) {
+    throw ApiError.badRequest('path_outside_worktree', `path must be relative to the worktree`);
+  }
+  const virtualRoot = '/virtual-root';
+  const joined = normalize(join(virtualRoot, rel));
+  if (joined !== virtualRoot && !joined.startsWith(virtualRoot + sep)) {
+    throw ApiError.badRequest('path_outside_worktree', `path escapes the worktree`);
+  }
+  return joined === virtualRoot ? '' : joined.slice(virtualRoot.length + 1);
+}
+
+function posixGitPath(rel: string, hasDrive: boolean): string {
+  if (hasDrive || posix.isAbsolute(rel)) {
+    throw ApiError.badRequest('path_outside_worktree', `path must be relative to the worktree`);
+  }
+  const virtualRoot = '/virtual-root';
+  const joined = posix.normalize(posix.join(virtualRoot, rel));
+  if (joined !== virtualRoot && !joined.startsWith(`${virtualRoot}/`)) {
+    throw ApiError.badRequest('path_outside_worktree', `path escapes the worktree`);
+  }
+  return joined === virtualRoot ? '' : joined.slice(virtualRoot.length + 1);
 }

@@ -1,4 +1,4 @@
-import { fork, type ChildProcess } from 'node:child_process';
+import { fork, type ChildProcess, type ForkOptions } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { puddlangRunnerMessageSchema, type PuddlangStart } from '@puddle/shared';
 import { PuddlangStore } from './store.js';
@@ -67,11 +67,16 @@ export class PuddlangService {
     const operations = new PuddlangOperations(this.deps, profile, input, abort.signal);
     let child: ChildProcess;
     try {
-      child = fork(this.runner, [], {
+      // fork hands its options to spawn, which honours windowsHide although
+      // ForkOptions does not declare it: the detached Windows daemon has no
+      // console, so each run would otherwise flash one.
+      const options: ForkOptions & { windowsHide: boolean } = {
         stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
         execArgv: [],
         env: { ...process.env, PUDDLE_PROFILE_ID: profile },
-      });
+        windowsHide: true,
+      };
+      child = fork(this.runner, [], options);
     } catch (error) {
       this.store.finish(run.id, 'failed', null, String(error));
       return this.store.get(profile, run.id);

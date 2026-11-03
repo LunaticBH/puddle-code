@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Hono } from 'hono';
@@ -24,7 +25,12 @@ beforeAll(() => {
   );
   app.route(
     '/api/repos',
-    repoRoutes({ repos: fx.stores.repos, sessions: fx.stores.sessions, worktrees: fx.worktrees }),
+    repoRoutes({
+      repos: fx.stores.repos,
+      sessions: fx.stores.sessions,
+      worktrees: fx.worktrees,
+      onboarding: fx.onboarding,
+    }),
   );
 });
 
@@ -111,6 +117,34 @@ describe('DELETE /api/repos/:id/worktrees (prune)', () => {
     expect(res.status).toBe(409);
     expect(errorCode(await res.json())).toBe('worktree_dirty');
   });
+
+  it.runIf(process.platform === 'win32')(
+    'refuses with worktree_busy, intact, while another program holds the worktree open on Windows',
+    async () => {
+      const { id, worktree } = await newSession('feat/held');
+      await fx.service.kill(id);
+      // The child holds its working directory open once it is running.
+      const holder = spawn(
+        process.execPath,
+        ['-e', "process.stdout.write('ready'); setTimeout(() => {}, 20000)"],
+        { cwd: join(worktree, '.puddle') },
+      );
+      try {
+        await new Promise((resolve) => holder.stdout.once('data', resolve));
+        const res = await prune(worktree);
+        expect(res.status).toBe(409);
+        expect(errorCode(await res.json())).toBe('worktree_busy');
+        // Nothing was deleted: still a registered, complete worktree.
+        expect(existsSync(join(worktree, 'README.md'))).toBe(true);
+        expect(sh(worktree, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('feat/held');
+      } finally {
+        holder.kill();
+        await new Promise((resolve) => holder.once('exit', resolve));
+      }
+      expect((await prune(worktree)).status).toBe(200);
+      expect(existsSync(worktree)).toBe(false);
+    },
+  );
 });
 
 describe('DELETE /api/repos/:id/branches (delete orphaned branch)', () => {

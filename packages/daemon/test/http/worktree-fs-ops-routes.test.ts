@@ -1,7 +1,9 @@
+import { spawn } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
@@ -99,6 +101,24 @@ describe('POST /:sid/create', () => {
     expect(errorCode(await res.json())).toBe('path_outside_worktree');
     expect(existsSync(join(worktree, '..', 'escape.txt'))).toBe(false);
   });
+
+  it.runIf(process.platform === 'win32')(
+    'refuses names Windows cannot store, and backslash escapes, on Windows',
+    async () => {
+      for (const path of ['CON', 'docs/aux.md', 'nul.txt', 'f.txt:hidden', 'what?.txt', 'dot.']) {
+        const res = await post(sessionId, 'create', { path, kind: 'file' });
+        expect(res.status, path).toBe(400);
+        expect(errorCode(await res.json()), path).toBe('invalid_name');
+      }
+      expect(existsSync(join(worktree, 'docs'))).toBe(false); // nothing written first
+      for (const path of ['..\\escape.txt', 'D:escape.txt', '\\escape.txt']) {
+        const res = await post(sessionId, 'create', { path, kind: 'file' });
+        expect(errorCode(await res.json()), path).toBe('path_outside_worktree');
+      }
+      const nested = await post(sessionId, 'create', { path: 'win\\nested.txt', kind: 'file' });
+      expect(fsOpResponseSchema.parse(await nested.json()).path).toBe('win/nested.txt');
+    },
+  );
 });
 
 describe('POST /:sid/rename', () => {
@@ -132,6 +152,41 @@ describe('POST /:sid/rename', () => {
     expect(res.status).toBe(400);
     expect(errorCode(await res.json())).toBe('path_outside_worktree');
   });
+
+  it.runIf(process.platform === 'win32')(
+    'renames by case alone on Windows, whose filesystem calls the target taken',
+    async () => {
+      writeFileSync(join(worktree, 'readme.md'), 'case\n');
+      const res = await post(sessionId, 'rename', { from: 'readme.md', to: 'README.md' });
+      expect(res.status).toBe(200);
+      expect(readdirSync(worktree)).toContain('README.md');
+      expect(readdirSync(worktree)).not.toContain('readme.md');
+    },
+  );
+
+  it.runIf(process.platform === 'win32')(
+    'answers 409 path_busy when another program holds an entry open on Windows',
+    async () => {
+      mkdirSync(join(worktree, 'held'), { recursive: true });
+      // The child holds its working directory open once it is running.
+      const holder = spawn(
+        process.execPath,
+        ['-e', "process.stdout.write('ready'); setTimeout(() => {}, 20000)"],
+        { cwd: join(worktree, 'held') },
+      );
+      try {
+        await new Promise((resolve) => holder.stdout.once('data', resolve));
+        const rename = await post(sessionId, 'rename', { from: 'held', to: 'moved' });
+        expect(rename.status).toBe(409);
+        expect(errorCode(await rename.json())).toBe('path_busy');
+        const remove = await post(sessionId, 'delete', { path: 'held' });
+        expect(remove.status).toBe(409);
+        expect(errorCode(await remove.json())).toBe('path_busy');
+      } finally {
+        holder.kill();
+      }
+    },
+  );
 });
 
 describe('POST /:sid/copy', () => {

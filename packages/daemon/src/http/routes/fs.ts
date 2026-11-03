@@ -1,11 +1,46 @@
 import { existsSync, readdirSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join } from 'node:path';
+import { basename, dirname, isAbsolute, join, win32 } from 'node:path';
 import { Hono } from 'hono';
 import type { FsDirsResponse } from '@puddle/shared';
+import { canonicalHostPath, isNativeAbsolute, rootBareDrive } from '../../host-path.js';
 import { ApiError } from '../errors.js';
 import { expandTilde } from '../tilde.js';
 
 const MAX_ENTRIES = 50;
+
+/**
+ * Where a typed prefix lists from, and the partial name it completes. "/a/b/par"
+ * completes "par" inside /a/b; a trailing slash lists everything. Windows
+ * accepts either separator, reads a bare `C:` as the drive root (browsing stops
+ * there: drives are not enumerated), and lists from the canonical parent so the
+ * returned paths are canonical too.
+ */
+export function dirsQuery(
+  prefix: string,
+  platform: NodeJS.Platform = process.platform,
+): { parent: string; partial: string } {
+  if (platform !== 'win32') {
+    if (!isAbsolute(prefix)) throw invalidPrefix();
+    return {
+      parent: prefix.endsWith('/') ? prefix : dirname(prefix),
+      partial: prefix.endsWith('/') ? '' : basename(prefix).toLowerCase(),
+    };
+  }
+  const path = rootBareDrive(prefix, platform);
+  if (!isNativeAbsolute(path, platform)) throw invalidPrefix();
+  const listsDirectory = /[\\/]$/.test(path);
+  return {
+    parent: canonicalHostPath(listsDirectory ? path : win32.dirname(path), platform),
+    partial: listsDirectory ? '' : win32.basename(path).toLowerCase(),
+  };
+}
+
+function invalidPrefix(): ApiError {
+  return ApiError.badRequest(
+    'invalid_prefix',
+    `'prefix' must be an absolute path (a leading ~ is expanded on the host)`,
+  );
+}
 
 /**
  * Directory autocomplete for repo registration (SPEC §6). Trusted single-user
@@ -14,16 +49,7 @@ const MAX_ENTRIES = 50;
  */
 export function fsRoutes(): Hono {
   return new Hono().get('/dirs', (c) => {
-    const prefix = expandTilde(c.req.query('prefix') ?? '');
-    if (!isAbsolute(prefix)) {
-      throw ApiError.badRequest(
-        'invalid_prefix',
-        `'prefix' must be an absolute path (a leading ~ is expanded on the host)`,
-      );
-    }
-    // "/a/b/par" completes "par" inside /a/b; a trailing slash lists everything.
-    const parent = prefix.endsWith('/') ? prefix : dirname(prefix);
-    const partial = prefix.endsWith('/') ? '' : basename(prefix).toLowerCase();
+    const { parent, partial } = dirsQuery(expandTilde(c.req.query('prefix') ?? ''));
 
     let names: string[];
     try {

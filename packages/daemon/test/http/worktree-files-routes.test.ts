@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, join, parse } from 'node:path';
 import { Hono } from 'hono';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import * as yauzl from 'yauzl';
@@ -28,6 +28,25 @@ let fx: Fixture;
 let sessionId: string;
 let worktree: string;
 let app: Hono;
+
+/** Windows creates file symlinks only under Developer Mode or elevation. */
+const fileSymlinks = (() => {
+  const dir = mkdtempSync(join(tmpdir(), 'puddle-link-probe-'));
+  try {
+    symlinkSync(join(dir, 'missing'), join(dir, 'link'), 'file');
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+})();
+
+/** A directory link: a junction on Windows, which needs no privilege and lists as a symlink. */
+function linkDirectory(target: string, path: string): void {
+  if (process.platform === 'win32') symlinkSync(target, path, 'junction');
+  else symlinkSync(target, path);
+}
 
 beforeAll(async () => {
   fx = fixture();
@@ -124,17 +143,21 @@ describe('GET /api/worktrees/:sid/tree', () => {
     expect(body.entries.map((e) => e.name)).toEqual(['index.ts']);
   });
 
-  it('resolves an in-worktree symlink to a file, flagged as a link', async () => {
-    symlinkSync(join(worktree, 'apple.txt'), join(worktree, 'link-to-apple'));
-    const res = await tree(sessionId);
-    const body = treeResponseSchema.parse(await res.json());
-    const link = body.entries.find((e) => e.name === 'link-to-apple');
-    // Resolves to the target's kind (a file) so it opens, but stays flagged.
-    expect(link).toMatchObject({ type: 'file', symlink: true });
-  });
+  // Needs a file symlink, which an unprivileged Windows account cannot create.
+  it.skipIf(!fileSymlinks)(
+    'resolves an in-worktree symlink to a file, flagged as a link',
+    async () => {
+      symlinkSync(join(worktree, 'apple.txt'), join(worktree, 'link-to-apple'));
+      const res = await tree(sessionId);
+      const body = treeResponseSchema.parse(await res.json());
+      const link = body.entries.find((e) => e.name === 'link-to-apple');
+      // Resolves to the target's kind (a file) so it opens, but stays flagged.
+      expect(link).toMatchObject({ type: 'file', symlink: true });
+    },
+  );
 
   it('resolves an in-worktree symlink to a directory as explorable', async () => {
-    symlinkSync(join(worktree, 'src'), join(worktree, 'link-to-src'));
+    linkDirectory(join(worktree, 'src'), join(worktree, 'link-to-src'));
     const res = await tree(sessionId);
     const body = treeResponseSchema.parse(await res.json());
     const link = body.entries.find((e) => e.name === 'link-to-src');
@@ -148,7 +171,7 @@ describe('GET /api/worktrees/:sid/tree', () => {
     const outside = mkdtempSync(join(tmpdir(), 'puddle-escape-'));
     mkdirSync(join(outside, 'nested'), { recursive: true });
     writeFileSync(join(outside, 'nested', 'far.txt'), 'over here\n');
-    symlinkSync(join(outside, 'nested'), join(worktree, 'escape-dir'));
+    linkDirectory(join(outside, 'nested'), join(worktree, 'escape-dir'));
     const res = await tree(sessionId);
     const body = treeResponseSchema.parse(await res.json());
     const link = body.entries.find((e) => e.name === 'escape-dir');
@@ -231,29 +254,33 @@ describe('GET /api/worktrees/:sid/file', () => {
     expect(errorCode(await res.json())).toBe('file_too_large');
   });
 
-  it('reads and writes through a symlink whose file target is outside the worktree', async () => {
-    // The request path is a plain in-worktree name; the symlink resolves out.
-    // Following it is intended (read + write) — only lexical `..`/absolute
-    // escapes are rejected, never a real symlink the user placed here.
-    const outside = mkdtempSync(join(tmpdir(), 'puddle-outside-'));
-    const target = join(outside, 'shared.txt');
-    writeFileSync(target, 'shared v1\n');
-    symlinkSync(target, join(worktree, 'shared-link.txt'));
+  // Needs a file symlink, which an unprivileged Windows account cannot create.
+  it.skipIf(!fileSymlinks)(
+    'reads and writes through a symlink whose file target is outside the worktree',
+    async () => {
+      // The request path is a plain in-worktree name; the symlink resolves out.
+      // Following it is intended (read + write) — only lexical `..`/absolute
+      // escapes are rejected, never a real symlink the user placed here.
+      const outside = mkdtempSync(join(tmpdir(), 'puddle-outside-'));
+      const target = join(outside, 'shared.txt');
+      writeFileSync(target, 'shared v1\n');
+      symlinkSync(target, join(worktree, 'shared-link.txt'));
 
-    const read = await getFile(sessionId, 'shared-link.txt');
-    expect(read.status).toBe(200);
-    expect(fileResponseSchema.parse(await read.json()).content).toBe('shared v1\n');
+      const read = await getFile(sessionId, 'shared-link.txt');
+      expect(read.status).toBe(200);
+      expect(fileResponseSchema.parse(await read.json()).content).toBe('shared v1\n');
 
-    const write = await app.request(`/api/worktrees/${sessionId}/file?path=shared-link.txt`, {
-      method: 'PUT',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ content: 'shared v2\n' }),
-    });
-    expect(write.status).toBe(200);
-    // The write lands on the external target the symlink points at.
-    expect(readFileSync(target, 'utf8')).toBe('shared v2\n');
-    rmSync(outside, { recursive: true, force: true });
-  });
+      const write = await app.request(`/api/worktrees/${sessionId}/file?path=shared-link.txt`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ content: 'shared v2\n' }),
+      });
+      expect(write.status).toBe(200);
+      // The write lands on the external target the symlink points at.
+      expect(readFileSync(target, 'utf8')).toBe('shared v2\n');
+      rmSync(outside, { recursive: true, force: true });
+    },
+  );
 });
 
 describe('PUT /api/worktrees/:sid/file', () => {
@@ -357,6 +384,28 @@ describe('POST /api/worktrees/:sid/upload', () => {
     );
     expect(existsSync(join(worktree, 'etc'))).toBe(false);
   });
+
+  it.runIf(process.platform === 'win32')(
+    'splits names on backslashes too and refuses the batch before writing a name Windows cannot store',
+    async () => {
+      mkdirSync(join(worktree, 'uploads-win'), { recursive: true });
+      const sneaky = new FormData();
+      sneaky.set('a', new File(['sneaky'], 'photos\\..\\..\\..\\evil.txt'));
+      const ok = await upload(sessionId, 'uploads-win', sneaky);
+      expect(uploadResponseSchema.parse(await ok.json()).files.map((f) => f.path)).toEqual([
+        'uploads-win/photos/evil.txt',
+      ]);
+      expect(existsSync(join(worktree, 'evil.txt'))).toBe(false);
+
+      const mixed = new FormData();
+      mixed.set('a', new File(['fine'], 'fine.txt'));
+      mixed.set('b', new File(['bad'], 'notes:2024.txt'));
+      const res = await upload(sessionId, 'uploads-win', mixed);
+      expect(res.status).toBe(400);
+      expect(errorCode(await res.json())).toBe('invalid_name');
+      expect(existsSync(join(worktree, 'uploads-win', 'fine.txt'))).toBe(false);
+    },
+  );
 
   it('400s when dir does not exist', async () => {
     const form = new FormData();
@@ -528,15 +577,22 @@ describe('read-only browse root override (?root=, protocol 10.2)', () => {
     // The regression: the containment prefix was built as `root + sep`, which
     // for `/` is `//` — so every child of the filesystem root, i.e. everything
     // reachable by walking the browse tree to the top, was rejected outright.
-    const listing = await app.request(`/api/worktrees/${sessionId}/tree?path=&root=%2F`);
+    // On Windows the top is the drive root, whose listing includes system
+    // files (pagefile.sys) that refuse even lstat.
+    const top = process.platform === 'win32' ? parse(outside).root : '/';
+    const root = encodeURIComponent(top);
+    const listing = await app.request(`/api/worktrees/${sessionId}/tree?path=&root=${root}`);
     expect(listing.status).toBe(200);
     expect(treeResponseSchema.parse(await listing.json()).entries.length).toBeGreaterThan(0);
 
     // …and descending into one of them works, which is what the tree does on
     // expand. `outside` is an absolute tmpdir path, so walk to it from `/`.
-    const rel = outside.replace(/^\//, '');
+    const rel =
+      process.platform === 'win32'
+        ? outside.slice(top.length).replaceAll('\\', '/')
+        : outside.replace(/^\//, '');
     const deep = await app.request(
-      `/api/worktrees/${sessionId}/tree?path=${encodeURIComponent(rel)}&root=%2F`,
+      `/api/worktrees/${sessionId}/tree?path=${encodeURIComponent(rel)}&root=${root}`,
     );
     expect(deep.status).toBe(200);
     expect(treeResponseSchema.parse(await deep.json()).entries.map((e) => e.name)).toContain(
@@ -544,10 +600,32 @@ describe('read-only browse root override (?root=, protocol 10.2)', () => {
     );
 
     const file = await app.request(
-      `/api/worktrees/${sessionId}/file?path=${encodeURIComponent(`${rel}/notes/todo.md`)}&root=%2F`,
+      `/api/worktrees/${sessionId}/file?path=${encodeURIComponent(`${rel}/notes/todo.md`)}&root=${root}`,
     );
     expect(file.status).toBe(200);
   });
+
+  it.runIf(process.platform === 'win32')(
+    'stops at a drive root on Windows: a bare drive is its root, and / names no directory',
+    async () => {
+      const drive = parse(outside).root.slice(0, 2); // `C:`
+      const bare = await app.request(`/api/worktrees/${sessionId}/tree?path=&root=${drive}`);
+      expect(bare.status).toBe(200);
+      const atRoot = await app.request(
+        `/api/worktrees/${sessionId}/tree?path=&root=${encodeURIComponent(`${drive}\\`)}`,
+      );
+      expect(treeResponseSchema.parse(await bare.json()).entries).toEqual(
+        treeResponseSchema.parse(await atRoot.json()).entries,
+      );
+      for (const root of ['/', '\\Users', `${drive}Users`]) {
+        const res = await app.request(
+          `/api/worktrees/${sessionId}/tree?path=&root=${encodeURIComponent(root)}`,
+        );
+        expect(res.status, root).toBe(400);
+        expect(errorCode(await res.json())).toBe('invalid_root');
+      }
+    },
+  );
 
   it('accepts a root with a trailing separator', async () => {
     const res = await app.request(
@@ -654,6 +732,8 @@ describe('worktree-files: shared error conditions', () => {
   it('409s every endpoint once the worktree is gone from disk', async () => {
     const uploadForm = new FormData();
     uploadForm.set('a', new File(['x'], 'x.txt'));
+    // Windows cannot delete a directory that the live agent uses as its cwd.
+    if (process.platform === 'win32') await fx.service.kill(sessionId);
     rmSync(worktree, { recursive: true, force: true });
     expect(existsSync(worktree)).toBe(false);
 

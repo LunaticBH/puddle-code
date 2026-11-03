@@ -50,6 +50,7 @@ import { versionRoutes } from './routes/version.js';
 import { worktreeRoutes } from './routes/worktrees/worktrees.js';
 import { puddlangRoutes } from './routes/execution/puddlang.js';
 import type { PuddlangService } from '../puddlang/service.js';
+import type { MarkerFileSync } from '../sessions/onboarding.js';
 
 /** Everything the REST + WS surface needs; `api` is absent in narrow tests. */
 export interface AppDeps {
@@ -79,6 +80,8 @@ export interface AppDeps {
     notebooks?: NotebookKernels;
     latex: LatexProvider;
     puddlang?: PuddlangService;
+    /** Lets a Windows prune release the daemon's own watcher in that worktree. */
+    onboarding?: Pick<MarkerFileSync, 'unwatch'>;
   };
   ws?: {
     gateway: WsGateway;

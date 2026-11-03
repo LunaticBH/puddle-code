@@ -5,13 +5,13 @@ import {
   openSync,
   readSync,
   readdirSync,
-  renameSync,
   statSync,
   unlinkSync,
   writeFileSync,
   writeSync,
 } from 'node:fs';
 import { join } from 'node:path';
+import { renameWithRetrySync } from '@puddle/shared/node/platform';
 import { isStorageFull } from '../storage/errors.js';
 
 const FLUSH_MS = 100;
@@ -241,7 +241,8 @@ export class LogStore {
     try {
       writeFileSync(tmp, buf.subarray(0, read), { mode: 0o600 });
       this.closeFd(key);
-      renameSync(tmp, file);
+      // Windows: a scanner or indexer briefly holding the log open is retried.
+      renameWithRetrySync(tmp, file);
       this.fds.set(key, openSync(file, 'a', 0o600));
       this.sizes.set(key, read);
     } finally {

@@ -8,6 +8,12 @@ import { sessionId } from '../common.js';
  * `worktree-git.ts` — these are the only endpoints that change the worktree's
  * on-disk layout from the client. Every `path`/`from`/`to` is validated
  * server-side against the worktree root (see `containedPath`).
+ *
+ * Root-relative paths travel with `/` on every host, Windows included; a
+ * Windows daemon also accepts `\` on input. There it answers 400
+ * `invalid_name` for a new name Windows cannot store (reserved device names,
+ * `<>:"|?*`, a trailing dot or space) and 409 `path_busy` when another program
+ * holds the entry open.
  */
 
 /** `POST /api/worktrees/:sid/create` — an empty file or a `mkdir -p` folder. */

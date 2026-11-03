@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
@@ -314,7 +315,8 @@ describe('puddlang host execution', () => {
       new AbortController().signal,
     );
     await expect(
-      operations.execute({ op: 'spawn', options: { agent: 'fake', path: '/tmp' } }),
+      // An existing directory that no project registers (`/tmp` is not one on Windows).
+      operations.execute({ op: 'spawn', options: { agent: 'fake', path: tmpdir() } }),
     ).rejects.toThrow('registered');
     await expect(
       operations.execute({

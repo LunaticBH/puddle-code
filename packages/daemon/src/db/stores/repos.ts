@@ -1,4 +1,5 @@
 import type { Repo } from '@puddle/shared';
+import { sameHostPath } from '../../host-path.js';
 import { ApiError } from '../../http/errors.js';
 import type { Db } from '../db.js';
 
@@ -61,9 +62,12 @@ export class RepoStore {
     return toRepo(row);
   }
 
-  getByPath(path: string): Repo | undefined {
+  /** Exact match; Windows then also matches another spelling of the same path. */
+  getByPath(path: string, platform: NodeJS.Platform = process.platform): Repo | undefined {
     const row = this.db.prepare(`SELECT * FROM repos WHERE path = ?`).get(path) as Row | undefined;
-    return row ? toRepo(row) : undefined;
+    if (row) return toRepo(row);
+    if (platform !== 'win32') return undefined;
+    return this.list().find((repo) => sameHostPath(repo.path, path, platform));
   }
 
   patch(

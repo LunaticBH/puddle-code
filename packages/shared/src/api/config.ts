@@ -23,7 +23,9 @@ const fields = {
    * Colon-separated dirs prepended to the daemon's PATH so it can find agent
    * CLIs even under a supervisor with a bare PATH (launchd/systemd). Leading `~`
    * expands to the daemon user's home. Covers Claude Code's native-installer
-   * location (`~/.local/bin`). Takes effect on the next daemon start.
+   * location (`~/.local/bin`). Takes effect on the next daemon start. A Windows
+   * daemon separates entries with `;`, also expands `%VAR%`, and replaces this
+   * POSIX default with its own (npm, pnpm, Bun and Scoop launcher dirs).
    */
   agentPath: z.string(),
   /**

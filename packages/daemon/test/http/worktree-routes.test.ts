@@ -31,6 +31,19 @@ let fx: Fixture;
 let sessionId: string;
 let app: Hono;
 
+/** Windows creates file symlinks only under Developer Mode or elevation. */
+const fileSymlinks = (() => {
+  const dir = mkdtempSync(join(tmpdir(), 'puddle-link-probe-'));
+  try {
+    symlinkSync(join(dir, 'missing'), join(dir, 'link'), 'file');
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+})();
+
 beforeAll(async () => {
   fx = fixture();
   const session = await fx.service.create({
@@ -106,6 +119,8 @@ describe('POST /api/worktrees/:sid/paste', () => {
 
   it('409s when the worktree is gone from disk', async () => {
     const worktree = fx.service.get(sessionId).worktree_path;
+    // Windows cannot delete a directory that the live agent uses as its cwd.
+    if (process.platform === 'win32') await fx.service.kill(sessionId);
     rmSync(worktree, { recursive: true, force: true });
     expect(existsSync(worktree)).toBe(false);
     const res = await paste(sessionId, { mime: 'image/png', data: 'aGk=' });
@@ -208,6 +223,32 @@ describe('GET /api/worktrees/:sid/resolve', () => {
     expect(body).toEqual({ path: homedir(), line: null, kind: 'dir' });
   });
 
+  it.runIf(process.platform === 'win32')(
+    'accepts either separator, any case and ~\\ on Windows, answering canonically',
+    async () => {
+      const lower = join(worktree, 'src').replaceAll('\\', '/').toLowerCase();
+      const dir = resolvePathResponseSchema.parse(
+        await (await resolvePath(resolveSessionId, `?path=${encodeURIComponent(lower)}`)).json(),
+      );
+      expect(dir).toEqual({
+        path: join(worktree, 'src'),
+        line: null,
+        kind: 'dir',
+        relative_path: 'src',
+      });
+      const file = resolvePathResponseSchema.parse(
+        await (
+          await resolvePath(resolveSessionId, `?path=${encodeURIComponent(`${lower}\\foo.ts`)}`)
+        ).json(),
+      );
+      expect(file.path).toBe('src/foo.ts');
+      const home = resolvePathResponseSchema.parse(
+        await (await resolvePath(resolveSessionId, `?path=${encodeURIComponent('~\\')}`)).json(),
+      );
+      expect(home).toEqual({ path: homedir(), line: null, kind: 'dir' });
+    },
+  );
+
   it('resolves relative paths from a session-less directory target', async () => {
     const root = mkdtempSync(join(tmpdir(), 'puddle-resolve-directory-target-'));
     writeFileSync(join(root, 'notes.md'), '# notes\n');
@@ -231,17 +272,21 @@ describe('GET /api/worktrees/:sid/resolve', () => {
     expect(res.status).toBe(404);
   });
 
-  it('resolves a symlink inside the worktree pointing at an outside file', async () => {
-    const outside = mkdtempSync(join(tmpdir(), 'puddle-resolve-outside-'));
-    writeFileSync(join(outside, 'secret.ts'), 'top secret');
-    symlinkSync(join(outside, 'secret.ts'), join(worktree, 'escape-link.ts'));
+  // Needs a file symlink, which an unprivileged Windows account cannot create.
+  it.skipIf(!fileSymlinks)(
+    'resolves a symlink inside the worktree pointing at an outside file',
+    async () => {
+      const outside = mkdtempSync(join(tmpdir(), 'puddle-resolve-outside-'));
+      writeFileSync(join(outside, 'secret.ts'), 'top secret');
+      symlinkSync(join(outside, 'secret.ts'), join(worktree, 'escape-link.ts'));
 
-    // Symlinks are followed (read+write policy) — a terminal link to a
-    // symlinked-out file opens just like the explorer opens it. Only lexical
-    // `..`/absolute escapes 404 (covered above).
-    const res = await resolvePath(resolveSessionId, '?path=escape-link.ts');
-    expect(res.status).toBe(200);
-  });
+      // Symlinks are followed (read+write policy) — a terminal link to a
+      // symlinked-out file opens just like the explorer opens it. Only lexical
+      // `..`/absolute escapes 404 (covered above).
+      const res = await resolvePath(resolveSessionId, '?path=escape-link.ts');
+      expect(res.status).toBe(200);
+    },
+  );
 
   it('404s a missing file', async () => {
     const res = await resolvePath(resolveSessionId, '?path=nope.ts');
@@ -284,6 +329,8 @@ describe('GET /api/worktrees/:sid/resolve', () => {
   });
 
   it('409s when the worktree is gone from disk', async () => {
+    // Windows cannot delete a directory that the live agent uses as its cwd.
+    if (process.platform === 'win32') await fx.service.kill(resolveSessionId);
     rmSync(worktree, { recursive: true, force: true });
     expect(existsSync(worktree)).toBe(false);
     const res = await resolvePath(resolveSessionId, '?path=src/foo.ts');

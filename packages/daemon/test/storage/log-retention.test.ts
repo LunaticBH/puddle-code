@@ -27,6 +27,19 @@ vi.mock('node:fs/promises', async (original) => {
 
 const DAY = 24 * 60 * 60 * 1000;
 const NOW = Math.floor(Date.now() / 1000) * 1000;
+
+/** Windows creates file symlinks only under Developer Mode or elevation. */
+const fileSymlinks = (() => {
+  const dir = mkdtempSync(join(tmpdir(), 'puddle-link-probe-'));
+  try {
+    symlinkSync(join(dir, 'missing'), join(dir, 'link'), 'file');
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+})();
 let home: string;
 beforeEach(() => {
   vi.resetAllMocks();
@@ -64,7 +77,7 @@ describe('three-day bulk terminal log retention', () => {
     expect(logs.listTerms('archived').sort()).toEqual(['agent', 'shell-4']);
     expect(readFileSync(snapshot, 'utf8')).toContain('saved screen');
     expect(readFileSync(history, 'utf8')).toBe('shell commands\n');
-    expect(statSync(file).mode & 0o777).toBe(0o600);
+    if (process.platform !== 'win32') expect(statSync(file).mode & 0o777).toBe(0o600); // no mode bits on Windows
     expect((await sweep()).compacted).toBe(0);
     logs.closeAll();
   });
@@ -114,6 +127,20 @@ describe('three-day bulk terminal log retention', () => {
     });
     expect(result.compacted).toBe(0);
     expect([recent, live, small, diagnostic].map((file) => statSync(file).size)).toEqual(sizes);
+  });
+  it('compacts under the Windows rules (source closed before replacement) on any host', async () => {
+    const file = log();
+    const tail = readFileSync(file).subarray(-1024);
+    const result = await compactTerminalLogs({
+      logsDir: home,
+      retentionDays: 3,
+      replayBytes: 1024,
+      isBusy: () => false,
+      now: NOW,
+      platform: 'win32',
+    });
+    expect(result).toMatchObject({ compacted: 1, failed: 0 });
+    expect(readFileSync(file)).toEqual(tail);
   });
   it('honours disabled retention and the exact cutoff', async () => {
     log('old');
@@ -176,9 +203,13 @@ describe('three-day bulk terminal log retention', () => {
       const target = join(outside, 'agent.log');
       writeFileSync(target, 'outside'.repeat(2000));
       utimesSync(target, new Date(NOW - 4 * DAY), new Date(NOW - 4 * DAY));
-      symlinkSync(outside, join(home, 'linked-directory'));
+      // Windows: a junction for the directory (no privilege needed); the file
+      // link only where this account may create file symlinks.
+      if (process.platform === 'win32')
+        symlinkSync(outside, join(home, 'linked-directory'), 'junction');
+      else symlinkSync(outside, join(home, 'linked-directory'));
       mkdirSync(join(home, 'real'));
-      symlinkSync(target, join(home, 'real/agent.log'));
+      if (fileSymlinks) symlinkSync(target, join(home, 'real/agent.log'));
       expect((await sweep()).compacted).toBe(0);
       expect(statSync(target).size).toBe(14000);
       expect(existsSync(target)).toBe(true);

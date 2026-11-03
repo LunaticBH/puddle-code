@@ -15,6 +15,7 @@ import {
   pushRepository,
   stagePaths,
   unstagePaths,
+  withPathspecs,
 } from '../../src/worktrees/repositories.js';
 import { cloneRepo, commitFile, initRepo, sh } from '../helpers/git-fixtures.js';
 
@@ -119,7 +120,10 @@ describe('source-control mutations and baselines', () => {
   it('handles partial staging, literal pathspecs, commit, unstage, and conflicts', async () => {
     const repo = initRepo();
     cleanup.push(repo);
-    const magic = ':(glob)literal.txt';
+    // NTFS cannot store `:`. Windows uses wildcard magic it can store instead,
+    // with a decoy the wildcard would also match unless paths stay literal.
+    const magic = process.platform === 'win32' ? '[x]literal.txt' : ':(glob)literal.txt';
+    if (process.platform === 'win32') writeFileSync(join(repo, 'xliteral.txt'), 'decoy\n');
     const dash = '-dash.txt';
     writeFileSync(join(repo, magic), 'magic\n');
     writeFileSync(join(repo, dash), 'dash\n');
@@ -163,6 +167,28 @@ describe('source-control mutations and baselines', () => {
     expect(status.repositories[0]?.conflicts).toEqual([]);
   });
 
+  it('stages and unstages more paths than a Windows command line can carry', async () => {
+    const repo = initRepo();
+    cleanup.push(repo);
+    const names = Array.from({ length: 400 }, (_, i) => `${'deep-name-'.repeat(10)}${i}.txt`);
+    for (const name of names) writeFileSync(join(repo, name), `${name}\n`);
+    expect(names.join(' ').length).toBeGreaterThan(32_767);
+    await stagePaths(repo, repo, names);
+    expect((await gitRepositories(repo)).repositories[0]?.staged).toHaveLength(names.length);
+    await unstagePaths(repo, repo, names);
+    expect((await gitRepositories(repo)).repositories[0]?.staged).toEqual([]);
+  });
+
+  it('passes literal pathspecs on stdin under the Windows rules, on any host', async () => {
+    const repo = initRepo();
+    cleanup.push(repo);
+    const paths = ['a b.txt', '-dash.txt', '[x].txt'];
+    for (const name of [...paths, 'x.txt']) writeFileSync(join(repo, name), `${name}\n`);
+    await withPathspecs(repo, ['--literal-pathspecs', 'add', '-A'], paths, 'win32');
+    const staged = (await gitRepositories(repo)).repositories[0]?.staged.map((entry) => entry.path);
+    expect(staged?.sort()).toEqual([...paths].sort()); // the decoy x.txt stays unstaged
+  });
+
   it('reads HEAD and index independently across renames, ignored files, and nested repos', async () => {
     const repo = initRepo();
     cleanup.push(repo);
@@ -204,47 +230,55 @@ describe('source-control mutations and baselines', () => {
     });
   });
 
-  it('uses the resolved target for a symlinked editor baseline', async () => {
-    const repo = initRepo();
-    cleanup.push(repo);
-    writeFileSync(join(repo, 'CLAUDE.md'), 'target at head\n');
-    symlinkSync('CLAUDE.md', join(repo, 'AGENTS.md'));
-    sh(repo, 'add', 'CLAUDE.md', 'AGENTS.md');
-    sh(repo, 'commit', '-m', 'add linked instructions');
-    writeFileSync(join(repo, 'CLAUDE.md'), 'working target\n');
+  // Git for Windows records symlinks only with core.symlinks and a privileged account.
+  it.skipIf(process.platform === 'win32')(
+    'uses the resolved target for a symlinked editor baseline',
+    async () => {
+      const repo = initRepo();
+      cleanup.push(repo);
+      writeFileSync(join(repo, 'CLAUDE.md'), 'target at head\n');
+      symlinkSync('CLAUDE.md', join(repo, 'AGENTS.md'));
+      sh(repo, 'add', 'CLAUDE.md', 'AGENTS.md');
+      sh(repo, 'commit', '-m', 'add linked instructions');
+      writeFileSync(join(repo, 'CLAUDE.md'), 'working target\n');
 
-    // Git stores the link itself as its target-path text, but the editor reads
-    // through it. The gutter baseline must therefore come from CLAUDE.md.
-    expect(sh(repo, 'show', 'HEAD:AGENTS.md')).toBe('CLAUDE.md');
-    expect(await gitOriginal(repo, 'AGENTS.md')).toMatchObject({
-      repository: realpathSync(repo),
-      repository_path: 'CLAUDE.md',
-      content: 'target at head\n',
-      exists: true,
-      tracked: true,
-      ignored: false,
-    });
-  });
+      // Git stores the link itself as its target-path text, but the editor reads
+      // through it. The gutter baseline must therefore come from CLAUDE.md.
+      expect(sh(repo, 'show', 'HEAD:AGENTS.md')).toBe('CLAUDE.md');
+      expect(await gitOriginal(repo, 'AGENTS.md')).toMatchObject({
+        repository: realpathSync(repo),
+        repository_path: 'CLAUDE.md',
+        content: 'target at head\n',
+        exists: true,
+        tracked: true,
+        ignored: false,
+      });
+    },
+  );
 
-  it('omits the editor baseline when a symlink target is outside a discovered repository', async () => {
-    const repo = initRepo();
-    const outside = mkdtempSync(join(tmpdir(), 'puddle-linked-file-'));
-    cleanup.push(repo, outside);
-    const target = join(outside, 'shared.txt');
-    writeFileSync(target, 'outside\n');
-    symlinkSync(target, join(repo, 'shared.txt'));
-    sh(repo, 'add', 'shared.txt');
-    sh(repo, 'commit', '-m', 'add external link');
+  // Git for Windows records symlinks only with core.symlinks and a privileged account.
+  it.skipIf(process.platform === 'win32')(
+    'omits the editor baseline when a symlink target is outside a discovered repository',
+    async () => {
+      const repo = initRepo();
+      const outside = mkdtempSync(join(tmpdir(), 'puddle-linked-file-'));
+      cleanup.push(repo, outside);
+      const target = join(outside, 'shared.txt');
+      writeFileSync(target, 'outside\n');
+      symlinkSync(target, join(repo, 'shared.txt'));
+      sh(repo, 'add', 'shared.txt');
+      sh(repo, 'commit', '-m', 'add external link');
 
-    expect(await gitOriginal(repo, 'shared.txt')).toMatchObject({
-      repository: null,
-      repository_path: null,
-      content: null,
-      exists: false,
-      tracked: false,
-      ignored: false,
-    });
-  });
+      expect(await gitOriginal(repo, 'shared.txt')).toMatchObject({
+        repository: null,
+        repository_path: null,
+        content: null,
+        exists: false,
+        tracked: false,
+        ignored: false,
+      });
+    },
+  );
 
   it('treats an unborn repository as entirely added and can unstage it', async () => {
     const repo = mkdtempSync(join(tmpdir(), 'puddle-unborn-'));

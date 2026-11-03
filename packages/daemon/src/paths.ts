@@ -1,7 +1,9 @@
 import { mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, win32 } from 'node:path';
+import { hostPathStyle, normaliseHostPath } from '@puddle/shared';
 import { initialisePrivateHome } from '@puddle/shared/node';
+import { canonicalHostPath } from './host-path.js';
 
 /** Every filesystem location the daemon touches, derived from one home dir. */
 export interface PuddlePaths {
@@ -30,9 +32,26 @@ export interface PuddlePaths {
   sessionLogDir(sessionId: string): string;
 }
 
+/**
+ * Windows spells the home canonically (decision 11), so every path derived
+ * from it, `sessions.worktree_path` included, is canonical too. Only the
+ * parent is resolved: a junction as the home itself must stay visible to
+ * `initialisePrivateHome`, which refuses it. POSIX homes are used as given.
+ */
+export function canonicalHome(home: string, platform: NodeJS.Platform = process.platform): string {
+  if (platform !== 'win32' || hostPathStyle(home) !== 'win32') return home;
+  const normalised = win32.normalize(home);
+  const trimmed =
+    normalised === win32.parse(normalised).root ? normalised : normalised.replace(/\\+$/, '');
+  const parent = win32.dirname(trimmed);
+  if (parent === trimmed) return normaliseHostPath(trimmed);
+  return win32.join(canonicalHostPath(parent, platform), win32.basename(trimmed));
+}
+
 export function resolvePaths(
-  home: string = process.env.PUDDLE_HOME ?? join(homedir(), '.puddle'),
+  requested: string = process.env.PUDDLE_HOME ?? join(homedir(), '.puddle'),
 ): PuddlePaths {
+  const home = canonicalHome(requested);
   return {
     home,
     dbFile: join(home, 'puddle.db'),

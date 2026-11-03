@@ -1,4 +1,3 @@
-import { isAbsolute, join, normalize, sep } from 'node:path';
 import { Hono } from 'hono';
 import type {
   DiffResponse,
@@ -46,7 +45,12 @@ import {
 import { searchWorktree } from '../../../worktrees/search.js';
 import { ApiError } from '../../errors.js';
 import { parseBody } from '../../validate.js';
-import { browseRoot, resolveWorktree, type WorktreeDeps } from './worktree-shared.js';
+import {
+  browseRoot,
+  gitRelativePath,
+  resolveWorktree,
+  type WorktreeDeps,
+} from './worktree-shared.js';
 
 /** Longest search query we accept — long enough for a phrase, short of abuse. */
 const MAX_QUERY_LEN = 500;
@@ -93,25 +97,6 @@ async function gitMutation<T>(run: () => Promise<T>): Promise<T> {
     }
     throw error;
   }
-}
-
-/**
- * Relative-path guard for `file-at`: the path keys a git blob, not a
- * filesystem entry, so `containedPath`'s realpath hardening (worktree-shared.ts)
- * doesn't apply here — the path may not exist on disk at all (e.g. a file
- * deleted since `ref`). A normalise-then-prefix check against a virtual root
- * is enough to reject an absolute path or a `..`-escape.
- */
-function assertContainedRelPath(rel: string): string {
-  if (isAbsolute(rel)) {
-    throw ApiError.badRequest('path_outside_worktree', `path must be relative to the worktree`);
-  }
-  const virtualRoot = '/virtual-root';
-  const joined = normalize(join(virtualRoot, rel));
-  if (joined !== virtualRoot && !joined.startsWith(virtualRoot + sep)) {
-    throw ApiError.badRequest('path_outside_worktree', `path escapes the worktree`);
-  }
-  return joined === virtualRoot ? '' : joined.slice(virtualRoot.length + 1);
 }
 
 /**
@@ -190,13 +175,13 @@ export function worktreeGitRoutes(deps: WorktreeDeps): Hono {
 
     .get('/:sid/index-file', async (c) => {
       const root = browseRoot(c, resolveWorktree(deps, c).root);
-      const rel = assertContainedRelPath(c.req.query('path') ?? '');
+      const rel = gitRelativePath(c.req.query('path') ?? '');
       return c.json<IndexFileResponse>(await indexFile(root, rel));
     })
 
     .get('/:sid/git-original', async (c) => {
       const root = browseRoot(c, resolveWorktree(deps, c).root);
-      const rel = assertContainedRelPath(c.req.query('path') ?? '');
+      const rel = gitRelativePath(c.req.query('path') ?? '');
       return c.json<GitOriginalResponse>(await gitOriginal(root, rel));
     })
 
@@ -250,7 +235,7 @@ export function worktreeGitRoutes(deps: WorktreeDeps): Hono {
       const root = browseRoot(c, resolveWorktree(deps, c).root);
       const ref = c.req.query('ref') ?? '';
       assertSafeRef(ref);
-      const rel = assertContainedRelPath(c.req.query('path') ?? '');
+      const rel = gitRelativePath(c.req.query('path') ?? '');
 
       const result = await blobAt(root, ref, rel);
       if (result === null) {

@@ -8,6 +8,7 @@ import {
   type PasteImageResponse,
   type ResolvePathResponse,
 } from '@puddle/shared';
+import { canonicalHostPath, wireRelative } from '../../../host-path.js';
 import { ApiError } from '../../errors.js';
 import { expandTilde } from '../../tilde.js';
 import { parseBody } from '../../validate.js';
@@ -107,19 +108,21 @@ export function worktreeRoutes(deps: WorktreeDeps): Hono {
     // A directory has no editor to open into. Keep its absolute identity for
     // the external pinned-browse path, and additionally identify one contained
     // by the current resolution root so Files can reveal it in place (16.1).
+    // Absolute answers are canonical and relative ones `/`-separated on every
+    // host (decision 11); both are identities on POSIX.
     if (stat.isDirectory()) {
       for (const base of [root, safeRealpath(root)]) {
         const rel = relative(base, abs);
         if (!rel.startsWith('..') && !isAbsolute(rel)) {
           return c.json<ResolvePathResponse>({
-            path: abs,
+            path: canonicalHostPath(abs),
             line: null,
             kind: 'dir',
-            relative_path: rel,
+            relative_path: wireRelative(rel),
           });
         }
       }
-      return c.json<ResolvePathResponse>({ path: abs, line: null, kind: 'dir' });
+      return c.json<ResolvePathResponse>({ path: canonicalHostPath(abs), line: null, kind: 'dir' });
     }
     if (!stat.isFile()) {
       throw ApiError.notFound('path', rawPath); // fifos, sockets, devices
@@ -135,12 +138,12 @@ export function worktreeRoutes(deps: WorktreeDeps): Hono {
     for (const base of [root, safeRealpath(root)]) {
       const rel = relative(base, abs);
       if (rel !== '' && !rel.startsWith('..') && !isAbsolute(rel)) {
-        return c.json<ResolvePathResponse>({ path: rel, line, kind: 'file' });
+        return c.json<ResolvePathResponse>({ path: wireRelative(rel), line, kind: 'file' });
       }
     }
     return c.json<ResolvePathResponse>({
       path: basename(abs),
-      root: dirname(abs),
+      root: canonicalHostPath(dirname(abs)),
       line,
       kind: 'file',
     });
