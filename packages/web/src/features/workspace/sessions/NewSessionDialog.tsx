@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ChevronDown } from 'lucide-react';
-import type { Project, Session, SessionKind } from '@puddle/shared';
+import {
+  hostBasename,
+  hostPathStyle,
+  type Project,
+  type Session,
+  type SessionKind,
+} from '@puddle/shared';
 import { Button } from '../../../components/ui/button';
 import {
   Dialog,
@@ -43,6 +49,12 @@ import { tildify } from '../../../lib/tildify';
 import { useCurrentProfileId } from '../../profile/profile-store';
 import { orderAccountPickerItems } from './account-picker-order';
 import { resolveSessionSeed } from './session-seed';
+
+/** A worktree directory's own name, for the join picker; a Windows host's splits on `\`. */
+function worktreeName(path: string): string {
+  if (hostPathStyle(path) === 'win32') return hostBasename(path) || path;
+  return path.split('/').filter(Boolean).pop() ?? path;
+}
 
 /**
  * Project → account → branch → directory (SPEC §4/§11). Two independent axes
@@ -145,9 +157,7 @@ export function NewSessionDialog({
       .map((w) => ({
         path: w.path,
         is_primary: w.is_primary,
-        label: w.is_primary
-          ? `${w.path.split('/').filter(Boolean).pop() ?? w.path} (clone)`
-          : (w.path.split('/').filter(Boolean).pop() ?? w.path),
+        label: w.is_primary ? `${worktreeName(w.path)} (clone)` : worktreeName(w.path),
       }));
   }, [worktrees.data, baseName]);
 

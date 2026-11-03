@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import { CornerLeftUp, Undo2 } from 'lucide-react';
 import type { CompilationFileTarget, Session } from '@puddle/shared';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../../components/ui/tooltip';
+import { isHostRoot } from '../../lib/host-path';
 import { ExplorerProvider } from './explorer-context';
 import { FileExplorer } from './FileExplorer';
 
@@ -94,14 +95,14 @@ function BrowseHeader({
           <button
             type="button"
             onClick={onNavigateUp}
-            disabled={root === '/'}
+            disabled={isHostRoot(root)}
             className="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm px-1 py-1 text-left text-fg-gold transition-colors hover:bg-elevated hover:text-fg disabled:pointer-events-none disabled:opacity-40"
           >
             <CornerLeftUp className="size-3.5 shrink-0" />
             <span className="text-xs text-fg-muted">..</span>
           </button>
         </TooltipTrigger>
-        <TooltipContent>{root === '/' ? root : 'Browse the parent directory'}</TooltipContent>
+        <TooltipContent>{isHostRoot(root) ? root : 'Browse the parent directory'}</TooltipContent>
       </Tooltip>
       <Tooltip>
         <TooltipTrigger asChild>

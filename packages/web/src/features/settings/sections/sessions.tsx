@@ -27,6 +27,7 @@ import { Switch } from '../../../components/ui/switch';
 import { updateClientSettings, useClientSettings } from '../../../lib/settings/client-settings';
 import {
   useConfig,
+  useHostPathStyle,
   usePatchConfig,
   usePatchProfileSettings,
   useProfileSettings,
@@ -38,12 +39,14 @@ import { NumberField, SectionTitle, SettingRow } from '../parts';
 
 /**
  * The daemon's agent-search PATH (host-wide, config.json): colon-separated dirs
- * prepended to PATH so the daemon can find agent CLIs like `claude`. Saved on
- * blur; a daemon restart applies it. Distinct from the browser-scoped rows here.
+ * (semicolon-separated on a Windows host, whose PATH uses `;`) prepended to
+ * PATH so the daemon can find agent CLIs like `claude`. Saved on blur; a
+ * daemon restart applies it. Distinct from the browser-scoped rows here.
  */
 function AgentPathRow() {
   const config = useConfig();
   const patch = usePatchConfig();
+  const windowsHost = useHostPathStyle() === 'win32';
   const [value, setValue] = useState('');
   useEffect(() => {
     if (config.data) setValue(config.data.agentPath);
@@ -51,7 +54,11 @@ function AgentPathRow() {
   return (
     <SettingRow
       label="Agent search path (host-wide)"
-      description="Colon-separated dirs the daemon prepends to PATH; helps find agent CLIs like claude (e.g. ~/.local/bin)."
+      description={
+        windowsHost
+          ? 'Semicolon-separated dirs the daemon prepends to PATH; helps find agent CLIs like claude (e.g. ~\\.local\\bin).'
+          : 'Colon-separated dirs the daemon prepends to PATH; helps find agent CLIs like claude (e.g. ~/.local/bin).'
+      }
       htmlFor="agent-path"
     >
       <Input

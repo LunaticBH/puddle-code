@@ -8,6 +8,8 @@
  * imported eagerly if ever useful, though today only `buffer-store.ts` does.
  */
 
+import { hostJoin, hostPathStyle } from '@puddle/shared';
+
 /** One open editor tab's path identity; external files additionally carry `root`. */
 export interface OpenTab {
   session: string;
@@ -72,7 +74,12 @@ export function editorTabLabel(
     (tab) => tab.session !== session && sessionBranches.get(tab.session) === branch,
   );
   const directory = root ?? sessionDirectories?.get(session);
-  const rootedPath = directory === undefined ? path : `${directory.replace(/\/+$/, '')}/${path}`;
+  const rootedPath =
+    directory === undefined
+      ? path
+      : hostPathStyle(directory) === 'win32'
+        ? hostJoin(directory, path) // `C:\wt\src\api.ts`, never a mixed `C:\wt/src/api.ts`
+        : `${directory.replace(/\/+$/, '')}/${path}`;
   // A branch normally distinguishes cross-worktree collisions. It cannot when
   // two worktrees are on the same branch (or both branches are unknown), so the
   // effective absolute directory is the final, honest discriminator.

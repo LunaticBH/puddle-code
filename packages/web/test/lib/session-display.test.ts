@@ -54,6 +54,13 @@ describe('renderSessionTitle', () => {
     expect(renderSessionTitle(s, '${agent}')).toBe('claude-code');
   });
 
+  it('names a Windows host’s worktree directory in ${cwd}', () => {
+    const s = session({ worktree_path: 'C:\\Users\\alice\\code\\app--feature' });
+    expect(renderSessionTitle(s, '${cwd}')).toBe('app--feature');
+    const trailing = session({ worktree_path: 'C:\\Users\\alice\\code\\app--feature\\' });
+    expect(renderSessionTitle(trailing, '${cwd}')).toBe('app--feature');
+  });
+
   it('shows the separator only between two non-empty neighbours', () => {
     const withBranch = session({ agent_title: 'Task' });
     expect(renderSessionTitle(withBranch, '${branch}${separator}${name}')).toBe(

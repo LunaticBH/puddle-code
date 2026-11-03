@@ -9,6 +9,7 @@ import type {
 import { Popover, PopoverContent, PopoverTrigger } from '../../../components/ui/popover';
 import { Input } from '../../../components/ui/input';
 import { useNotebookEnvironments } from '../../../lib/queries/notebook-queries';
+import { useHostPathStyle } from '../../../lib/queries/queries';
 
 export function NotebookEnvironmentPicker({
   source,
@@ -28,6 +29,7 @@ export function NotebookEnvironmentPicker({
   const [open, setOpen] = useState(false);
   const [path, setPath] = useState('');
   const pathId = useId();
+  const windowsHost = useHostPathStyle() === 'win32';
   const catalogue = useNotebookEnvironments(source, open);
   const environments = [...(catalogue.data?.environments ?? [])];
   if (environment && !environments.some((item) => item.python === environment.python))
@@ -126,7 +128,11 @@ export function NotebookEnvironmentPicker({
             id={pathId}
             value={path}
             onChange={(event) => setPath(event.target.value)}
-            placeholder=".venv, ~/miniforge3/envs/analysis, /path/to/python"
+            placeholder={
+              windowsHost
+                ? '.venv, ~\\miniforge3\\envs\\analysis, C:\\path\\to\\python.exe'
+                : '.venv, ~/miniforge3/envs/analysis, /path/to/python'
+            }
             disabled={pending}
           />
           <p className="text-xs text-fg-muted">

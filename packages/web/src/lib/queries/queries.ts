@@ -31,8 +31,10 @@ import type {
   SessionPortsResponse,
   UiStateSnapshot,
   VersionResponse,
+  HostPathStyle,
 } from '@puddle/shared';
 import { api } from '../transport/api';
+import { hostStyleForPlatform, isHostPathish } from '../host-path';
 import { focusAwareInterval } from './poll-focus';
 
 /** TanStack Query hooks per daemon resource. Types come from @puddle/shared. */
@@ -209,10 +211,11 @@ export function useDeleteBranch(repoId: number | undefined, projectId: string | 
 }
 
 export function useDirSuggestions(prefix: string) {
+  const style = useHostPathStyle();
   return useQuery({
     queryKey: ['fs-dirs', prefix],
     queryFn: () => api<FsDirsResponse>('GET', `/api/fs/dirs?prefix=${encodeURIComponent(prefix)}`),
-    enabled: prefix.startsWith('/') || prefix.startsWith('~'), // ~ expands on the host
+    enabled: isHostPathish(prefix, style), // ~ expands on the host
     placeholderData: (previous) => previous, // keep the list steady while typing
     staleTime: 10_000,
   });
@@ -237,6 +240,15 @@ export function useHostInfo() {
     queryFn: () => api<HostInfo>('GET', '/api/host'),
     staleTime: Infinity, // the box does not change under a running daemon
   });
+}
+
+/**
+ * The host's path style (docs/windows.md, decision 11), for decisions taken
+ * with no absolute path in hand. POSIX until `/api/host` answers, and for
+ * daemons older than protocol 25.7, none of which runs on Windows.
+ */
+export function useHostPathStyle(): HostPathStyle {
+  return hostStyleForPlatform(useHostInfo().data?.platform);
 }
 
 /** The machine's label: the user's display-name customisation, else its hostname. */

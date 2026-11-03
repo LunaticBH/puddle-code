@@ -21,11 +21,13 @@ import {
   useCreateAccount,
   useDeleteAccount,
   useDirSuggestions,
+  useHostPathStyle,
   useLoginAccount,
   usePatchAccount,
   useProfileSettings,
 } from '../../../lib/queries/queries';
 import { useDebouncedValue } from '../../../lib/hooks/use-debounced-value';
+import { isHostPathish } from '../../../lib/host-path';
 import { LoginDialog } from '../../accounts/LoginDialog';
 import { useCurrentProfileId } from '../../profile/profile-store';
 import { SectionTitle, SettingRow } from '../parts';
@@ -54,9 +56,10 @@ function AddAccountDialog({
   const [dir, setDir] = useState('');
   const debouncedDir = useDebouncedValue(dir, 150);
   const suggestions = useDirSuggestions(debouncedDir);
+  const style = useHostPathStyle();
   const importDir = dir.trim();
   // A path is only checked when one is given at all — blank is the normal case.
-  const dirValid = importDir === '' || importDir.startsWith('/') || importDir.startsWith('~');
+  const dirValid = importDir === '' || isHostPathish(importDir, style);
   const ready = label.trim() !== '' && dirValid;
 
   const submit = () => {
@@ -106,7 +109,7 @@ function AddAccountDialog({
           <HintInput
             value={dir}
             onValueChange={setDir}
-            placeholder={`(optional) existing config dir, e.g. ~/.claude`}
+            placeholder={`(optional) existing config dir, e.g. ${style === 'win32' ? '~\\.claude' : '~/.claude'}`}
             hints={(suggestions.data?.entries ?? []).map((e) => ({ value: e.path, label: e.name }))}
           />
         </form>

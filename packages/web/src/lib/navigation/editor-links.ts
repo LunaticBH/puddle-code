@@ -1,3 +1,4 @@
+import { hostPathStyle } from '@puddle/shared';
 import { clientSettings } from '../settings/client-settings';
 import { localValue } from '../persistence/local-store';
 
@@ -30,16 +31,33 @@ function escapeHostForUri(host: string): string {
 }
 
 /**
+ * A Windows path in the URI form VS Code expects (`/C:/Users/alice/proj`):
+ * forward slashes, a leading `/`, and the drive colon kept literal. A UNC
+ * path keeps its double slash (`//server/share/proj`), which VS Code reads
+ * as a share.
+ */
+function encodeWindowsPathForUri(path: string): string {
+  const slashed = path.replaceAll('\\', '/');
+  const drive = /^([A-Za-z]:)(\/.*)?$/.exec(slashed);
+  if (drive) return `/${drive[1]}${encodePathForUri(drive[2] ?? '/')}`;
+  return encodePathForUri(slashed);
+}
+
+/**
  * `worktreePath` is always absolute (`/Users/alice/proj`), so plain
  * concatenation after `file` produces the correct single-slash shape
- * (`vscode://file/Users/alice/proj`) without an extra separator.
+ * (`vscode://file/Users/alice/proj`) without an extra separator. A Windows
+ * host's `C:\Users\alice\proj` becomes `vscode://file/C:/Users/alice/proj`.
  */
 export function editorDeepLink(
   editor: Editor,
   worktreePath: string,
   sshHost: string | null,
 ): string {
-  const path = encodePathForUri(worktreePath);
+  const path =
+    hostPathStyle(worktreePath) === 'win32'
+      ? encodeWindowsPathForUri(worktreePath)
+      : encodePathForUri(worktreePath);
   if (sshHost) {
     return `${editor}://vscode-remote/ssh-remote+${escapeHostForUri(sshHost)}${path}`;
   }
