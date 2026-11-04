@@ -6,9 +6,12 @@ Windows hosts, `osBuild` (the Windows build number) to GET `/api/host`; absent
 style from the path itself. A Windows daemon emits canonical native absolute
 paths (`C:\Users\a\repo`), while root-relative paths use `/` on every host. It
 may answer the Windows-only error codes `invalid_name` (400, a name Windows
-cannot store), `path_busy` (409, an entry another program holds open) and
-`unsafe_repository` (400, refused by git `safe.directory`), and `worktree_busy`
-gains an open-handle cause. The private host control channel gains the strict
+cannot store), `path_busy` (409, a rename or delete refused because another
+program holds the entry open or permission is denied; `details.cause` keeps
+the system code, `EBUSY`, `EPERM` or `EACCES`), `source_not_removed` (409, a
+move to another drive copied everything but could not remove the whole
+source) and `unsafe_repository` (400, refused by git `safe.directory`), and
+`worktree_busy` gains an open-handle cause. The private host control channel gains the strict
 `shutdown` request, answered by `shutting_down` before the daemon stops;
 Windows supervision uses it in place of signals, and older daemons answer
 `invalid_control`. The cockpit launcher pipe accepts `shutdown` (answered

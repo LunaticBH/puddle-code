@@ -150,10 +150,17 @@ describe('findPathCandidates on a Windows host', () => {
     ]);
   });
 
-  it('captures a UNC path', () => {
-    expect(win('see \\\\server\\share\\x.txt')).toEqual([
-      { path: '\\\\server\\share\\x.txt', line: undefined, column: undefined, start: 4, end: 24 },
-    ]);
+  it('never offers a UNC or device path, whose lookup would reach another server', () => {
+    for (const line of [
+      'see \\\\server\\share\\x.txt',
+      '\\\\server\\share\\x.txt:3',
+      'see //server/share/x.txt',
+      '"\\\\10.0.0.5\\c$\\notes.md"',
+      'open \\\\?\\C:\\x\\y.ts',
+      'pipe \\\\.\\pipe\\x',
+    ]) {
+      expect(win(line), line).toEqual([]);
+    }
   });
 
   it('reads the tsc/MSVC file(line,col) position and underlines its parentheses', () => {

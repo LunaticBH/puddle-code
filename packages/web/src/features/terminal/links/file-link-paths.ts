@@ -24,12 +24,14 @@ const PATH_RE =
 
 // A Windows host's tools print native paths, so its pattern is used ONLY when
 // the host is win32 and POSIX hosts keep exactly the candidates above. Either
-// separator joins segments; prefixes add a drive (`C:\`, `C:/`), a UNC share
-// (`\\server\share`) and `.\`/`~\`, and the drive colon is consumed by the
-// prefix before the `:line:col` suffix is tried. A position may also follow
-// in tsc/MSVC form, `file(12,5)` or `file(12)`, captured in groups 4 and 5.
+// separator joins segments; prefixes add a drive (`C:\`, `C:/`) and `.\`/`~\`,
+// and the drive colon is consumed by the prefix before the `:line:col` suffix
+// is tried. A position may also follow in tsc/MSVC form, `file(12,5)` or
+// `file(12)`, captured in groups 4 and 5. UNC (`\\server\share`) and device
+// (`\\?\`) paths are never candidates: hovering one would have the host
+// connect to whichever server the output names (the daemon refuses them too).
 const WIN32_PATH_RE =
-  /(?:^|[\s"'`([<])(@?(?:(?:[A-Za-z]:[\\/]|\\\\|\.{1,2}[\\/]|~[\\/]|[\\/])(?:[\w.+@~-]+[\\/])*[\w.+@~-]+|(?:[\w.+@~-]+[\\/])+[\w.+@~-]*|[\w.+@~-]+\.[A-Za-z]\w{0,11}))(?::(\d{1,6})(?::(\d{1,6}))?|\((\d{1,6})(?:,(\d{1,6}))?\))?/dg;
+  /(?:^|[\s"'`([<])(@?(?:(?:[A-Za-z]:[\\/]|\.{1,2}[\\/]|~[\\/]|[\\/])(?:[\w.+@~-]+[\\/])*[\w.+@~-]+|(?:[\w.+@~-]+[\\/])+[\w.+@~-]*|[\w.+@~-]+\.[A-Za-z]\w{0,11}))(?::(\d{1,6})(?::(\d{1,6}))?|\((\d{1,6})(?:,(\d{1,6}))?\))?/dg;
 
 const TRAILING_PUNCT = new Set(['.', ',', ';', ':', ')', ']', "'", '"']);
 

@@ -1,14 +1,17 @@
+import { randomBytes } from 'node:crypto';
 import {
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   renameSync,
   rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, extname, isAbsolute, join, relative, sep } from 'node:path';
+import { dirname, isAbsolute, relative, sep } from 'node:path';
 import { Hono } from 'hono';
+import { renameWithRetrySync } from '@puddle/shared/node/platform';
 import { newFileContent } from '../../../notebooks/empty.js';
 import {
   copyEntryRequestSchema,
@@ -18,7 +21,7 @@ import {
   transferEntryRequestSchema,
   type FsOpResponse,
 } from '@puddle/shared';
-import { wireRelative } from '../../../host-path.js';
+import { hostPathApi, wireRelative } from '../../../host-path.js';
 import { ApiError } from '../../errors.js';
 import { parseBody } from '../../validate.js';
 import {
@@ -48,16 +51,28 @@ import {
  * A non-colliding sibling of `abs`, inserting ` copy`, ` copy 2`, … before the
  * extension (VSCode's paste-into-same-folder behaviour): `foo.txt` → `foo copy.txt`,
  * a folder `bar` → `bar copy`. Returns `abs` unchanged when nothing exists there.
+ *
+ * Windows takes the stem from the name itself: a drive or share root is a
+ * dirname that ends in its separator, so slicing one character past it
+ * dropped the name's first letter (`D:\notes.txt` → `D:\otes copy.txt`).
  */
-function uniqueDestination(abs: string): string {
-  if (!existsSync(abs)) return abs;
-  const dir = dirname(abs);
-  const ext = extname(abs);
-  const stem = abs.slice(dir.length + 1, abs.length - ext.length);
+export function uniqueDestination(
+  abs: string,
+  platform: NodeJS.Platform = process.platform,
+  exists: (path: string) => boolean = existsSync,
+): string {
+  if (!exists(abs)) return abs;
+  const path = hostPathApi(platform);
+  const dir = path.dirname(abs);
+  const ext = path.extname(abs);
+  const stem =
+    platform === 'win32'
+      ? path.basename(abs, ext)
+      : abs.slice(dir.length + 1, abs.length - ext.length);
   for (let n = 1; ; n++) {
     const suffix = n === 1 ? ' copy' : ` copy ${n}`;
-    const candidate = join(dir, `${stem}${suffix}${ext}`);
-    if (!existsSync(candidate)) return candidate;
+    const candidate = path.join(dir, `${stem}${suffix}${ext}`);
+    if (!exists(candidate)) return candidate;
   }
 }
 
@@ -97,6 +112,11 @@ const WINDOWS_IN_USE = new Set(['EPERM', 'EBUSY', 'EACCES']);
  * failures into 409 `path_busy` instead of an opaque 500. Windows refuses to
  * move or delete an entry while an agent, dev server, editor or terminal holds
  * it (or, for a directory, anything inside it) open; POSIX errors pass through.
+ *
+ * Only EBUSY is certainly a sharing violation. Windows reports a handle held
+ * inside a directory as access denied (EPERM), exactly as it reports an ACL
+ * that forbids the change, so those answers name both causes; `details.cause`
+ * and the daemon's log keep the original code.
  */
 export function unlessInUse<T>(
   rel: string,
@@ -108,9 +128,14 @@ export function unlessInUse<T>(
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code ?? '';
     if (platform !== 'win32' || !WINDOWS_IN_USE.has(code)) throw error;
+    const name = rel || '.';
+    console.warn(`could not change ${name}: ${(error as Error).message}`);
     throw ApiError.conflict(
       'path_busy',
-      `${rel || '.'} is in use by another program (a terminal, editor or dev server); close it and try again`,
+      code === 'EBUSY'
+        ? `${name} is in use by another program (a terminal, editor or dev server); close it and try again`
+        : `${name} could not be changed: it is open in another program (a terminal, editor or dev server), or you do not have permission to change it`,
+      { cause: code },
     );
   }
 }
@@ -119,34 +144,86 @@ export function unlessInUse<T>(
  * Move across roots. rename is atomic when both roots share a filesystem; an
  * EXDEV crossing copies first and deletes only after the copy fully succeeds.
  * A failed copy cleans its partial destination and always keeps the source.
+ *
+ * Windows cannot delete what another program holds open, and finding that out
+ * only after the copy left a complete copy beside a half-deleted source, with
+ * a `path_busy` that no retry could clear. So the source is first proved
+ * movable with a same-volume rename, which fails for exactly those handles
+ * (the probe worktree removal uses), before anything is copied. A removal that
+ * still fails afterwards answers 409 `source_not_removed`: the copy is
+ * complete, so the move must not read as one to retry.
  */
-function moveAcrossRoots(from: string, to: string): void {
+export function moveAcrossRoots(
+  from: string,
+  to: string,
+  rel: string,
+  platform: NodeJS.Platform = process.platform,
+): void {
   try {
     renameSync(from, to);
     return;
   } catch (error) {
     if (!isErrno(error, 'EXDEV')) throw error;
   }
+  if (platform === 'win32') assertMovable(from);
   try {
     cpSync(from, to, { recursive: true, errorOnExist: true, force: false });
   } catch (error) {
-    removeTree(to);
+    removeTree(to, platform);
     throw error;
   }
-  removeTree(from);
+  try {
+    removeTree(from, platform);
+  } catch (error) {
+    if (platform !== 'win32') throw error;
+    console.warn(
+      `moved ${rel || '.'} but could not remove its source: ${(error as Error).message}`,
+    );
+    throw ApiError.conflict(
+      'source_not_removed',
+      `${rel || '.'} was copied, but its original could not be removed completely: something in it is open in another program (a terminal, editor or dev server), or you do not have permission to delete it`,
+      { cause: (error as NodeJS.ErrnoException).code ?? '' },
+    );
+  }
+}
+
+/**
+ * Renames `path` to an unused sibling and straight back. Throws the rename's
+ * own error (EPERM or EBUSY while anything in it is open) with nothing moved.
+ */
+function assertMovable(path: string): void {
+  const probe = `${path}.puddle-move-${process.pid}-${randomBytes(4).toString('hex')}`;
+  renameSync(path, probe);
+  // Nothing knows the probe name, but a scanner may glance at it: retry briefly.
+  renameWithRetrySync(probe, path, 'win32');
 }
 
 /**
  * Whether `from` and `to` name the same entry spelt differently, as a
  * case-only rename does on Windows' case-insensitive filesystems. `to` then
  * "exists" but the rename is legitimate. Always false on POSIX.
+ *
+ * The spellings must also open one filesystem object: a directory marked
+ * case-sensitive (WSL's DrvFs, `fsutil file setCaseSensitiveInfo`) holds
+ * `Readme.md` and `README.md` side by side, and renaming one onto the other
+ * would silently replace it. A filesystem without file ids (`ino` 0) is not
+ * trusted to tell them apart, so the rename is refused there.
  */
 export function sameEntry(
   from: string,
   to: string,
   platform: NodeJS.Platform = process.platform,
 ): boolean {
-  return platform === 'win32' && from !== to && from.toLowerCase() === to.toLowerCase();
+  if (platform !== 'win32' || from === to || from.toLowerCase() !== to.toLowerCase()) {
+    return false;
+  }
+  try {
+    const a = lstatSync(from, { bigint: true });
+    const b = lstatSync(to, { bigint: true });
+    return a.ino !== 0n && a.dev === b.dev && a.ino === b.ino;
+  } catch {
+    return false;
+  }
 }
 
 export function worktreeFsOpsRoutes(deps: WorktreeDeps): Hono {
@@ -211,7 +288,7 @@ export function worktreeFsOpsRoutes(deps: WorktreeDeps): Hono {
 
       mkdirSync(dirname(to), { recursive: true });
       if (body.operation === 'copy') cpSync(from, to, { recursive: true });
-      else unlessInUse(body.from, () => moveAcrossRoots(from, to));
+      else unlessInUse(body.from, () => moveAcrossRoots(from, to, body.from));
       return c.json<FsOpResponse>(
         { ok: true, path: wireRelative(relative(destinationRoot, to)) },
         body.operation === 'copy' ? 201 : 200,

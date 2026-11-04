@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { Session } from '@puddle/shared';
+import type { PutFileResponse, Session } from '@puddle/shared';
 import {
   Dialog,
   DialogContent,
@@ -21,6 +21,7 @@ import {
   forgetUntitledContent,
   type UntitledSaveRequest,
 } from '../../editor/buffers/untitled-save-store';
+import { savedTabPath } from './untitled-save-path';
 
 /**
  * The save-as step for an untitled draft (SPEC §8): pick a worktree-relative
@@ -95,7 +96,7 @@ export function UntitledSaveDialog({
         setError(`${rel} already exists in ${targetLabel}.`);
         return;
       }
-      await api(
+      const saved = await api<PutFileResponse>(
         'PUT',
         `/api/worktrees/${targetSession.id}/file?path=${encodeURIComponent(rel)}${rootParam(targetRoot)}`,
         { content: request.content },
@@ -104,7 +105,7 @@ export function UntitledSaveDialog({
         await deleteUntitled(profileId, request.name).catch(() => undefined);
       }
       forgetUntitledContent(request.name);
-      onSaved(request.name, targetSession.id, rel, targetRoot);
+      onSaved(request.name, targetSession.id, savedTabPath(rel, saved, style), targetRoot);
     } catch (e) {
       setError(windowsRefusalMessage(e) ?? (e instanceof Error ? e.message : 'Save failed'));
     } finally {

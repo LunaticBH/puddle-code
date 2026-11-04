@@ -63,6 +63,34 @@ describe('windowsRefusalMessage', () => {
     }
   });
 
+  it('names a permission as the other cause when Windows only said access denied', () => {
+    expect(
+      windowsRefusalMessage(
+        refusal(
+          409,
+          'path_busy',
+          'Program Files/app could not be changed: it is open in another program (a terminal, editor or dev server), or you do not have permission to change it',
+        ),
+      ),
+    ).toBe(
+      "'Program Files/app' is open in another program (a terminal, editor or dev server), or you don't have permission to change it, so Windows can't move or delete it. Close it there, or check its permissions, and try again.",
+    );
+  });
+
+  it('says a move to another drive copied everything but left part of the original', () => {
+    expect(
+      windowsRefusalMessage(
+        refusal(
+          409,
+          'source_not_removed',
+          'project was copied, but its original could not be removed completely: something in it is open in another program (a terminal, editor or dev server), or you do not have permission to delete it',
+        ),
+      ),
+    ).toBe(
+      "'project' was copied, but Windows couldn't remove all of the original: something in it is open in another program (a terminal, editor or dev server), or you don't have permission to delete it. Close it, then delete what is left of the original.",
+    );
+  });
+
   it('explains a worktree held open on Windows, but not the running-sessions refusal', () => {
     expect(
       windowsRefusalMessage(
