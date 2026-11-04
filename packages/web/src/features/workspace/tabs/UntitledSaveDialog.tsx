@@ -12,7 +12,8 @@ import { Button } from '../../../components/ui/button';
 import { Input } from '../../../components/ui/input';
 import { Label } from '../../../components/ui/label';
 import { ApiError, api } from '../../../lib/transport/api';
-import { typedRootRelativePath } from '../../../lib/host-path';
+import { hostNameProblem, typedRootRelativePath } from '../../../lib/host-path';
+import { invalidNameMessage, windowsRefusalMessage } from '../../../lib/transport/windows-refusals';
 import { useHostPathStyle } from '../../../lib/queries/queries';
 import { deleteUntitled } from '../../../lib/queries/untitled-queries';
 import { rootParam } from '../../../lib/queries/worktree-queries';
@@ -70,6 +71,11 @@ export function UntitledSaveDialog({
       setError('Give the file a path.');
       return;
     }
+    const problem = hostNameProblem(rel, style);
+    if (problem !== null) {
+      setError(invalidNameMessage(rel, problem));
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -100,7 +106,7 @@ export function UntitledSaveDialog({
       forgetUntitledContent(request.name);
       onSaved(request.name, targetSession.id, rel, targetRoot);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Save failed');
+      setError(windowsRefusalMessage(e) ?? (e instanceof Error ? e.message : 'Save failed'));
     } finally {
       setBusy(false);
     }

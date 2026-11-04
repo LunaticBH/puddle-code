@@ -92,6 +92,8 @@ import {
 } from './editor-context';
 import { toast } from 'sonner';
 import { toastError } from '../../lib/transport/errors';
+import { invalidNameMessage } from '../../lib/transport/windows-refusals';
+import { hostNameProblem, hostStyleForPlatform } from '../../lib/host-path';
 import { warmEditorChunk } from '../editor/lazy-editor-parts';
 import { warmTerminalChunk } from '../terminal/LazyTerminal';
 import { wsManager } from '../../lib/transport/ws';
@@ -1165,6 +1167,7 @@ function WorkspaceInner() {
   // is the machine's label (display-name customisation first, then hostname),
   // not the app name — the window says which host and project it drives.
   const host = useHostInfo();
+  const hostStyle = hostStyleForPlatform(host.data?.platform);
   useEffect(() => {
     const base = hostLabel(host.data) ?? 'Puddle';
     const waiting = sessions.filter((s) => s.status === 'waiting_input').length;
@@ -1424,6 +1427,12 @@ function WorkspaceInner() {
     async (tab: EditorTab, newName: string): Promise<boolean> => {
       const trimmed = newName.trim();
       if (trimmed === '' || trimmed === basename(tab.path)) return true;
+      // A name a Windows host cannot store keeps the rename field open.
+      const problem = hostNameProblem(trimmed, hostStyle);
+      if (problem !== null) {
+        toast.error(invalidNameMessage(trimmed, problem));
+        return false;
+      }
       const nextPath = joinPath(dirOf(tab.path), trimmed);
       try {
         // Load the lazy buffer module BEFORE touching disk. If the editor chunk
@@ -1451,7 +1460,7 @@ function WorkspaceInner() {
         return false;
       }
     },
-    [qc],
+    [qc, hostStyle],
   );
   const openFromTerminal = useCallback(
     (session: string, target: FileLinkTarget) => {

@@ -1,5 +1,6 @@
 import { toast } from 'sonner';
 import { ApiError } from './api';
+import { windowsRefusalMessage } from './windows-refusals';
 
 /**
  * The single place a failed action becomes visible.
@@ -30,6 +31,8 @@ export function liveConversationTarget(
 }
 
 function message(error: unknown): string {
+  const windows = windowsRefusalMessage(error);
+  if (windows !== null) return windows;
   if (error instanceof Error && error.message.trim() !== '') return error.message;
   if (typeof error === 'string' && error.trim() !== '') return error;
   return 'Something went wrong';

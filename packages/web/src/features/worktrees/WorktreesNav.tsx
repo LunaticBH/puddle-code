@@ -20,6 +20,7 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from '../../components/ui/tooltip';
 import { hostPathKey } from '../../lib/host-path';
 import { useDeleteBranch, usePruneWorktree, useRepoWorktrees } from '../../lib/queries/queries';
+import { windowsRefusalMessage } from '../../lib/transport/windows-refusals';
 import { cn } from '../../lib/utils';
 
 const LIVE = new Set(['starting', 'running', 'waiting_input']);
@@ -166,7 +167,7 @@ export function WorktreesNav({
   const confirm = () => {
     if (!target) return;
     setError(null);
-    const onError = (e: Error) => setError(e.message);
+    const onError = (e: Error) => setError(windowsRefusalMessage(e) ?? e.message);
     const onSuccess = () => setTarget(null);
     if (target.kind === 'worktree') prune.mutate(target.path, { onSuccess, onError });
     else deleteBranch.mutate({ name: target.name, confirm: true }, { onSuccess, onError });
