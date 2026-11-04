@@ -22,6 +22,7 @@ import {
   connectorPipeState,
   isPidAlive,
   killProcessTree,
+  peMachine,
   supervisorRequest,
   system32Path,
   type PowerShellRunner,
@@ -37,6 +38,7 @@ import {
   installWindowsDaemon,
   pruneCache,
   versionFromArchiveName,
+  windowsInstalledVersion,
   windowsLauncher,
 } from '../../src/lib/installation/windows-install.js';
 import { LocalTransport } from '../../src/lib/transport/local.js';
@@ -56,9 +58,9 @@ describe('Windows daemon release assets', () => {
     process.env.PUDDLE_REPO = 'acme/puddle';
     try {
       // The checksum refuses the download before anything is unpacked or started.
-      await expect(installWindowsDaemon({ home, version: '1.2.3', fetchFn })).rejects.toThrow(
-        'checksum mismatch',
-      );
+      await expect(
+        installWindowsDaemon({ home, version: '1.2.3', fetchFn, hostArch: async () => 'x64' }),
+      ).rejects.toThrow('checksum mismatch');
     } finally {
       if (savedRepo === undefined) delete process.env.PUDDLE_REPO;
       else process.env.PUDDLE_REPO = savedRepo;
@@ -71,6 +73,31 @@ describe('Windows daemon release assets', () => {
     expect(existsSync(join(home, 'bin', 'versions', '1.2.3'))).toBe(false);
   });
 
+  it('fetches the machine’s own architecture from the repository it is told', async () => {
+    const home = join(mkdtempSync(join(tmpdir(), 'puddle-windows-arm64-')), '.puddle');
+    const requested: string[] = [];
+    const fetchFn = (async (url: string | URL | Request) => {
+      requested.push(String(url));
+      return new Response(`${'0'.repeat(64)}  puddled-v1.2.3-win32-arm64.zip\n`);
+    }) as typeof fetch;
+    // The SSH host helper names its client's repository; nothing else does here.
+    await expect(
+      installWindowsDaemon({
+        home,
+        version: '1.2.3',
+        fetchFn,
+        slug: 'fork/puddle',
+        hostArch: async () => 'arm64',
+      }),
+    ).rejects.toThrow('checksum mismatch');
+    expect(requested[0]).toBe(
+      'https://github.com/fork/puddle/releases/download/v1.2.3/puddled-v1.2.3-win32-arm64.zip',
+    );
+    await expect(
+      installWindowsDaemon({ home, version: '1.2.3', fetchFn, hostArch: async () => 'x86' }),
+    ).rejects.toMatchObject({ code: 'unsupported_platform' });
+  });
+
   it('reports an offline download as not installed, which a launcher can fall back on', async () => {
     const home = join(mkdtempSync(join(tmpdir(), 'puddle-windows-offline-')), '.puddle');
     // What Node's fetch rejects with when the network is down.
@@ -80,7 +107,12 @@ describe('Windows daemon release assets', () => {
     const savedRepo = process.env.PUDDLE_REPO;
     process.env.PUDDLE_REPO = 'acme/puddle';
     try {
-      const failure = installWindowsDaemon({ home, version: '1.2.3', fetchFn });
+      const failure = installWindowsDaemon({
+        home,
+        version: '1.2.3',
+        fetchFn,
+        hostArch: async () => 'x64',
+      });
       await expect(failure).rejects.toBeInstanceOf(CliError);
       await expect(failure).rejects.toMatchObject({
         code: 'not_installed',
@@ -303,6 +335,35 @@ describe.runIf(
     expect(await controlPipePresent(home)).toBe(false);
     expect((await supervisorRequest(home, 'status')).kind).toBe('absent');
     expect(existsSync(join(home, 'puddled.pid'))).toBe(false);
+  }, 180_000);
+
+  it('refuses an archive of another architecture, and never counts such a tree as installed', async () => {
+    const at = freshHome();
+    // This machine's node.exe stands for the archive's runtime.
+    const other = peMachine(process.execPath) === 'arm64' ? 'x64' : 'arm64';
+    await expect(
+      install({ home: at, tarball: zip, hostArch: async () => other }),
+    ).rejects.toMatchObject({
+      code: 'not_installed',
+      message: expect.stringContaining(`this machine is win32-${other}`),
+      hint: `use puddled-v1.2.3-win32-${other}.zip`,
+    });
+    expect(existsSync(join(at, 'bin', 'versions', '1.2.3'))).toBe(false);
+
+    await install({ home: at, tarball: zip });
+    expect(await windowsInstalledVersion(at)).toBe('1.2.3');
+    expect(await windowsInstalledVersion(at, async () => other)).toBeNull();
+    await stopWindowsDaemon(at);
+  }, 180_000);
+
+  it('refuses a start that would end with the SSH session that asked for it', async () => {
+    const at = freshHome();
+    // Task Scheduler and WMI are both refused: only a detached child is left.
+    await expect(install({ home: at, tarball: zip, detachedStart: false })).rejects.toMatchObject({
+      code: 'session_bound',
+    });
+    expect(await supervisorRequest(at, 'status')).toMatchObject({ kind: 'absent' });
+    expect(await controlPipePresent(at)).toBe(false);
   }, 180_000);
 
   it('runs a release from before the supervisor detached, until an archive replaces it', async () => {

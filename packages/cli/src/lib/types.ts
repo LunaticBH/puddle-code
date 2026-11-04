@@ -37,7 +37,9 @@ export type CliErrorCode =
   | 'already_running'
   | 'cockpit_launch_failed'
   | 'token_rejected'
-  | 'bad_arguments';
+  | 'bad_arguments'
+  /** A Windows SSH host can start puddled only inside the session, which would end it. */
+  | 'session_bound';
 
 /** The lib's one error shape; the bin renders message + hint and exits 1. */
 export class CliError extends Error {

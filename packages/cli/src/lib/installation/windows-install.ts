@@ -1,5 +1,6 @@
-import { execFile } from 'node:child_process';
+import { execFile, type ChildProcess } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import {
   createReadStream,
   createWriteStream,
@@ -24,6 +25,8 @@ import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import { initialisePrivateHome, ipcPath, listenPrivate, rotateIpcNonce } from '@puddle/shared/node';
 import {
   isPidAlive,
+  isWindowsArch,
+  peMachine,
   registerSupervisorTask,
   renameWithRetry,
   shipsSupervisor,
@@ -32,6 +35,7 @@ import {
   system32Path,
   unregisterWindowsTask,
   supervisorTaskName,
+  windowsHostArch,
   type StartSupervisorOptions,
 } from '@puddle/shared/node/platform';
 import { readCurrentVersion } from './current-link.js';
@@ -85,6 +89,22 @@ export interface WindowsInstallOptions {
   fetchFn?: typeof fetch;
   /** Seams for tests: no test registers a real scheduled task. */
   supervision?: WindowsSupervisionSeams;
+  /**
+   * The release repository (`owner/repo`) to download from. The host helper
+   * an SSH client runs here (src/windows-host.ts) is told its client's, since
+   * its own bundle and environment name none.
+   */
+  slug?: string;
+  /** This machine's architecture; windowsHostArch() unless a test pins it. */
+  hostArch?: () => Promise<string>;
+  /**
+   * False when this process runs in a job that ends with it: a Windows
+   * OpenSSH session's kill-on-close job takes every detached child of the
+   * session with it. A start that would leave the daemon or its supervisor
+   * as such a child is then refused with `session_bound`, so the caller can
+   * keep the daemon attached to its own connection instead.
+   */
+  detachedStart?: boolean;
 }
 
 /** Task Scheduler and WMI through an injected PowerShell, and the detached fallback. */
@@ -111,13 +131,17 @@ export async function installWindowsDaemon(opts: WindowsInstallOptions = {}): Pr
   for (const dir of [join(home, 'bin', 'versions'), join(home, 'cache'), join(home, 'logs')]) {
     mkdirSync(dir, { recursive: true });
   }
+  const arch = await (opts.hostArch ?? windowsHostArch)();
+  if (!isWindowsArch(arch)) {
+    throw new CliError('unsupported_platform', `Puddle has no Windows ${arch} build`);
+  }
   const local = opts.tarball === undefined ? undefined : resolve(opts.tarball);
   const version = opts.version ?? (local ? versionFromArchiveName(local) : pinnedDaemonVersion());
   if (version === undefined) {
     throw new CliError(
       'bad_arguments',
       `cannot derive a version from ${basename(local!)}`,
-      'name it puddled-v<version>-win32-x64.zip, or pass the version explicitly',
+      `name it puddled-v<version>-win32-${arch}.zip, or pass the version explicitly`,
     );
   }
   if (local !== undefined && !existsSync(local)) {
@@ -131,21 +155,44 @@ export async function installWindowsDaemon(opts: WindowsInstallOptions = {}): Pr
     // its version that was built before the supervisor.
     const outdated =
       local !== undefined && existsSync(runtime.dir) && !shipsSupervisor(runtime.dir);
-    if (existsSync(runtime.dir) && !outdated && (await smokeTest(runtime, version, home))) {
+    // Another architecture's tree never counts as installed: an x64 runtime
+    // still runs on Arm, under emulation, but it is not that machine's build.
+    const foreign = existsSync(runtime.node) && peMachine(runtime.node) !== arch;
+    if (
+      existsSync(runtime.dir) &&
+      !outdated &&
+      !foreign &&
+      (await smokeTest(runtime, version, home))
+    ) {
       logger.info(`version ${version} already installed`);
     } else {
-      const archive = local ?? (await download(home, version, opts.fetchFn ?? fetch, logger));
+      const slug = opts.slug ?? repoSlug();
+      const archive =
+        local ?? (await download(home, version, arch, slug, opts.fetchFn ?? fetch, logger));
       if (local !== undefined) await verifyLocalArchive(local, logger);
       if (existsSync(runtime.dir)) {
         // A broken tree may still be the running daemon's: its files are locked.
-        logger.info(
-          `existing version ${version} ${outdated ? 'predates the Windows supervisor' : 'failed validation'} — reinstalling`,
-        );
+        const reason = outdated
+          ? 'predates the Windows supervisor'
+          : foreign
+            ? `is not the win32-${arch} build`
+            : 'failed validation';
+        logger.info(`existing version ${version} ${reason} — reinstalling`);
         await stopWindowsDaemon(home, { logger });
         rmSync(runtime.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
       }
       mkdirSync(runtime.dir, { recursive: true });
       await extract(home, archive, runtime.dir);
+      const machine = peMachine(runtime.node);
+      if (machine !== arch) {
+        rmSync(runtime.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+        throw new CliError(
+          'not_installed',
+          `${basename(archive)} is not this machine's build: its node.exe is ` +
+            `${machine ?? 'missing or not a Windows program'}, and this machine is win32-${arch}`,
+          `use ${releaseArchiveName('puddled', version, 'win32', arch)}`,
+        );
+      }
       if (!(await smokeTest(runtime, version, home))) {
         rmSync(runtime.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
         throw new CliError(
@@ -198,7 +245,13 @@ export async function installWindowsDaemon(opts: WindowsInstallOptions = {}): Pr
     if (!leave || readCurrentVersion(home, 'win32') === undefined) pointCurrent(home, version);
     writeFileSync(join(home, 'bin', 'puddled.cmd'), windowsLauncher());
     pruneCache(join(home, 'cache'));
-    const kind = await supervise(home, leave, logger, opts.supervision ?? {});
+    const kind = await supervise(
+      home,
+      leave,
+      logger,
+      opts.supervision ?? {},
+      opts.detachedStart ?? true,
+    );
     if (leave) {
       logger.info(`puddled ${version} is unpacked; the running daemon was left in place`);
       return;
@@ -242,6 +295,7 @@ async function supervise(
   leave: boolean,
   logger: Logger,
   seams: WindowsSupervisionSeams,
+  detachedStart: boolean,
 ): Promise<'task' | 'detached'> {
   const marker = join(home, 'supervisor');
   const current = readCurrentVersion(home, 'win32');
@@ -252,6 +306,7 @@ async function supervise(
     }
     writeFileSync(marker, 'detached\n');
     if (leave || current === undefined) return 'detached';
+    if (!detachedStart) throw sessionBound();
     const pid = await startWindowsDaemon(home, current);
     // Until it serves its pipe, the next lock holder's probe could not see it.
     await servedOrGone(home, () => isPidAlive(pid, 'win32'));
@@ -269,8 +324,15 @@ async function supervise(
   const kind = registration.registered ? 'task' : 'detached';
   writeFileSync(marker, `${kind}\n`);
   if (leave) return kind;
+  // Inside an SSH session's job the last way, a detached child, would end with the session.
+  let refused = false;
+  const refuse = () => {
+    refused = true;
+    return refusedChild();
+  };
   const started = await startWindowsSupervisor(home, {
     ...seams,
+    ...(detachedStart ? {} : { spawnDetached: refuse }),
     task: registration.registered,
     // Its user disabled the task: no logon start, and none from here either.
     ...(registration.disabled
@@ -285,11 +347,46 @@ async function supervise(
           }
         : {}),
     logger,
+  }).catch((err: unknown) => {
+    throw refused ? sessionBound() : err;
   });
   // One that started meanwhile may still run the connector of the release before.
   if (started === 'running') await supervisorRequest(home, 'restart_connector');
   await servedOrGone(home, async () => (await supervisorRequest(home, 'status')).kind !== 'absent');
   return kind;
+}
+
+/**
+ * Neither Task Scheduler nor WMI started the supervisor, and a detached child
+ * of this process would end with the SSH session that runs it.
+ */
+function sessionBound(): CliError {
+  return new CliError(
+    'session_bound',
+    'puddled cannot outlive this SSH session: neither Task Scheduler nor WMI could start it',
+    'log on to the machine once (its logon task then runs puddled), or allow WMI process creation there',
+  );
+}
+
+/** Stands in for the detached start a session-bound process refuses: it never spawns. */
+function refusedChild(): ChildProcess {
+  const child = Object.assign(new EventEmitter(), { unref() {} });
+  setImmediate(() => child.emit('error', new Error('refused inside an SSH session')));
+  return child as unknown as ChildProcess;
+}
+
+/**
+ * The version `bin\current` names, when its runtime is this machine's build:
+ * a tree of another architecture never counts as installed.
+ */
+export async function windowsInstalledVersion(
+  home: string,
+  hostArch: () => Promise<string> = windowsHostArch,
+): Promise<string | null> {
+  const version = readCurrentVersion(home, 'win32');
+  if (version === undefined) return null;
+  const machine = peMachine(win32.join(home, 'bin', 'current', 'bin', 'node.exe'));
+  return machine === (await hostArch()) ? version : null;
 }
 
 function readMarker(path: string): string | undefined {
@@ -371,19 +468,20 @@ async function smokeTest(
 async function download(
   home: string,
   version: string,
+  arch: string,
+  slug: string | undefined,
   fetchFn: typeof fetch,
   logger: Logger,
 ): Promise<string> {
-  const slug = repoSlug();
   if (slug === undefined) {
     throw new CliError(
       'not_installed',
       'no release source is configured for this build',
-      'pass --tarball <path> (a puddled-v<version>-win32-x64.zip) or set PUDDLE_REPO=owner/repo',
+      `pass --tarball <path> (a puddled-v<version>-win32-${arch}.zip) or set PUDDLE_REPO=owner/repo`,
     );
   }
-  // Every Windows host takes the x64 archive: arm64 runs it under emulation in v1.
-  const file = releaseArchiveName('puddled', version, 'win32');
+  // The operating system's architecture, which an emulated x64 process on Arm does not report.
+  const file = releaseArchiveName('puddled', version, 'win32', arch);
   const url = releaseAssetUrl(slug, version, file);
   const archive = join(home, 'cache', file);
   logger.info(`fetching ${url}`);
@@ -409,7 +507,7 @@ async function download(
       rmSync(archive, { force: true });
       throw new CliError('not_installed', 'checksum mismatch — deleted the download');
     }
-  }).catch(downloadFailure);
+  }).catch((err: unknown) => downloadFailure(err, arch));
   return archive;
 }
 
@@ -418,14 +516,14 @@ async function download(
  * a download is as unusable as an HTTP error and as recoverable: a launcher
  * falls back on any `not_installed` (startLocalWindows).
  */
-function downloadFailure(err: unknown): never {
+function downloadFailure(err: unknown, arch: string): never {
   if (err instanceof CliError) throw err;
   const reason = err instanceof Error ? err.message : String(err);
   const cause = err instanceof Error && err.cause instanceof Error ? ` (${err.cause.message})` : '';
   throw new CliError(
     'not_installed',
     `download failed: ${reason}${cause}`,
-    'check the network connection, or pass --tarball <path> (a puddled-v<version>-win32-x64.zip)',
+    `check the network connection, or pass --tarball <path> (a puddled-v<version>-win32-${arch}.zip)`,
   );
 }
 
