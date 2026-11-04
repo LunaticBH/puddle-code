@@ -100,27 +100,78 @@ jobs:
           if-no-files-found: error
 
   tarball-windows:
-    # Windows arm64 is not published in v1: Windows on Arm runs the x64 zips
-    # under emulation (docs/windows.md). PowerShell runs the steps, as on a
-    # user's machine; the archives and installers never need Git Bash.
-    runs-on: windows-latest
+    # Native win32-x64 and win32-arm64 zips (docs/windows.md), each built and
+    # smoke-tested on its own architecture: the arm64 smoke test spawns arm64
+    # ConPTY and opens arm64 SQLite. PowerShell runs the steps, as on a user's
+    # machine; the archives and installers never need Git Bash.
+    #
+    # Authenticode signing is optional. The secret WIN_CSC_LINK (a base64 PFX,
+    # with WIN_CSC_KEY_PASSWORD) selects a certificate; otherwise the
+    # repository variables AZURE_CLIENT_ID, AZURE_TENANT_ID,
+    # AZURE_SUBSCRIPTION_ID (an OIDC federated credential for azure/login) and
+    # AZURE_SIGNING_ENDPOINT, AZURE_SIGNING_ACCOUNT, AZURE_SIGNING_PROFILE
+    # select Azure Trusted Signing; with neither, nothing is signed and the
+    # archives are built exactly as before. scripts/lib/windows-sign.mjs signs
+    # before the smoke tests and the checksums.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-latest, target: win32-x64, arch: x64 }
+          - { runner: windows-11-arm, target: win32-arm64, arch: arm64 }
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write # azure/login, only when Azure Trusted Signing is configured
     defaults:
       run:
         shell: pwsh
+    env:
+      AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+      AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+      AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
     steps:
+      - name: select Authenticode signing
+        env:
+          # Only whether the secret exists: it reaches the signing steps alone.
+          HAS_CERTIFICATE: ${{ secrets.WIN_CSC_LINK != '' }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+        run: |
+          $mode = if ($env:HAS_CERTIFICATE -eq 'true') { 'certificate' } elseif ($env:AZURE_CLIENT_ID -and $env:AZURE_SIGNING_ENDPOINT) { 'azure' } else { 'none' }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "PUDDLE_WINDOWS_SIGNING=$mode"
+          Write-Output "Authenticode signing: $mode"
+      - uses: azure/login@v2
+        if: env.PUDDLE_WINDOWS_SIGNING == 'azure'
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          architecture: ${{ matrix.arch }}
           cache: pnpm
+      - name: require a native Node
+        # An emulated Node would install and smoke-test the other
+        # architecture's native modules.
+        run: |
+          $arch = node -p process.arch
+          if ($arch -ne '${{ matrix.arch }}') { throw "Node is $arch, not ${{ matrix.arch }}" }
       - run: node scripts/install-ci.mjs
         env:
           ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
-      - run: node scripts/build-tarball.mjs --version ($env:GITHUB_REF_NAME -replace '^v', '')
+      - name: build the daemon zip
+        env:
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+        run: node scripts/build-tarball.mjs --version ($env:GITHUB_REF_NAME -replace '^v', '') --arch ${{ matrix.arch }}
       - name: build standalone CLI archive
         env:
           PUDDLE_REPO_SLUG: ${{ github.repository }}
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
         # pwsh carries on past a failed native command unless told to stop.
         run: |
           $version = $env:GITHUB_REF_NAME -replace '^v', ''
@@ -128,12 +179,24 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           pnpm --filter @puddle-code/cli build
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node scripts/build-cli-tarball.mjs --version $version
+          node scripts/build-cli-tarball.mjs --version $version --arch ${{ matrix.arch }}
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/test-cli-tarball.mjs
+      - name: verify Authenticode signatures
+        if: env.PUDDLE_WINDOWS_SIGNING != 'none'
+        run: |
+          $files = @(Get-ChildItem -LiteralPath dist-release\stage -Recurse -File |
+            Where-Object { @('.exe', '.dll', '.node', '.ps1') -contains $_.Extension.ToLowerInvariant() })
+          $bad = @(foreach ($file in $files) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
+            if ($signature.Status -ne 'Valid' -or -not $signature.TimeStamperCertificate) { "$($file.FullName) ($($signature.Status))" }
+          })
+          if ($files.Count -eq 0) { throw 'no signable files in dist-release\stage' }
+          if ($bad.Count -gt 0) { throw ("not validly signed and timestamped:`n  " + ($bad -join "`n  ")) }
+          Write-Output "$($files.Count) files are validly signed and timestamped"
       - uses: actions/upload-artifact@v4
         with:
-          name: tarball-win32-x64
+          name: tarball-${{ matrix.target }}
           path: |
             dist-release/*.zip
             dist-release/*.sha256
@@ -145,14 +208,13 @@ jobs:
     # and — with APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID —
     # notarised; without them an ad-hoc signature seals the app's identity and
     # resources. This does not provide Developer ID trust or OS notification
-    # approval. AppImage needs no signing. The Windows NSIS installer is
-    # unsigned in v1 (SmartScreen warns on a browser download's first run).
+    # approval. AppImage needs no signing. Windows installers are packaged by
+    # desktop-windows below, entirely in PowerShell.
     strategy:
       matrix:
         include:
           - { runner: macos-14, target: darwin-arm64 }
           - { runner: ubuntu-22.04, target: linux-x64 }
-          - { runner: windows-latest, target: win32-x64 }
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -182,11 +244,7 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            # electron-builder would offer the Apple certificate to Authenticode.
-            unset CSC_LINK CSC_KEY_PASSWORD
-            pnpm exec electron-builder --publish never
-          elif [ "$RUNNER_OS" != "macOS" ]; then
+          if [ "$RUNNER_OS" != "macOS" ]; then
             pnpm exec electron-builder --publish never
           elif [ -n "$CSC_LINK" ]; then
             pnpm exec electron-builder --publish never -c.mac.notarize=true
@@ -206,16 +264,10 @@ jobs:
       - name: checksums
         working-directory: packages/desktop/release
         shell: bash
-        # Node on Windows: Git Bash's sha256sum marks binary mode with `*`,
-        # which install.ps1 and desktop-update compare against asset names.
         run: |
-          for f in *.dmg *.zip *.AppImage *-setup.exe; do
+          for f in *.dmg *.zip *.AppImage; do
             if [ ! -f "$f" ]; then continue; fi
-            if [ "$RUNNER_OS" = "Windows" ]; then
-              node -e "const f = process.argv[1]; console.log(require('crypto').createHash('sha256').update(require('fs').readFileSync(f)).digest('hex') + '  ' + f)" "$f"
-            else
-              shasum -a 256 "$f"
-            fi
+            shasum -a 256 "$f"
           done > desktop-${{ matrix.target }}.sha256
       - uses: actions/upload-artifact@v4
         with:
@@ -228,12 +280,135 @@ jobs:
             packages/desktop/release/*.dmg
             packages/desktop/release/*.zip
             packages/desktop/release/*.AppImage
+            packages/desktop/release/*.sha256
+          if-no-files-found: error
+
+  desktop-windows:
+    # The per-user NSIS installers Puddle-<v>-x64-setup.exe and
+    # Puddle-<v>-arm64-setup.exe, one architecture per runner and per
+    # electron-builder run (both in one run would make a single installer
+    # with no architecture in its name). Signing follows tarball-windows: a
+    # certificate reaches electron-builder as WIN_CSC_LINK/WIN_CSC_KEY_PASSWORD,
+    # Azure Trusted Signing as -c.win.azureSignOptions.*, and either adds
+    # -c.forceCodeSigning=true, so a signing failure fails the release. The
+    # Apple certificate (CSC_LINK) is never exported here: electron-builder
+    # would offer it to Authenticode.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-latest, target: win32-x64, arch: x64, unpacked: win-unpacked }
+          - {
+              runner: windows-11-arm,
+              target: win32-arm64,
+              arch: arm64,
+              unpacked: win-arm64-unpacked,
+            }
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write # azure/login, only when Azure Trusted Signing is configured
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+      AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+      AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
+    steps:
+      - name: select Authenticode signing
+        env:
+          HAS_CERTIFICATE: ${{ secrets.WIN_CSC_LINK != '' }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+        run: |
+          $mode = if ($env:HAS_CERTIFICATE -eq 'true') { 'certificate' } elseif ($env:AZURE_CLIENT_ID -and $env:AZURE_SIGNING_ENDPOINT) { 'azure' } else { 'none' }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "PUDDLE_WINDOWS_SIGNING=$mode"
+          Write-Output "Authenticode signing: $mode"
+      - uses: azure/login@v2
+        if: env.PUDDLE_WINDOWS_SIGNING == 'azure'
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          architecture: ${{ matrix.arch }}
+          cache: pnpm
+      - name: require a native Node
+        run: |
+          $arch = node -p process.arch
+          if ($arch -ne '${{ matrix.arch }}') { throw "Node is $arch, not ${{ matrix.arch }}" }
+      - run: node scripts/install-ci.mjs
+        env:
+          # electron-builder fetches its own Electron dist at package time;
+          # the node_modules binary is never launched here.
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      - run: pnpm build
+        env:
+          PUDDLE_REPO_SLUG: ${{ github.repository }}
+      - name: package
+        working-directory: packages/desktop
+        env:
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+        run: |
+          $sign = @(switch ($env:PUDDLE_WINDOWS_SIGNING) {
+            'azure' {
+              "-c.win.azureSignOptions.endpoint=$env:AZURE_SIGNING_ENDPOINT"
+              "-c.win.azureSignOptions.codeSigningAccountName=$env:AZURE_SIGNING_ACCOUNT"
+              "-c.win.azureSignOptions.certificateProfileName=$env:AZURE_SIGNING_PROFILE"
+              '-c.forceCodeSigning=true'
+            }
+            'certificate' { '-c.forceCodeSigning=true' }
+          })
+          # GitHub supplies missing secrets as empty strings.
+          if ($env:PUDDLE_WINDOWS_SIGNING -ne 'certificate') {
+            Remove-Item Env:WIN_CSC_LINK, Env:WIN_CSC_KEY_PASSWORD -ErrorAction SilentlyContinue
+          }
+          pnpm exec electron-builder --win --${{ matrix.arch }} --publish never @sign
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: verify the installer architecture
+        run: node scripts/check-windows-arch.mjs packages/desktop/release/${{ matrix.unpacked }} ${{ matrix.arch }}
+      - name: verify Authenticode signatures
+        if: env.PUDDLE_WINDOWS_SIGNING != 'none'
+        working-directory: packages/desktop/release
+        run: |
+          $files = @(Get-ChildItem -File -Filter '*-setup.exe') + @(Get-ChildItem -LiteralPath '${{ matrix.unpacked }}' -Recurse -File |
+            Where-Object { @('.exe', '.dll') -contains $_.Extension.ToLowerInvariant() })
+          $bad = @(foreach ($file in $files) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
+            if ($signature.Status -ne 'Valid' -or -not $signature.TimeStamperCertificate) { "$($file.FullName) ($($signature.Status))" }
+          })
+          if ($bad.Count -gt 0) { throw ("not validly signed and timestamped:`n  " + ($bad -join "`n  ")) }
+          Write-Output "$($files.Count) files are validly signed and timestamped"
+      - name: checksums
+        working-directory: packages/desktop/release
+        # Lower-case hex, LF and a final newline: what parseSums and install.ps1 read.
+        run: |
+          $installers = @(Get-ChildItem -File -Filter '*-setup.exe')
+          if ($installers.Count -ne 1 -or $installers[0].Name -notlike '*-${{ matrix.arch }}-setup.exe') {
+            throw "expected one *-${{ matrix.arch }}-setup.exe, found: $($installers.Name -join ', ')"
+          }
+          $lines = @($installers | ForEach-Object {
+            '{0}  {1}' -f (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant(), $_.Name
+          })
+          [IO.File]::WriteAllText((Join-Path $PWD.Path 'desktop-${{ matrix.target }}.sha256'), ($lines -join "`n") + "`n")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.target }}
+          # The installer and its checksum only: never the .blockmap or
+          # latest.yml electron-updater metadata (lib/desktop-update reads
+          # SHA256SUMS).
+          path: |
             packages/desktop/release/*-setup.exe
             packages/desktop/release/*.sha256
           if-no-files-found: error
 
   release:
-    needs: [tarball-linux, tarball-darwin, tarball-windows, desktop]
+    needs: [tarball-linux, tarball-darwin, tarball-windows, desktop, desktop-windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

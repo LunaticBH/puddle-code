@@ -105,6 +105,66 @@ jobs:
         run: pnpm build:cli-tarball
       - name: exercise standalone CLI without system Node or npm
         run: node scripts/test-cli-tarball.mjs
+      # scripts/lib/windows-sign.mjs with a throwaway self-signed certificate,
+      # trusted only on this disposable runner: it must sign and timestamp
+      # the unsigned PE files, leave publisher-signed ones byte-identical, and
+      # the signed tree must still pass the smoke tests. No secret is used.
+      - name: Authenticode signing dry run
+        run: |
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Puddle CI signing dry run' -CertStoreLocation Cert:\CurrentUser\My
+          $root = New-Object Security.Cryptography.X509Certificates.X509Store 'Root', 'LocalMachine'
+          $root.Open('ReadWrite'); $root.Add($cert); $root.Close()
+          $password = [Guid]::NewGuid().ToString('N')
+          $pfx = Join-Path $env:RUNNER_TEMP 'dry-run.pfx'
+          Export-PfxCertificate -Cert $cert -FilePath $pfx -Password (ConvertTo-SecureString $password -AsPlainText -Force) | Out-Null
+          $env:WIN_CSC_LINK = [Convert]::ToBase64String([IO.File]::ReadAllBytes($pfx))
+          $env:WIN_CSC_KEY_PASSWORD = $password
+          $env:PUDDLE_WINDOWS_SIGNING = 'certificate'
+          $out = Join-Path $env:RUNNER_TEMP 'signed'
+          node scripts/build-tarball.mjs --stage-only --out-dir $out
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $stage = (Get-ChildItem -LiteralPath (Join-Path $out 'stage') -Directory | Select-Object -First 1).FullName
+          $runtime = Get-ChildItem -LiteralPath node_modules\.cache\puddle-node-runtime -Recurse -Filter node.exe | Select-Object -First 1
+          if ((Get-FileHash (Join-Path $stage 'bin\node.exe')).Hash -ne (Get-FileHash $runtime.FullName).Hash) { throw 'node.exe was re-signed' }
+          foreach ($file in Get-ChildItem -LiteralPath $stage -Recurse -File | Where-Object { @('.exe', '.dll', '.node') -contains $_.Extension.ToLowerInvariant() }) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
+            if ($signature.Status -ne 'Valid') { throw "$($file.FullName) is $($signature.Status)" }
+            Write-Output "$($file.Name): $($signature.SignerCertificate.Subject)"
+          }
+
+  # Windows on Arm, natively: arm64 Node, the arm64 daemon zip (its smoke test
+  # spawns arm64 ConPTY and opens arm64 SQLite), the arm64 CLI zip with
+  # install.ps1 end to end (OS architecture detection, junction upgrades and
+  # removal), and the installation and architecture tests.
+  ci-windows-arm64:
+    runs-on: windows-11-arm
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          architecture: arm64
+          cache: pnpm
+      - name: require a native Node
+        run: |
+          $arch = node -p process.arch
+          if ($arch -ne 'arm64') { throw "Node is $arch, not arm64" }
+      - run: node scripts/install-ci.mjs
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      - run: pnpm build
+      - name: build the daemon zip
+        run: pnpm build:tarball
+      - name: build the standalone CLI zip
+        run: pnpm build:cli-tarball
+      - name: exercise standalone CLI without system Node or npm
+        run: node scripts/test-cli-tarball.mjs
+      - name: installation and Windows architecture tests
+        run: pnpm exec vitest run packages/cli/test/installation packages/shared/test
 
   # The ordinary build above proves packaging on the current hosted image.
   # This second job exercises the actual release container before a tag: native
