@@ -5,9 +5,12 @@ import { repoSlug } from '../version.js';
 export type ReleaseArchive = 'puddled' | 'puddle-cli';
 
 /**
- * The `<platform>-<arch>` token of release archives (docs/windows.md §14).
- * Windows arm64 is not published yet; Windows on Arm runs the x64 build
- * under emulation, and no other Windows architecture has a build.
+ * The `<platform>-<arch>` token of release archives (docs/windows.md §15).
+ * Windows publishes native x64 and arm64 builds; Windows callers pass the
+ * OPERATING SYSTEM's architecture (`windowsHostArch()` from
+ * `@puddle/shared/node/platform`), never `process.arch`, which an emulated
+ * x64 process on Arm reports as x64. No other Windows architecture has a
+ * build.
  */
 export function releaseTarget(
   platform: NodeJS.Platform = process.platform,
@@ -17,7 +20,7 @@ export function releaseTarget(
     if (arch !== 'x64' && arch !== 'arm64') {
       throw new CliError('unsupported_platform', `Puddle has no Windows ${arch} build`);
     }
-    return 'win32-x64';
+    return `win32-${arch}`;
   }
   return `${platform}-${arch === 'arm64' ? 'arm64' : 'x64'}`;
 }

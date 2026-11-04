@@ -18,16 +18,20 @@ describe('release asset names', () => {
     );
   });
 
-  it('names the x64 zip on Windows, which arm64 Windows runs under emulation in v1', () => {
+  it('names the native zip for each Windows architecture', () => {
     expect(releaseArchiveName('puddled', '0.3.14', 'win32', 'x64')).toBe(
       'puddled-v0.3.14-win32-x64.zip',
     );
-    expect(releaseArchiveName('puddled', '0.3.14', 'win32', 'arm64')).toBe(
-      'puddled-v0.3.14-win32-x64.zip',
-    );
-    expect(releaseArchiveName('puddle-cli', '0.3.14', 'win32', 'arm64')).toBe(
+    expect(releaseArchiveName('puddle-cli', '0.3.14', 'win32', 'x64')).toBe(
       'puddle-cli-v0.3.14-win32-x64.zip',
     );
+    expect(releaseArchiveName('puddled', '0.3.14', 'win32', 'arm64')).toBe(
+      'puddled-v0.3.14-win32-arm64.zip',
+    );
+    expect(releaseArchiveName('puddle-cli', '0.3.14', 'win32', 'arm64')).toBe(
+      'puddle-cli-v0.3.14-win32-arm64.zip',
+    );
+    expect(releaseTarget('win32', 'arm64')).toBe('win32-arm64');
     expect(() => releaseTarget('win32', 'ia32')).toThrow('no Windows ia32 build');
     expect(() => releaseArchiveName('puddled', '0.3.14', 'win32', 'ia32')).toThrow(
       'no Windows ia32 build',
