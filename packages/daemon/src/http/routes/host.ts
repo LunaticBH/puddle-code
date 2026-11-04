@@ -1,4 +1,4 @@
-import { homedir, hostname, userInfo } from 'node:os';
+import { homedir, hostname, release, userInfo } from 'node:os';
 import { Hono } from 'hono';
 import type { HostInfo } from '@puddle/shared';
 import { readConfig } from '../../config.js';
@@ -18,6 +18,13 @@ export function hostRoutes(deps: { paths: PuddlePaths }): Hono {
       home: canonicalHostPath(homedir()),
       ...(displayName ? { displayName } : {}),
       platform: process.platform,
+      ...windowsBuild(),
     });
   });
+}
+
+function windowsBuild(): Pick<HostInfo, 'osBuild'> {
+  if (process.platform !== 'win32') return {};
+  const build = Number(release().split('.')[2]);
+  return Number.isInteger(build) && build >= 0 ? { osBuild: build } : {};
 }

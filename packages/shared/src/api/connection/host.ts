@@ -22,5 +22,11 @@ export const hostInfoSchema = z.object({
    * means a POSIX host running an older daemon.
    */
   platform: z.string().optional(),
+  /**
+   * The Windows build number (the third part of `os.release()`), present on
+   * Windows hosts (protocol 25.7). Terminals pass it to xterm so Windows 10
+   * ConPTY gets its wrapping workarounds.
+   */
+  osBuild: z.number().int().nonnegative().optional(),
 });
 export type HostInfo = z.infer<typeof hostInfoSchema>;
