@@ -130,19 +130,24 @@ describe.skipIf(process.platform !== 'win32')('Windows Puddle home', () => {
     expect(readdirSync(target)).toEqual([]);
   });
 
-  it('names pipes with the home key and a persisted private nonce', () => {
+  it('names each pipe by an HMAC that a visible name cannot be traced through', () => {
     const { home } = fixture();
     const host = ipcPath(home, 'host');
+    const key = readFileSync(join(home, 'ipc-key'), 'utf8');
     const nonce = readFileSync(join(home, 'ipc-nonce'), 'utf8');
+    expect(key).toMatch(/^[0-9a-f]{64}$/);
     expect(nonce).toMatch(/^[0-9a-f]{32}$/);
-    expect(host).toMatch(new RegExp(`^\\\\\\\\\\.\\\\pipe\\\\puddle-[0-9a-f]{24}-${nonce}$`));
-    // CLI and daemon compute the same name; scopes differ only in the key.
+    expect(host).toMatch(/^\\\\\.\\pipe\\puddle-[0-9a-f]{48}$/);
+    // CLI and daemon compute the same name.
     expect(ipcPath(home, 'host')).toBe(host);
-    const other = ipcPath(home, 'connector');
-    expect(other).not.toBe(host);
-    expect(other.endsWith(`-${nonce}`)).toBe(true);
-    // Another home has its own nonce.
-    expect(ipcPath(fixture().home, 'host').endsWith(`-${nonce}`)).toBe(false);
+    // Neither secret appears, so the install lock's name says nothing of the daemon's.
+    const install = ipcPath(home, 'install');
+    for (const name of [host, install]) {
+      expect(name).not.toContain(nonce);
+      expect(name).not.toContain(key.slice(0, 16));
+    }
+    expect(install).not.toBe(host);
+    expect(ipcPath(fixture().home, 'host')).not.toBe(host);
   });
 
   it('refuses a malformed or redirected nonce', () => {

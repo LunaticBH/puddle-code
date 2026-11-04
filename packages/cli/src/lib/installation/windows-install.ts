@@ -130,7 +130,9 @@ export async function installWindowsDaemon(opts: WindowsInstallOptions = {}): Pr
     let pipe = await controlPipeState(home);
     if (pipe === 'foreign') {
       // Another account serves a name an earlier run used. Renamed under the
-      // lock, the home's pipes leave it behind; the lock moves with them.
+      // lock, the home's pipes leave it behind; the lock moves with them, and
+      // its new name, keyed by the private ipc-key, says nothing of the
+      // daemon's.
       logger.warn('a process that is not this home’s daemon holds its control pipe — renaming it');
       rotateIpcNonce(home);
       lock = await relock(home, lock, logger);

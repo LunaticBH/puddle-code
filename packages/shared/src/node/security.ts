@@ -200,12 +200,15 @@ export function readPrivateJson(path: string): unknown {
 
 /**
  * Short paths also fit macOS's 104-byte sockaddr_un limit. Named pipes live
- * in one machine-wide namespace, so on Windows the name also carries the
- * home's private nonce, and any local user can list it. A name seen while it
- * was served can be created by another user once it is not, so Windows
- * clients also check that the server can read the home (`ipcProof`).
+ * in one machine-wide namespace that any local user can list, and a name
+ * seen while it was served can be created by another user once it is not:
+ * Windows clients therefore check that the server can read the home
+ * (`ipcProof`), and the installer renames the home's pipes away from a
+ * squatter (`rotateIpcNonce`). Each name is an HMAC under the home's
+ * private `ipc-key` of its scope and the current nonce, so one visible name
+ * reveals neither another scope's nor the next one.
  *
- * Every spelling of a Windows home names the same pipes: the key hashes the
+ * Every spelling of a Windows home names the same pipes: the HMAC covers the
  * home's on-disk path (`realpath.native`, upper-case drive letter, decision
  * 11), which the daemon's canonical home and a client's `d:\puddle` or 8.3
  * spelling share.
@@ -213,9 +216,7 @@ export function readPrivateJson(path: string): unknown {
 export function ipcPath(home: string, scope: string): string {
   initialisePrivateHome(home);
   if (process.platform === 'win32') {
-    const identity = normaliseHostPath(realpathSync.native(home));
-    const key = digest(`${identity}\0${scope}`).slice(0, 24);
-    return `\\\\.\\pipe\\puddle-${key}-${ipcNonce(home)}`;
+    return `${PIPES}${windowsPipeName(home, scope, ipcKey(home), ipcNonce(home))}`;
   }
   const key = digest(`${realpathSync(home)}\0${scope}`).slice(0, 24);
   const dir = join('/tmp', `puddle-${process.getuid!()}-${key}`);
@@ -223,10 +224,20 @@ export function ipcPath(home: string, scope: string): string {
   return join(dir, 'control.sock');
 }
 
-/** `<home>\ipc-nonce`: 32 random hex characters, in every Windows pipe name. */
-function ipcNonce(home: string): string {
-  return homeSecret(join(home, 'ipc-nonce'), 16, 'IPC nonce');
+const PIPES = '\\\\.\\pipe\\';
+
+function windowsPipeName(home: string, scope: string, key: string, nonce: string): string {
+  const identity = normaliseHostPath(realpathSync.native(home));
+  const name = createHmac('sha256', key)
+    .update(`puddle-ipc-name\0${identity}\0${scope}\0${nonce}`)
+    .digest('hex');
+  return `puddle-${name.slice(0, 48)}`;
 }
+
+/** `<home>\ipc-key`: 64 random hex characters, keying pipe names and server proofs. */
+const ipcKey = (home: string) => homeSecret(join(home, 'ipc-key'), 32, 'IPC key');
+/** `<home>\ipc-nonce`: 32 random hex characters, replaced to rename every pipe. */
+const ipcNonce = (home: string) => homeSecret(join(home, 'ipc-nonce'), 16, 'IPC nonce');
 
 /**
  * Give every Windows pipe of the home a new name. Only for a name that a
@@ -257,12 +268,13 @@ export function ipcChallenge(): string {
 
 /**
  * The answer to `challenge` from a server of `scope`, keyed by the home's
- * `ipc-key`. Unlike the nonce that key never appears in a name, so only a
- * process that can read the home can answer: a Windows client accepts no
- * reply from a pipe server until it has checked one.
+ * `ipc-key`. That key never leaves the home (a pipe name is a one-way HMAC
+ * under it), so only a process that can read the home can answer: a
+ * Windows client accepts no reply from a pipe server until it has checked
+ * one.
  */
 export function ipcProof(home: string, scope: string, challenge: string): string {
-  return createHmac('sha256', homeSecret(join(home, 'ipc-key'), 32, 'IPC key'))
+  return createHmac('sha256', ipcKey(home))
     .update(`puddle-ipc-proof\0${scope}\0${challenge}`)
     .digest('hex');
 }
