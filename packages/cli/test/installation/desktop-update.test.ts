@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
@@ -17,11 +18,13 @@ import {
   parseUninstallString,
   pickDesktopAsset,
   pruneDesktopUpdateCache,
+  readAuthenticodeSignatures,
   stageDesktopUpdate,
   uninstallWindowsDesktop,
   windowsInstalledApp,
   type DesktopUpdate,
 } from '../../src/lib/installation/desktop-update.js';
+import { peImage } from '@puddle/shared/node/platform';
 import { latestReleaseVersion } from '../../src/lib/installation/releases.js';
 
 const sha256 = (data: string): string => createHash('sha256').update(data).digest('hex');
@@ -287,22 +290,78 @@ describe('Windows NSIS desktop updates', () => {
     sumsUrl: 'https://a/sums',
   };
 
-  it('picks the per-arch installer, letting Windows on Arm use the x64 build', () => {
+  it('picks only the installer built for this architecture', () => {
     const assets = [
       { name: 'Puddle-0.0.14-arm64-mac.zip', browser_download_url: 'u1' },
       { name: NAME, browser_download_url: 'u2' },
       { name: 'Puddle-0.0.14-x64-setup.exe.blockmap', browser_download_url: 'u3' },
+      { name: 'Puddle-0.0.14-arm64-setup.exe.blockmap', browser_download_url: 'u5' },
     ];
+    const arm64 = { name: 'Puddle-0.0.14-arm64-setup.exe', browser_download_url: 'u4' };
     expect(pickDesktopAsset(assets, 'win32', 'x64')?.name).toBe(NAME);
-    expect(pickDesktopAsset(assets, 'win32', 'arm64')?.name).toBe(NAME);
-    expect(pickDesktopAsset(assets, 'win32', 'ia32')).toBeNull();
-    expect(
-      pickDesktopAsset(
-        [...assets, { name: 'Puddle-0.0.14-arm64-setup.exe', browser_download_url: 'u4' }],
-        'win32',
-        'arm64',
-      )?.name,
-    ).toBe('Puddle-0.0.14-arm64-setup.exe');
+    // Windows on Arm never falls back to the emulated x64 build.
+    expect(pickDesktopAsset(assets, 'win32', 'arm64')).toBeNull();
+    expect(pickDesktopAsset([...assets, arm64], 'win32', 'arm64')?.name).toBe(arm64.name);
+    expect(pickDesktopAsset([arm64, ...assets], 'win32', 'x64')?.name).toBe(NAME);
+    expect(pickDesktopAsset([arm64], 'win32', 'x64')).toBeNull();
+    expect(pickDesktopAsset([...assets, arm64], 'win32', 'ia32')).toBeNull();
+  });
+
+  it('chooses by the operating system architecture, not the process', async () => {
+    process.env.PUDDLE_REPO = 'example/puddle';
+    try {
+      const release = () =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              tag_name: 'v0.0.14',
+              assets: [
+                { name: NAME, browser_download_url: 'https://a/x64' },
+                { name: 'Puddle-0.0.14-arm64-setup.exe', browser_download_url: 'https://a/arm64' },
+                { name: 'SHA256SUMS', browser_download_url: 'https://a/sums' },
+              ],
+            }),
+          ),
+        );
+      let asked = 0;
+      const hostArch = () => {
+        asked++;
+        return Promise.resolve('arm64');
+      };
+      const update = await checkForDesktopUpdate('0.0.13', {
+        platform: 'win32',
+        hostArch,
+        fetchFn: release,
+      });
+      expect(update?.asset).toEqual({
+        name: 'Puddle-0.0.14-arm64-setup.exe',
+        url: 'https://a/arm64',
+      });
+      expect(asked).toBe(1);
+      const pinned = await desktopUpdateAt('0.0.14', {
+        platform: 'win32',
+        hostArch: () => Promise.resolve('x64'),
+        fetchFn: release,
+      });
+      expect(pinned?.asset.name).toBe(NAME);
+      // An explicit architecture wins, and POSIX never asks for the host's.
+      const explicit = await checkForDesktopUpdate('0.0.13', {
+        platform: 'win32',
+        arch: 'x64',
+        hostArch: () => Promise.reject(new Error('not asked')),
+        fetchFn: release,
+      });
+      expect(explicit?.asset.name).toBe(NAME);
+      await expect(
+        checkForDesktopUpdate('0.0.13', {
+          platform: 'linux',
+          hostArch: () => Promise.reject(new Error('not asked')),
+          fetchFn: release,
+        }),
+      ).resolves.toBeNull();
+    } finally {
+      delete process.env.PUDDLE_REPO;
+    }
   });
 
   it('stages the verified installer itself, without unpacking', async () => {
@@ -340,6 +399,163 @@ describe('Windows NSIS desktop updates', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  describe('Authenticode publisher', () => {
+    const PUBLISHER = 'CN=Example Publisher, O=Example Publisher, C=GB';
+    /** A PE header with (or without) a certificate table: what peImage reads. */
+    const peFile = (signed: boolean): Buffer => {
+      const image = Buffer.alloc(0x400);
+      image.write('MZ', 0, 'latin1');
+      image.writeUInt32LE(0x80, 0x3c);
+      image.write('PE\0\0', 0x80, 'latin1');
+      image.writeUInt16LE(0x8664, 0x84);
+      image.writeUInt16LE(112 + 16 * 8, 0x80 + 20);
+      image.writeUInt16LE(0x20b, 0x98);
+      image.writeUInt32LE(16, 0x98 + 108);
+      if (signed) {
+        image.writeUInt32LE(0x300, 0x98 + 112 + 4 * 8);
+        image.writeUInt32LE(8, 0x98 + 112 + 4 * 8 + 4);
+      }
+      return image;
+    };
+    const stage = async (
+      dir: string,
+      currentApp: string,
+      answer: (files: string[]) => Promise<string>,
+    ) => {
+      const calls: string[][] = [];
+      const staged = stageDesktopUpdate(update, {
+        cacheDir: dir,
+        platform: 'win32',
+        currentApp,
+        powershell: (script, env) => {
+          expect(script).toContain('Get-AuthenticodeSignature -LiteralPath $file');
+          const files = env.PUDDLE_AUTHENTICODE_FILES!.split('\n');
+          calls.push(files);
+          return answer(files);
+        },
+        fetchFn: (input) =>
+          Promise.resolve(
+            new Response(String(input).endsWith('/sums') ? `${sha256(BODY)}  ${NAME}\n` : BODY),
+          ),
+      });
+      return { staged, calls };
+    };
+    const signatures = (...rows: Array<[string, string | null]>) =>
+      Promise.resolve(JSON.stringify(rows.map(([status, publisher]) => ({ status, publisher }))));
+
+    it('keeps checksum-only trust for an unsigned app, without starting PowerShell', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'puddle-update-sign-'));
+      try {
+        const app = join(dir, 'Puddle.exe');
+        await writeFile(app, peFile(false));
+        const { staged, calls } = await stage(dir, app, () =>
+          Promise.reject(new Error('not asked')),
+        );
+        await expect(staged).resolves.toMatchObject({ kind: 'nsis' });
+        expect(calls).toEqual([]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('accepts an installer from the signed app’s own publisher', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'puddle-update-sign-'));
+      try {
+        const app = join(dir, 'Puddle.exe');
+        await writeFile(app, peFile(true));
+        const { staged, calls } = await stage(dir, app, () =>
+          signatures(['Valid', PUBLISHER], ['Valid', PUBLISHER]),
+        );
+        await expect(staged).resolves.toMatchObject({ stagedPath: join(dir, '0.0.14', NAME) });
+        expect(calls).toEqual([[app, join(dir, '0.0.14', NAME)]]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('refuses another publisher, an unsigned installer or an unanswerable check', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'puddle-update-sign-'));
+      try {
+        const app = join(dir, 'Puddle.exe');
+        await writeFile(app, peFile(true));
+        const other = await stage(dir, app, () =>
+          signatures(['Valid', PUBLISHER], ['Valid', 'CN=Someone Else']),
+        );
+        await expect(other.staged).rejects.toThrow(
+          `${NAME} is signed by CN=Someone Else, not by ${PUBLISHER}`,
+        );
+        expect(existsSync(join(dir, '0.0.14'))).toBe(false);
+        const unsigned = await stage(dir, app, () =>
+          signatures(['Valid', PUBLISHER], ['NotSigned', null]),
+        );
+        await expect(unsigned.staged).rejects.toThrow(`${NAME} is not validly signed (NotSigned)`);
+        const tampered = await stage(dir, app, () =>
+          signatures(['Valid', PUBLISHER], ['HashMismatch', PUBLISHER]),
+        );
+        await expect(tampered.staged).rejects.toThrow('not validly signed (HashMismatch)');
+        const blocked = await stage(dir, app, () => Promise.reject(new Error('blocked by policy')));
+        await expect(blocked.staged).rejects.toThrow('could not check the Authenticode signature');
+        const short = await stage(dir, app, () => signatures(['Valid', PUBLISHER]));
+        await expect(short.staged).rejects.toThrow('could not check the Authenticode signature');
+        expect(existsSync(join(dir, '0.0.14'))).toBe(false);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('treats a certificate table without a signer as unsigned', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'puddle-update-sign-'));
+      try {
+        const app = join(dir, 'Puddle.exe');
+        await writeFile(app, peFile(true));
+        const { staged } = await stage(dir, app, () =>
+          signatures(['NotSigned', null], ['NotSigned', null]),
+        );
+        await expect(staged).resolves.toMatchObject({ kind: 'nsis' });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('reads one signature per file, single or many', async () => {
+      await expect(
+        readAuthenticodeSignatures(['a.exe'], () =>
+          Promise.resolve('{"status":"Valid","publisher":"CN=A"}'),
+        ),
+      ).resolves.toEqual([{ status: 'Valid', publisher: 'CN=A' }]);
+      await expect(
+        readAuthenticodeSignatures(['a.exe', 'b.exe'], () =>
+          Promise.resolve('[{"status":"NotSigned","publisher":null},{"status":3}]'),
+        ),
+      ).resolves.toEqual([
+        { status: 'NotSigned', publisher: null },
+        { status: 'UnknownError', publisher: null },
+      ]);
+    });
+
+    it.runIf(process.platform === 'win32')(
+      'asks Windows PowerShell for real signatures',
+      async () => {
+        const dir = await mkdtemp(join(tmpdir(), 'puddle-update-sign-'));
+        try {
+          const unsigned = join(dir, 'unsigned é.ps1');
+          await writeFile(unsigned, 'Write-Output 1\r\n');
+          const [script, node] = await readAuthenticodeSignatures([unsigned, process.execPath]);
+          expect(script).toEqual({ status: 'NotSigned', publisher: null });
+          // Official Node builds carry their publisher's signature.
+          if (peImage(process.execPath)?.signed) expect(node?.publisher).not.toBeNull();
+          // A failure reports PowerShell's message, not a CLIXML error record.
+          const missing = readAuthenticodeSignatures([join(dir, 'missing.exe')]);
+          await expect(missing).rejects.toThrow(/missing\.exe/);
+          await expect(missing).rejects.not.toThrow(/CLIXML/);
+        } finally {
+          await rm(dir, { recursive: true, force: true });
+        }
+      },
+      60_000,
+    );
   });
 
   it('runs the installer silently, as electron-updater does', () => {

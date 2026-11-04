@@ -6,7 +6,13 @@ import { dirname, join, win32 } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
-import { system32Path } from '@puddle/shared/node/platform';
+import {
+  isWindowsArch,
+  peImage,
+  setEnv,
+  system32Path,
+  windowsHostArch,
+} from '@puddle/shared/node/platform';
 import { clientHome } from '../paths.js';
 import { CliError, type Logger, silentLogger } from '../types.js';
 import { repoSlug } from '../version.js';
@@ -52,7 +58,14 @@ interface ReleaseAsset {
 
 export interface CheckOptions {
   platform?: NodeJS.Platform;
+  /**
+   * The architecture whose build to pick. On Windows it defaults to the
+   * operating system's (`hostArch`), so an x64 Puddle.exe or CLI emulated on
+   * Arm moves to the native arm64 installer; elsewhere to `process.arch`.
+   */
   arch?: string;
+  /** Injectable for tests; defaults to `windowsHostArch()`. Windows only. */
+  hostArch?: () => Promise<string>;
   /** Injectable for tests; defaults to global fetch. */
   fetchFn?: typeof fetch;
   logger?: Logger;
@@ -79,7 +92,8 @@ export function isNewerVersion(candidate: string, current: string): boolean {
  * electron-builder's names: `Puddle-<v>-arm64-mac.zip` / `Puddle-<v>-mac.zip`
  * and `Puddle-<v>-arm64.AppImage` / `Puddle-<v>.AppImage` — the arch token is
  * present exactly when the build is not x64. Windows installers always carry
- * it (`Puddle-<v>-x64-setup.exe`, pinned in electron-builder.yml).
+ * it (`Puddle-<v>-x64-setup.exe`, `Puddle-<v>-arm64-setup.exe`: the NSIS
+ * artifactName in electron-builder.yml), chosen by the OS architecture.
  */
 export function pickDesktopAsset(
   assets: ReleaseAsset[],
@@ -98,11 +112,10 @@ export function pickDesktopAsset(
   );
 }
 
-/** Windows on Arm falls back to the x64 installer, which it runs under emulation. */
+/** The installer built for this machine's architecture; Windows on Arm never takes the x64 build. */
 function pickWindowsInstaller(assets: ReleaseAsset[], arch: string): ReleaseAsset | null {
-  const installer = (wanted: string) =>
-    assets.find((a) => a.name.endsWith(`-${wanted}-setup.exe`)) ?? null;
-  return installer(arch) ?? (arch === 'arm64' ? installer('x64') : null);
+  if (!isWindowsArch(arch)) return null;
+  return assets.find((a) => a.name.endsWith(`-${arch}-setup.exe`)) ?? null;
 }
 
 /** The `<sha256>  <filename>` map from a SHA256SUMS document. */
@@ -172,16 +185,15 @@ export async function desktopUpdateAt(
 }
 
 /** The platform asset + checksums of one release, as a stageable update. */
-function updateFromRelease(
+async function updateFromRelease(
   version: string,
   assets: ReleaseAsset[],
   opts: CheckOptions,
-): DesktopUpdate | null {
-  const asset = pickDesktopAsset(
-    assets,
-    opts.platform ?? process.platform,
-    opts.arch ?? process.arch,
-  );
+): Promise<DesktopUpdate | null> {
+  const platform = opts.platform ?? process.platform;
+  const arch =
+    opts.arch ?? (platform === 'win32' ? await (opts.hostArch ?? windowsHostArch)() : process.arch);
+  const asset = pickDesktopAsset(assets, platform, arch);
   const sums = assets.find((a) => a.name === 'SHA256SUMS');
   if (asset === null || sums === undefined) return null; // released, but not for this machine
   return {
@@ -191,6 +203,22 @@ function updateFromRelease(
   };
 }
 
+export interface StageOptions {
+  cacheDir?: string;
+  fetchFn?: typeof fetch;
+  logger?: Logger;
+  platform?: NodeJS.Platform;
+  /**
+   * Windows: the Puddle.exe the installer will replace (the running app, or
+   * the installed one for `puddle upgrade desktop`). When it carries an
+   * Authenticode signature, the staged installer must be validly signed by
+   * the same publisher; an unsigned app keeps checksum-only trust.
+   */
+  currentApp?: string;
+  /** Injectable for tests: runs a Windows PowerShell script and returns its stdout. */
+  powershell?: PowerShellRunner;
+}
+
 /**
  * Download the asset into ~/.puddle/cache/desktop/<version>/, verify it
  * against the release's SHA256SUMS, and unpack it ready to swap. Any failure
@@ -198,12 +226,7 @@ function updateFromRelease(
  */
 export async function stageDesktopUpdate(
   update: DesktopUpdate,
-  opts: {
-    cacheDir?: string;
-    fetchFn?: typeof fetch;
-    logger?: Logger;
-    platform?: NodeJS.Platform;
-  } = {},
+  opts: StageOptions = {},
 ): Promise<StagedDesktopUpdate> {
   const logger = opts.logger ?? silentLogger;
   const platform = opts.platform ?? process.platform;
@@ -250,6 +273,13 @@ export async function stageDesktopUpdate(
       // The verified installer is the whole update: it unpacks itself.
       if (!update.asset.name.endsWith('.exe')) {
         throw new CliError('not_installed', `${update.asset.name} is not a Windows installer`);
+      }
+      if (opts.currentApp !== undefined) {
+        await assertSamePublisher(
+          opts.currentApp,
+          archive,
+          opts.powershell ?? runWindowsPowerShell,
+        );
       }
       logger.info(`staged ${update.version} at ${archive}`);
       return { version: update.version, kind: 'nsis', stagedPath: archive, dir };
@@ -649,6 +679,134 @@ export async function uninstallWindowsDesktop(
     }
     await new Promise((resolve) => setTimeout(resolve, opts.pollMs ?? 500));
   }
+}
+
+/** Runs a Windows PowerShell script with extra environment variables; resolves its stdout. */
+export type PowerShellRunner = (script: string, env: Record<string, string>) => Promise<string>;
+
+export interface AuthenticodeSignature {
+  /** Get-AuthenticodeSignature's Status: Valid, NotSigned, HashMismatch, NotTrusted… */
+  status: string;
+  /** The signer certificate's subject (`CN=…, O=…, C=…`), or null when unsigned. */
+  publisher: string | null;
+}
+
+/**
+ * One Windows PowerShell call for every file. The paths travel in the
+ * environment, so none is ever parsed as PowerShell; the output is UTF-8
+ * JSON, which keeps a non-ASCII profile path or publisher intact.
+ */
+const AUTHENTICODE_SCRIPT = [
+  "$ErrorActionPreference = 'Stop'",
+  // Plain text on stderr: an -EncodedCommand error record would arrive as CLIXML.
+  'trap { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }',
+  '[Console]::OutputEncoding = New-Object Text.UTF8Encoding $false',
+  '$signatures = @(foreach ($file in ($env:PUDDLE_AUTHENTICODE_FILES -split "`n")) {',
+  '  $signature = Get-AuthenticodeSignature -LiteralPath $file',
+  '  $publisher = if ($signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { $null }',
+  '  [pscustomobject]@{ status = [string]$signature.Status; publisher = $publisher }',
+  '})',
+  'ConvertTo-Json -InputObject $signatures -Compress',
+].join('\n');
+
+export async function readAuthenticodeSignatures(
+  files: string[],
+  powershell: PowerShellRunner = runWindowsPowerShell,
+): Promise<AuthenticodeSignature[]> {
+  const output = await powershell(AUTHENTICODE_SCRIPT, {
+    PUDDLE_AUTHENTICODE_FILES: files.join('\n'),
+  });
+  const parsed = JSON.parse(output) as unknown;
+  const rows = Array.isArray(parsed) ? parsed : [parsed];
+  if (rows.length !== files.length) throw new Error('Get-AuthenticodeSignature skipped a file');
+  return rows.map((row) => {
+    const { status, publisher } = (row ?? {}) as { status?: unknown; publisher?: unknown };
+    return {
+      status: typeof status === 'string' ? status : 'UnknownError',
+      publisher: typeof publisher === 'string' && publisher !== '' ? publisher : null,
+    };
+  });
+}
+
+/**
+ * A signed Puddle.exe accepts only an installer that Windows reports as
+ * validly signed by the same publisher (the certificate subject: Azure
+ * Trusted Signing renews its certificates every few days, so thumbprints
+ * change between releases). The PE header shows whether the app is signed
+ * without starting PowerShell, so an unsigned app keeps today's
+ * checksum-only path; a signed one fails closed when the check cannot run.
+ */
+async function assertSamePublisher(
+  currentApp: string,
+  installer: string,
+  powershell: PowerShellRunner,
+): Promise<void> {
+  if (peImage(currentApp)?.signed !== true) return;
+  const name = win32.basename(installer);
+  let signatures: AuthenticodeSignature[];
+  try {
+    signatures = await readAuthenticodeSignatures([currentApp, installer], powershell);
+  } catch (e) {
+    throw new CliError(
+      'not_installed',
+      `could not check the Authenticode signature of ${name}`,
+      `Windows PowerShell must be able to run Get-AuthenticodeSignature (${e instanceof Error ? e.message : String(e)})`,
+    );
+  }
+  const [current, staged] = signatures as [AuthenticodeSignature, AuthenticodeSignature];
+  if (current.publisher === null) return;
+  if (staged.status !== 'Valid' || staged.publisher !== current.publisher) {
+    throw new CliError(
+      'not_installed',
+      staged.status !== 'Valid'
+        ? `${name} is not validly signed (${staged.status}); this Puddle is signed by ${current.publisher}`
+        : `${name} is signed by ${staged.publisher ?? 'nobody'}, not by ${current.publisher}`,
+      'refusing the update; install from the official release page if you trust the new publisher',
+    );
+  }
+}
+
+function runWindowsPowerShell(script: string, extra: Record<string, string>): Promise<string> {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const [key, value] of Object.entries(extra)) setEnv(env, key, value, 'win32');
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      system32Path('WindowsPowerShell\\v1.0\\powershell.exe'),
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-EncodedCommand',
+        Buffer.from(script, 'utf16le').toString('base64'),
+      ],
+      { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env, timeout: 60_000 },
+    );
+    let output = '';
+    let errors = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => (output += chunk));
+    child.stderr.on('data', (chunk: string) => (errors += chunk));
+    child.on('error', reject);
+    child.on('close', (code) =>
+      code === 0
+        ? resolve(output)
+        : reject(
+            new Error(plainText(errors) || `powershell.exe exited with ${code ?? 'a signal'}`),
+          ),
+    );
+  });
+}
+
+/**
+ * Windows PowerShell's stderr without the CLIXML progress records that
+ * -EncodedCommand adds ("Preparing modules for first use").
+ */
+function plainText(stderr: string): string {
+  return stderr
+    .replace(/<Objs\b[\s\S]*?<\/Objs>/g, '')
+    .split(/\r?\n/)
+    .filter((line) => line.trim() !== '' && line.trim() !== '#< CLIXML')
+    .join('\n');
 }
 
 /** This user's Puddle.exe processes, from tasklist (the installer's own check). */

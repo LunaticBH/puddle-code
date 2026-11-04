@@ -570,7 +570,11 @@ async function pollForUpdate(): Promise<void> {
     // newest release — intermediate versions are never downloaded or applied.
     const update = await checkForDesktopUpdate(app.getVersion());
     if (update === null || stagedUpdate?.version === update.version) return;
-    const staged = await stageDesktopUpdate(update, { logger });
+    // A signed Puddle.exe accepts only an installer from the same publisher.
+    const staged = await stageDesktopUpdate(update, {
+      logger,
+      ...(process.platform === 'win32' ? { currentApp: process.execPath } : {}),
+    });
     stagedUpdate = staged;
     // A release that was staged but never applied before a newer one arrived
     // is now unreachable — only the latest stage is ever offered or installed.
