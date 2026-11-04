@@ -320,7 +320,8 @@ export class WindowsSupervisor {
     try {
       // `puddle remote run` may already serve the home: never start a second manager.
       const holder = await this.deps.connectorManager();
-      if (this.stopping || this.connector.child) return;
+      // A reconcile meanwhile may have ended supervision; it had no child to stop.
+      if (this.stopping || this.connector.child || !this.deps.connectorWanted()) return;
       if (holder !== 'absent') {
         this.deps.log(
           holder === 'foreign'

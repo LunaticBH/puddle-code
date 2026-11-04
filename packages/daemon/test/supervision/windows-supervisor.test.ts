@@ -72,6 +72,9 @@ function harness(
     wanted: options.connector ?? false,
     hostPipe: 'absent' as ControlPipeState,
     manager: options.manager ?? 'absent',
+    /** Holds the connector manager's probe until it resolves. */
+    managerGate: Promise.resolve(),
+    managerAsked: 0,
   };
   let next = 100;
   const shutdowns = vi.fn(async () => {
@@ -97,7 +100,11 @@ function harness(
     connectorWanted: () => state.wanted,
     hostPipe: async () => state.hostPipe,
     requestDaemonShutdown: shutdowns,
-    connectorManager: async () => state.manager,
+    connectorManager: async () => {
+      state.managerAsked++;
+      await state.managerGate;
+      return state.manager;
+    },
     writePid: (pid) => pids.push(pid),
     proof: (challenge) => ipcProof(home, 'supervisor', challenge),
     now: () => Date.now(),
@@ -299,6 +306,23 @@ describe('the supervised connector', () => {
     expect(h.connectors[0]!.stop).toHaveBeenCalledOnce();
     await until(() => h.connectors.length === 2);
     expect(answer).toMatchObject({ kind: 'answered' });
+  });
+
+  it('starts no connector when its supervision ends while the start is probing', async () => {
+    const h = harness({ connector: true });
+    let release!: () => void;
+    h.state.managerGate = new Promise<void>((resolve) => (release = resolve));
+    h.start();
+    await until(() => h.state.managerAsked === 1);
+    h.state.wanted = false;
+    expect((await supervisorRequest(h.home, 'reconcile')).kind).toBe('answered');
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(h.connectors).toHaveLength(0);
+    // Enabled again, it starts as usual.
+    h.state.wanted = true;
+    await supervisorRequest(h.home, 'reconcile');
+    await until(() => h.connectors.length === 1);
   });
 
   it('never starts a second connector beside `puddle remote run`', async () => {
