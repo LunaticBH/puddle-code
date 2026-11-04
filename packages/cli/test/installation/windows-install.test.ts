@@ -22,6 +22,7 @@ import { waitForStartedDaemon } from '../../src/lib/connection/cockpit.js';
 import { readCurrentVersion } from '../../src/lib/installation/current-link.js';
 import {
   controlPipePresent,
+  startWindowsDaemon,
   stopWindowsDaemon,
 } from '../../src/lib/installation/windows-daemon.js';
 import {
@@ -338,6 +339,25 @@ describe.runIf(process.platform === 'win32' && existsSync(daemonDist))(
       expect(second.lines.join('\n')).not.toMatch(/stopping puddled|terminating/);
       (await waitForStartedDaemon(new LocalTransport(), 60_000)).authority.close();
       expect(pid(at)).toBe(started);
+      await stopWindowsDaemon(at);
+    }, 180_000);
+
+    it('leaves an identified daemon that has not served its pipe yet to start', async () => {
+      const at = freshHome();
+      await installWindowsDaemon({ home: at, tarball: zip });
+      await stopWindowsDaemon(at);
+      // Started outside the install lock, and slow to bind: the lock's holder
+      // finds no pipe, only the pid file and the daemon's command line.
+      process.env.PUDDLE_FIXTURE_START_DELAY_MS = '8000';
+      const started = await startWindowsDaemon(at, '1.2.3');
+      delete process.env.PUDDLE_FIXTURE_START_DELAY_MS;
+      const { lines, ...log } = logger();
+      await installWindowsDaemon({ home: at, tarball: zip, replaceRunning: false, logger: log });
+      expect(lines).toContain('puddled was starting meanwhile — leaving it running');
+      expect(lines.join('\n')).not.toMatch(/stopping puddled|terminating/);
+      (await waitForStartedDaemon(new LocalTransport(), 60_000)).authority.close();
+      expect(pid(at)).toBe(started);
+      expect(isPidAlive(started, 'win32')).toBe(true);
       await stopWindowsDaemon(at);
     }, 180_000);
 

@@ -54,6 +54,8 @@ const CACHE_KEEP = 2;
 const LOCK_WAIT_MS = 10 * 60_000;
 /** ensureDaemon's start allowance: Defender scans a freshly unpacked runtime. */
 const SERVE_WAIT_MS = 60_000;
+/** Longer than the shared process table keeps a snapshot. */
+const PROCESS_SNAPSHOT_MS = 300;
 
 export interface WindowsInstallOptions {
   home?: string;
@@ -143,10 +145,7 @@ export async function installWindowsDaemon(opts: WindowsInstallOptions = {}): Pr
     // A launcher that only needs a daemon never stops one that another
     // launcher started, even one that has not served its pipe yet.
     const starting =
-      opts.replaceRunning === false &&
-      !running &&
-      pidFile &&
-      (await homeDaemonPids(home).catch(() => [])).length > 0;
+      opts.replaceRunning === false && !running && pidFile && (await daemonStarting(home));
     const leave = opts.replaceRunning === false && (running || starting);
     if (leave) {
       logger.info(`puddled was ${running ? 'started' : 'starting'} meanwhile — leaving it running`);
@@ -168,6 +167,27 @@ export async function installWindowsDaemon(opts: WindowsInstallOptions = {}): Pr
     logger.info(`installed puddled ${version} under ${home} (supervisor: detached)`);
   } finally {
     await new Promise<void>((resolve) => lock.close(() => resolve()));
+  }
+}
+
+/**
+ * Whether a daemon of this home runs, identified by its command line. The
+ * shared process table answers from a snapshot up to 250 ms old, which a
+ * daemon spawned since then is missing from: while `puddled.pid` names a
+ * live process the snapshot lacks, the table is asked once more after that.
+ */
+async function daemonStarting(home: string): Promise<boolean> {
+  let recorded = 0;
+  try {
+    recorded = Number.parseInt(readFileSync(join(home, 'puddled.pid'), 'utf8'), 10);
+  } catch {
+    // Removed by a stop meanwhile.
+  }
+  for (let attempt = 0; ; attempt++) {
+    const pids = await homeDaemonPids(home).catch(() => [] as number[]);
+    if (pids.length > 0) return true;
+    if (attempt > 0 || !(recorded > 0) || !isPidAlive(recorded, 'win32')) return false;
+    await sleep(PROCESS_SNAPSHOT_MS);
   }
 }
 
