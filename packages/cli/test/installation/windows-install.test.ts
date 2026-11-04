@@ -31,6 +31,7 @@ import {
   windowsLauncher,
 } from '../../src/lib/installation/windows-install.js';
 import { LocalTransport } from '../../src/lib/transport/local.js';
+import { CliError } from '../../src/lib/types.js';
 
 describe('Windows daemon release assets', () => {
   it('downloads the release zip and its SHA256SUMS by their release names', async () => {
@@ -58,6 +59,28 @@ describe('Windows daemon release assets', () => {
       'https://github.com/acme/puddle/releases/download/v1.2.3/SHA256SUMS',
     ]);
     expect(existsSync(join(home, 'cache', 'puddled-v1.2.3-win32-x64.zip'))).toBe(false);
+    expect(existsSync(join(home, 'bin', 'versions', '1.2.3'))).toBe(false);
+  });
+
+  it('reports an offline download as not installed, which a launcher can fall back on', async () => {
+    const home = join(mkdtempSync(join(tmpdir(), 'puddle-windows-offline-')), '.puddle');
+    // What Node's fetch rejects with when the network is down.
+    const fetchFn = (async () => {
+      throw new TypeError('fetch failed', { cause: new Error('getaddrinfo ENOTFOUND github.com') });
+    }) as typeof fetch;
+    const savedRepo = process.env.PUDDLE_REPO;
+    process.env.PUDDLE_REPO = 'acme/puddle';
+    try {
+      const failure = installWindowsDaemon({ home, version: '1.2.3', fetchFn });
+      await expect(failure).rejects.toBeInstanceOf(CliError);
+      await expect(failure).rejects.toMatchObject({
+        code: 'not_installed',
+        message: 'download failed: fetch failed (getaddrinfo ENOTFOUND github.com)',
+      });
+    } finally {
+      if (savedRepo === undefined) delete process.env.PUDDLE_REPO;
+      else process.env.PUDDLE_REPO = savedRepo;
+    }
     expect(existsSync(join(home, 'bin', 'versions', '1.2.3'))).toBe(false);
   });
 

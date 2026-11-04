@@ -74,6 +74,34 @@ it('installs this launcher’s release when the installed one cannot start', asy
   expect(install.mock.calls[1]![1]).not.toHaveProperty('version');
 });
 
+it('installs this launcher’s release when the installed one is broken and the machine is offline', async () => {
+  // The installed tree fails its smoke test, so the installer fetches it
+  // again; offline, Node's fetch rejects instead of answering with a status.
+  install.mockImplementationOnce(async (_transport, opts) => {
+    const { installWindowsDaemon } = await import('../../src/lib/installation/windows-install.js');
+    await installWindowsDaemon({
+      ...(opts as { version: string; replaceRunning: boolean }),
+      home,
+      fetchFn: async () => {
+        throw new TypeError('fetch failed');
+      },
+    });
+    throw new Error('the offline installation succeeded');
+  });
+  const savedRepo = process.env.PUDDLE_REPO;
+  process.env.PUDDLE_REPO = 'acme/puddle';
+  try {
+    const transport = new LocalTransport({ platform: 'win32' });
+    await expect(ensureDaemon(transport, {})).rejects.toThrow('installation reached');
+  } finally {
+    if (savedRepo === undefined) delete process.env.PUDDLE_REPO;
+    else process.env.PUDDLE_REPO = savedRepo;
+  }
+  expect(install).toHaveBeenCalledTimes(2);
+  expect(install.mock.calls[0]![1]).toMatchObject({ version: '0.3.14' });
+  expect(install.mock.calls[1]![1]).not.toHaveProperty('version');
+});
+
 it('hands an installed daemon with another protocol to the handshake, on this launcher’s release', async () => {
   install.mockImplementationOnce(async () => {
     throw new CliError('protocol_mismatch', 'Host protocol 24 does not match client protocol 25');

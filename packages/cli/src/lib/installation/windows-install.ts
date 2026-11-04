@@ -277,8 +277,24 @@ async function download(
       rmSync(archive, { force: true });
       throw new CliError('not_installed', 'checksum mismatch — deleted the download');
     }
-  });
+  }).catch(downloadFailure);
   return archive;
+}
+
+/**
+ * Offline, refused or cut short, fetch rejects with no status at all. Such
+ * a download is as unusable as an HTTP error and as recoverable: a launcher
+ * falls back on any `not_installed` (startLocalWindows).
+ */
+function downloadFailure(err: unknown): never {
+  if (err instanceof CliError) throw err;
+  const reason = err instanceof Error ? err.message : String(err);
+  const cause = err instanceof Error && err.cause instanceof Error ? ` (${err.cause.message})` : '';
+  throw new CliError(
+    'not_installed',
+    `download failed: ${reason}${cause}`,
+    'check the network connection, or pass --tarball <path> (a puddled-v<version>-win32-x64.zip)',
+  );
 }
 
 /** A local zip is verified when its `<zip>.sha256` sits beside it, as with --tarball elsewhere. */
