@@ -5,9 +5,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Account, AgentType, Profile, Project, Repo } from '@puddle/shared';
 import { clearBinaryCache } from '../../src/agents/binary.js';
 import { startDaemon, type RunningDaemon } from '../helpers/authorised-daemon.js';
-import { fixture, fakeAdapter } from '../helpers/daemon-fixtures.js';
+import { fixture, fakeAdapter, nodeFakeAdapter } from '../helpers/daemon-fixtures.js';
 import { initRepo } from '../helpers/git-fixtures.js';
-import { nodeFakeAdapter } from './node-fake-agent.js';
 
 const ABSENT = 'puddle-nonexistent-agent';
 

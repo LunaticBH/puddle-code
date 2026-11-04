@@ -18,8 +18,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { KeyedMutex } from '../../src/git/mutex.js';
 import { ConversationShare, type ShareSession } from '../../src/sessions/conversation-share.js';
 import { removeDirWithin } from '../../src/http/fs-cleanup.js';
-import { fixture, waitFor, type Fixture } from '../helpers/daemon-fixtures.js';
-import { nodeFakeAdapter } from '../agents/node-fake-agent.js';
+import { fixture, nodeFakeAdapter, waitFor, type Fixture } from '../helpers/daemon-fixtures.js';
 
 /** The share-capable fake agent, run by Node so the live paths work on every OS. */
 function shareFixture(): Fixture {

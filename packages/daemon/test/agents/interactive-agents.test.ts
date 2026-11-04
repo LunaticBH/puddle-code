@@ -11,8 +11,7 @@ import { installStatusHooks } from '../../src/agents/claude-code/hooks.js';
 import { installClaudeTurnHooks } from '../../src/agents/claude-code/control.js';
 import { installGeminiLifecycleHooks } from '../../src/agents/gemini-cli/hooks.js';
 import { installOpenCodePlugin } from '../../src/agents/opencode/plugin.js';
-import { fixture, waitFor } from '../helpers/daemon-fixtures.js';
-import { nodeFakeAdapter } from './node-fake-agent.js';
+import { fixture, nodeFakeAdapter, waitFor } from '../helpers/daemon-fixtures.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
