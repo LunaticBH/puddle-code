@@ -1,17 +1,26 @@
 import { execFileSync } from 'node:child_process';
 import {
+  appendFileSync,
   copyFileSync,
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import type { Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { system32Path } from '@puddle/shared/node/platform';
+import { ipcPath, ipcProof, listenPrivate } from '@puddle/shared/node';
+import {
+  supervisorTaskName,
+  system32Path,
+  type PowerShellRunner,
+} from '@puddle/shared/node/platform';
 import {
   removeWindowsDaemon,
   sweepWindowsWorktrees,
@@ -93,6 +102,7 @@ describe('removing the daemon from this Windows machine', () => {
     await removeWindowsDaemon(home, {
       purge: false,
       logger: { info: (line) => lines.push(line), warn: (line) => lines.push(line) },
+      powershell: absentTask().runner,
     });
     for (const name of ['bin', 'cache', 'runtime.json', 'supervisor', 'puddled.pid']) {
       expect(existsSync(join(home, name))).toBe(false);
@@ -109,8 +119,95 @@ describe('removing the daemon from this Windows machine', () => {
     await removeWindowsDaemon(home, {
       purge: true,
       logger: { info: (line) => lines.push(line), warn: (line) => lines.push(line) },
+      powershell: absentTask().runner,
     });
     expect(existsSync(home)).toBe(false);
     expect(lines).toContain(`puddled remove: deleted ${home}`);
   });
+
+  it('disables remote access, removes the logon task, then stops the supervisor', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'puddle-windows-remove-'));
+    const order = join(home, 'order.log');
+    // An installed release whose connector records `--disable-all`.
+    const current = join(home, 'bin', 'current');
+    mkdirSync(join(current, 'bin'), { recursive: true });
+    mkdirSync(join(current, 'daemon'), { recursive: true });
+    try {
+      linkSync(process.execPath, join(current, 'bin', 'node.exe'));
+    } catch {
+      copyFileSync(process.execPath, join(current, 'bin', 'node.exe'));
+    }
+    writeFileSync(
+      join(current, 'daemon', 'connector.mjs'),
+      `import { appendFileSync } from 'node:fs';\n` +
+        `appendFileSync(${JSON.stringify(order)}, process.argv.slice(2).join(' ') + '\\n');\n`,
+    );
+    writeFileSync(join(current, 'CONNECTOR_PROTOCOL'), '4\n');
+    mkdirSync(join(home, 'remote'));
+    writeFileSync(join(home, 'remote', 'supervised'), '');
+    const tasks = absentTask((env) =>
+      appendFileSync(order, `unregister ${env.PUDDLE_TASK_NAME}\n`),
+    );
+    const sockets = new Set<Socket>();
+    const supervisor = await listenPrivate(ipcPath(home, 'supervisor'), (socket) => {
+      sockets.add(socket);
+      socket.on('error', () => {});
+      socket.once('data', (request: Buffer) => {
+        const { t, challenge } = JSON.parse(request.toString()) as { t: string; challenge: string };
+        if (t === 'shutdown') {
+          appendFileSync(order, 'supervisor shutdown\n');
+          setTimeout(() => {
+            for (const each of sockets) each.destroy();
+            supervisor.close();
+          }, 100);
+        }
+        socket.end(
+          JSON.stringify({
+            t: 'supervisor',
+            proof: ipcProof(home, 'supervisor', challenge),
+            pid: 999_999_999,
+            daemon: null,
+            connector: null,
+            stopping: true,
+          }) + '\n',
+        );
+      });
+    });
+    await removeWindowsDaemon(home, { purge: false, powershell: tasks.runner });
+    expect(readFileSync(order, 'utf8').trim().split('\n')).toEqual([
+      '--disable-all',
+      `unregister ${supervisorTaskName(home)}`,
+      'supervisor shutdown',
+    ]);
+    expect(existsSync(join(home, 'remote', 'supervised'))).toBe(false);
+    expect(existsSync(join(home, 'remote'))).toBe(true);
+    expect(existsSync(join(home, 'bin'))).toBe(false);
+  });
+
+  it('keeps removing when the logon task cannot be removed, and says where it is', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'puddle-windows-remove-'));
+    const refusing: PowerShellRunner = async () => ({
+      code: 0,
+      stdout: JSON.stringify({ removed: false, error: 'Access is denied.' }),
+      stderr: '',
+    });
+    const lines: string[] = [];
+    await removeWindowsDaemon(home, {
+      purge: false,
+      powershell: refusing,
+      logger: { info: (line) => lines.push(line), warn: (line) => lines.push(line) },
+    });
+    expect(lines.join('\n')).toContain('Access is denied.');
+    expect(lines.join('\n')).toContain(supervisorTaskName(home));
+    expect(lines).toContain(`puddled remove: removed the install; data kept under ${home}`);
+  });
 });
+
+/** A PowerShell that finds no task to remove, calling `seen` with each request's values. */
+function absentTask(seen?: (env: Readonly<Record<string, string>>) => void) {
+  const runner: PowerShellRunner = async (_script, env) => {
+    seen?.(env);
+    return { code: 0, stdout: JSON.stringify({ removed: false, error: '' }), stderr: '' };
+  };
+  return { runner };
+}

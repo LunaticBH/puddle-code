@@ -11,8 +11,10 @@ import {
   controlPipeState,
   daemonEnvironment,
   isHomeDaemon,
+  isHomeSupervisor,
   requestDaemonShutdown,
   stopWindowsDaemon,
+  stopWindowsSupervisor,
   windowsRuntime,
 } from '../../src/lib/installation/windows-daemon.js';
 
@@ -125,6 +127,72 @@ describe('the detached Windows supervisor', () => {
     expect(isHomeDaemon(process_(10, daemon.replace('puddled.mjs', 'connector.mjs')), home)).toBe(
       false,
     );
+  });
+
+  it('recognises this home’s supervisors, which are never its daemons', () => {
+    const home = 'C:\\Users\\a\\.puddle';
+    const task =
+      '"C:\\Users\\a\\.puddle\\bin\\current\\bin\\node.exe" ' +
+      '"C:\\Users\\a\\.puddle\\bin\\current\\daemon\\supervisor.mjs" --home "C:\\Users\\a\\.puddle"';
+    expect(isHomeSupervisor(process_(10, task), home)).toBe(true);
+    expect(
+      isHomeSupervisor(process_(10, task.replaceAll('current', 'versions\\0.3.15')), home),
+    ).toBe(true);
+    expect(isHomeDaemon(process_(10, task), home)).toBe(false);
+    expect(isHomeSupervisor(process_(10, task.replaceAll('.puddle', '.puddle2')), home)).toBe(
+      false,
+    );
+    expect(isHomeSupervisor(process_(10, task, 'conhost.exe'), home)).toBe(false);
+    expect(isHomeSupervisor(process_(10, null), home)).toBe(false);
+    expect(
+      isHomeSupervisor(process_(10, task.replace('supervisor.mjs', 'puddled.mjs')), home),
+    ).toBe(false);
+  });
+
+  it('ends the supervisor before the daemon, so nothing starts the daemon again', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'puddle-windows-daemon-'));
+    const order: string[] = [];
+    const supervisor = await listenPrivate(ipcPath(home, 'supervisor'), (socket) => {
+      socket.on('error', () => {});
+      socket.once('data', (request: Buffer) => {
+        const { t, challenge } = JSON.parse(request.toString()) as { t: string; challenge: string };
+        order.push(`supervisor ${t}`);
+        socket.end(
+          JSON.stringify({
+            t: 'supervisor',
+            proof: ipcProof(home, 'supervisor', challenge),
+            pid: 999_999_999,
+            daemon: null,
+            connector: null,
+            stopping: t === 'shutdown',
+          }) + '\n',
+        );
+        // It stops shortly after answering.
+        if (t === 'shutdown') setTimeout(() => supervisor.close(), 200);
+      });
+    });
+    await control(home, { t: 'shutting_down' }, () => order.push('daemon shutdown'));
+    const lines: string[] = [];
+    await stopWindowsDaemon(home, {
+      list: async () => [],
+      graceMs: 300,
+      terminateGraceMs: 300,
+      logger: { info: (line) => lines.push(line), warn: (line) => lines.push(line) },
+    }).catch(() => undefined);
+    expect(order[0]).toBe('supervisor shutdown');
+    expect(order).toContain('daemon shutdown');
+    expect(lines[0]).toBe('stopping the Puddle supervisor on this machine');
+  });
+
+  it('leaves no supervisor to stop when none runs or answers for this home', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'puddle-windows-daemon-'));
+    await stopWindowsSupervisor(home, { list: async () => [] });
+    // Another home's supervisor is never this one's.
+    await stopWindowsSupervisor(home, {
+      list: async () => [
+        process_(11, 'node C:\\Users\\b\\.puddle\\bin\\current\\daemon\\supervisor.mjs'),
+      ],
+    });
   });
 
   it('asks the daemon to stop over its control endpoint', async () => {

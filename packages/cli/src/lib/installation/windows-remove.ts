@@ -2,7 +2,13 @@ import { execFile } from 'node:child_process';
 import { existsSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { findExecutable } from '@puddle/shared/node/platform';
+import {
+  connectorSupervisedMarker,
+  findExecutable,
+  supervisorTaskName,
+  unregisterWindowsTask,
+  type PowerShellRunner,
+} from '@puddle/shared/node/platform';
 import { stopWindowsDaemon } from './windows-daemon.js';
 import { CliError, type Logger, silentLogger } from '../types.js';
 
@@ -10,10 +16,11 @@ const execute = promisify(execFile);
 
 /**
  * `puddle remove daemon` and its worktree sweep on this Windows machine: the
- * POSIX scripts' steps in Node (docs/windows.md, decision 4). Windows refuses
- * to delete files a process still has open, so the daemon is stopped and
- * awaited first, and anything still locked afterwards is reported as kept
- * rather than failing halfway.
+ * POSIX scripts' steps in Node (docs/windows.md, decision 4). Remote access
+ * is disabled and the home's logon task removed first; Windows refuses to
+ * delete files a process still has open, so the supervisor, daemon and
+ * connector are then stopped and awaited, and anything still locked
+ * afterwards is reported as kept rather than failing halfway.
  */
 
 /** Worktrees carrying work a purge would destroy: dirty, or unpushed commits. */
@@ -70,11 +77,26 @@ async function git(dir: string, args: string[]): Promise<string> {
 
 export async function removeWindowsDaemon(
   home: string,
-  opts: { purge: boolean; logger?: Logger },
+  opts: {
+    purge: boolean;
+    logger?: Logger;
+    /** Test seam: no test removes a real scheduled task. */
+    powershell?: PowerShellRunner;
+  },
 ): Promise<void> {
   const logger = opts.logger ?? silentLogger;
   const say = (message: string) => logger.info(`puddled remove: ${message}`);
   await disableConnector(home);
+  // The POSIX removal's order: remote access off, supervision gone, then stop.
+  rmSync(connectorSupervisedMarker(home), { force: true });
+  try {
+    await unregisterWindowsTask(supervisorTaskName(home), { powershell: opts.powershell });
+  } catch (err) {
+    // A task left behind only fails at logon, once its node.exe is gone.
+    logger.warn(
+      `puddled remove: ${(err as Error).message}; remove “${supervisorTaskName(home)}” in Task Scheduler`,
+    );
+  }
   await stopWindowsDaemon(home, { logger });
 
   const targets = opts.purge
