@@ -35,17 +35,36 @@ import { MarkerFileSync } from '../../src/sessions/onboarding.js';
 import { SessionService } from '../../src/sessions/service.js';
 import { WorktreeManager } from '../../src/worktrees/manager.js';
 import { initRepo } from './git-fixtures.js';
+import { fakeStoreKey, withNodeFakeAgent } from './node-fake-agent.js';
 
-/** Stable store-key from a worktree path (mirrors claude's escaped-cwd dir). */
-function fakeStoreKey(worktreePath: string): string {
-  let h = 5381;
-  for (let i = 0; i < worktreePath.length; i++) h = ((h << 5) + h + worktreePath.charCodeAt(i)) | 0;
-  return `fake-${(h >>> 0).toString(16)}`;
+export interface FakeAdapterOptions {
+  share?: boolean;
+  binary?: string;
+  /** Hold back the first PTY output so tests can exercise `starting`. */
+  startDelayMs?: number;
+  /** Distinct id, for tests needing two agent types (e.g. cross-agent hand-off). */
+  id?: string;
+  /** Renders a transcript; absent exercises the hand-off's PTY-log fallback. */
+  exportTranscript?: AgentAdapter['exportTranscript'];
 }
 
 /**
- * A deterministic agent for tests: bash echoing its launch/resume arguments,
- * then `cat`-ing stdin back. READY lines drive the waiting_input detector.
+ * A deterministic agent for tests: it echoes its launch/resume arguments, then
+ * its input. READY lines drive the waiting_input detector. POSIX hosts run the
+ * bash fake below; Windows, which has no bash of its own, runs its Node twin.
+ */
+export function fakeAdapter(opts: FakeAdapterOptions = {}): AgentAdapter {
+  return process.platform === 'win32' ? nodeFakeAdapter(opts) : bashFakeAdapter(opts);
+}
+
+/** The fake agent as a Node script, on every host (see node-fake-agent.ts). */
+export function nodeFakeAdapter(opts: FakeAdapterOptions = {}): AgentAdapter {
+  return withNodeFakeAgent(bashFakeAdapter(opts), opts);
+}
+
+/**
+ * The POSIX fake: bash echoing its launch/resume arguments, then `cat`-ing
+ * stdin back.
  *
  * `{ binary }` overrides the executable, so a test can register an adapter whose
  * CLI is guaranteed absent from PATH.
@@ -56,18 +75,7 @@ function fakeStoreKey(worktreePath: string): string {
  * exercisable without a real claude. The default (no options) is unchanged so
  * the rest of the suite keeps its simple marker-based conversation model.
  */
-export function fakeAdapter(
-  opts: {
-    share?: boolean;
-    binary?: string;
-    /** Hold back the first PTY output so tests can exercise `starting`. */
-    startDelayMs?: number;
-    /** Distinct id, for tests needing two agent types (e.g. cross-agent hand-off). */
-    id?: string;
-    /** Renders a transcript; absent exercises the hand-off's PTY-log fallback. */
-    exportTranscript?: AgentAdapter['exportTranscript'];
-  } = {},
-): AgentAdapter {
+function bashFakeAdapter(opts: FakeAdapterOptions): AgentAdapter {
   const base: AgentAdapter = {
     id: opts.id ?? 'fake',
     displayName: opts.id === undefined ? 'Fake Agent' : `Fake Agent ${opts.id}`,

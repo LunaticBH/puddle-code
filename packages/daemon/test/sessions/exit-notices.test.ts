@@ -11,7 +11,12 @@ import { fakeAdapter, fixture, waitFor } from '../helpers/daemon-fixtures.js';
 describe('abnormal-exit notices', () => {
   /** An agent that prints a failure and dies, like a rejected CLI flag. */
   function failingAdapter() {
-    const die = ['-c', 'echo "error: unexpected argument \'--yolo\'" >&2; exit 2'];
+    // Windows runs the fixture's Node fake agent (no bash), so it dies in Node;
+    // exitCode rather than exit(), as console writes there are asynchronous.
+    const die =
+      process.platform === 'win32'
+        ? ['-e', 'console.error("error: unexpected argument \'--yolo\'"); process.exitCode = 2']
+        : ['-c', 'echo "error: unexpected argument \'--yolo\'" >&2; exit 2'];
     // Both paths must fail: resume is what the later-crash case exercises.
     return { ...fakeAdapter(), launchArgs: () => die, resumeArgs: () => die };
   }

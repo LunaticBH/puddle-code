@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { agentNotificationSchema, type AgentNotification } from '@puddle/shared';
 import { ProfileAccess } from '../../src/security/profile-access.js';
-import { fixture, waitFor } from '../helpers/daemon-fixtures.js';
-import { nodeFakeAdapter } from './node-fake-agent.js';
+import { fixture, nodeFakeAdapter, waitFor } from '../helpers/daemon-fixtures.js';
 
 describe('agent notification events', () => {
   it('reports waiting and a clean process exit, but keeps deliberate stops quiet', async () => {

@@ -1,11 +1,11 @@
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-const mocks = vi.hoisted(() => ({ connect: vi.fn(), privatePath: vi.fn() }));
+const mocks = vi.hoisted(() => ({ connect: vi.fn(), checkIpcEndpoint: vi.fn() }));
 vi.mock('node:net', () => ({ connect: mocks.connect }));
 vi.mock('@puddle/shared/node', async (original) => ({
   ...(await original<object>()),
-  privatePath: mocks.privatePath,
+  checkIpcEndpoint: mocks.checkIpcEndpoint,
 }));
 import { ipcPath } from '@puddle/shared/node';
 import { subscribePushNotifications } from '../../src/sessions/push-notifications.js';
@@ -98,7 +98,7 @@ describe('daemon push signals', () => {
     expect(socket.end).toHaveBeenCalledExactlyOnceWith(
       JSON.stringify({ t: 'notify', id: event.id }) + '\n',
     );
-    expect(mocks.privatePath).toHaveBeenCalledWith(
+    expect(mocks.checkIpcEndpoint).toHaveBeenCalledWith(
       ipcPath('/tmp/puddle-notify-test', 'remote-0123456789'),
     );
     preferences = { desktop: false };

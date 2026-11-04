@@ -679,6 +679,30 @@ describe('daemon end-to-end (Phase 1 acceptance)', () => {
     await c.json<Session>('POST', `/api/sessions/${s4.id}/archive`, { force: true });
   });
 
+  it('prunes a stopped session’s worktree, releasing the daemon’s own watcher in it', async () => {
+    // The stopped session still watches <worktree>/.puddle for notes; Windows
+    // refuses to remove a watched directory, so the prune must let go of it.
+    const c = client(daemon);
+    const s5 = await c.json<Session>('POST', '/api/sessions', {
+      project_id: project.id,
+      account_id: alice1.id,
+      title: 'prune test',
+      branch: 'alice/prune-test',
+    });
+    await pollUntil(
+      async () => (await c.json<Session>('GET', `/api/sessions/${s5.id}`)).status !== 'starting',
+    );
+    await c.json<Session>('POST', `/api/sessions/${s5.id}/kill`);
+    const pruned = await c.req(
+      'DELETE',
+      `/api/repos/${repo.id}/worktrees?path=${encodeURIComponent(s5.worktree_path)}`,
+    );
+    // Archived first, so a failure here leaves the later deletion tests intact.
+    await c.json<Session>('POST', `/api/sessions/${s5.id}/archive`, { force: true });
+    expect(pruned.status).toBe(200);
+    expect(existsSync(s5.worktree_path)).toBe(false);
+  });
+
   it('refuses deletion while sessions are live, then cascades account and profile', async () => {
     const c = client(daemon);
     // A fresh session (running) blocks both deletions with 409s.

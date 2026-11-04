@@ -12,8 +12,7 @@ import { claudeDriver } from '../../src/agents/claude-code/headless.js';
 import { codexDriver } from '../../src/agents/codex/headless.js';
 import { geminiDriver } from '../../src/agents/gemini-cli/headless.js';
 import { openCodeDriver } from '../../src/agents/opencode/headless.js';
-import { fixture, waitFor } from '../helpers/daemon-fixtures.js';
-import { nodeFakeAdapter } from './node-fake-agent.js';
+import { fixture, nodeFakeAdapter, waitFor } from '../helpers/daemon-fixtures.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
