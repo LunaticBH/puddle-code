@@ -4,15 +4,18 @@ import { codex } from '../../src/agents/codex/index.js';
 import { geminiCli } from '../../src/agents/gemini-cli/index.js';
 import { opencode } from '../../src/agents/opencode/index.js';
 import type { WindowsProcess } from '@puddle/shared/node/platform';
+import { windowsDescendants } from '../../src/ports/process-tree.js';
 import {
   parseProcessSnapshot,
   windowsProcessCommand,
   windowsProcessSnapshot,
 } from '../../src/pty/foreground-process.js';
+import { windowsCommandLine } from '../../src/pty/pty-spawn.js';
 import {
   TerminalAgentMonitor,
   type TerminalAgentTarget,
 } from '../../src/sessions/terminal-agent-monitor.js';
+import { RUN_WRAPPER, type RunWrapperPlan } from '../../src/sessions/terminal-command.js';
 
 const adapters = [claudeCode, codex, opencode, geminiCli];
 const monitors: TerminalAgentMonitor[] = [];
@@ -328,6 +331,50 @@ describe('Windows process recognition', () => {
       'claude-code',
     );
     expect(f.notify).toHaveBeenCalledExactlyOnceWith('terminal', 'exited');
+  });
+
+  it('sees through the programme terminal’s run wrapper, which stays the PTY root', async () => {
+    // Windows has no exec: the Node run wrapper (terminal-command.ts) is the
+    // parent of the programme and then of the session shell for the PTY's
+    // whole life. Its plan names the programme, here an agent's own script.
+    const step = (file: string, args: string[]) => ({ file, args });
+    const codexScript = 'C:\\npm\\node_modules\\@openai\\codex\\bin\\codex.js';
+    const plan: RunWrapperPlan = {
+      banner: `node ${codexScript}`,
+      env: {},
+      commands: [step('C:\\nodejs\\node.exe', [codexScript])],
+      shell: step('C:\\Program Files\\PowerShell\\7\\pwsh.exe', ['-NoLogo']),
+    };
+    const encoded = Buffer.from(JSON.stringify(plan), 'utf8').toString('base64');
+    const node = 'C:\\Users\\a\\.puddle\\bin\\current\\bin\\node.exe';
+    const wrapper = windowsProcess(
+      100,
+      1,
+      'node.exe',
+      windowsCommandLine([node, '-e', RUN_WRAPPER, encoded]),
+    );
+    const server = windowsProcess(200, 100, 'node.exe', 'node C:\\project\\server.js');
+    const pwsh = windowsProcess(
+      300,
+      100,
+      'pwsh.exe',
+      '"C:\\Program Files\\PowerShell\\7\\pwsh.exe"',
+    );
+    const claude = windowsProcess(400, 300, 'claude.exe', 'claude');
+    const codex = windowsProcess(500, 300, 'node.exe', `node ${codexScript}`);
+
+    const f = monitorOn([wrapper]);
+    // Neither the wrapper itself (its command line, or only its image name)
+    // nor an ordinary Node programme below it is an agent.
+    expect(await f.scan([wrapper])).toBeNull();
+    expect(await f.scan([{ ...wrapper, commandLine: null }])).toBeNull();
+    expect(await f.scan([wrapper, server])).toBeNull();
+    // Agents started from the session shell are recognised through it.
+    expect(await f.scan([wrapper, pwsh, claude])).toBe('claude-code');
+    expect(await f.scan([wrapper, pwsh, codex])).toBe('codex');
+    // A port opened by the programme, or later from the shell, is the session's.
+    const table = [wrapper, server, pwsh, codex];
+    expect(windowsDescendants([wrapper.pid], table)).toEqual(new Set([100, 200, 300, 500]));
   });
 });
 
