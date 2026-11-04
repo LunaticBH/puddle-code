@@ -7,6 +7,7 @@ import type { AgentAdapter } from '../../src/agents/adapter.js';
 import { LogStore } from '../../src/logs/log-store.js';
 import { quoteWindowsArgument } from '../../src/pty/pty-spawn.js';
 import { buildHandoffPrompt } from '../../src/sessions/handoff.js';
+import { buildConcurrentWorktreeNote } from '../../src/sessions/onboarding.js';
 import { initRepo } from '../helpers/git-fixtures.js';
 
 /**
@@ -47,8 +48,20 @@ describe('hand-off prompt budget', () => {
     expect(prompt).toMatch(/… \(\d+ more lines omitted\)/);
   });
 
+  it('keeps the briefing and the launch text before it inside the limit together', async () => {
+    // A quote-bearing concurrency note of 3,000 characters or more.
+    const note = `${'shared worktree '.repeat(200)}"note"`;
+    const launchPromptFor = (briefing: string) => buildConcurrentWorktreeNote(note, briefing);
+    const prompt = await buildHandoffPrompt({ ...sources(transcript), launchPromptFor }, 'win32');
+    expect(quoteWindowsArgument(launchPromptFor(prompt)).length).toBeLessThanOrEqual(24_000);
+    expect(prompt).toContain('turn 799');
+  });
+
   it('leaves the POSIX prompt unbounded beyond the transcript budget', async () => {
-    const prompt = await buildHandoffPrompt(sources(transcript), 'linux');
+    const launchPromptFor = () => {
+      throw new Error('measured on POSIX');
+    };
+    const prompt = await buildHandoffPrompt({ ...sources(transcript), launchPromptFor }, 'linux');
     expect(prompt).not.toContain('more lines omitted');
     expect(prompt).toContain('untracked-599.txt');
     expect(prompt.length).toBeGreaterThan(24_000);

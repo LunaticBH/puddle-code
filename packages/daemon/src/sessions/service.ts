@@ -49,12 +49,9 @@ import type { CreateWorktreeResult, WorktreeManager } from '../worktrees/manager
 import type { ConversationShare } from './conversation-share.js';
 import { buildHandoffPrompt } from './handoff.js';
 import { terminalCommandSpawn, type TerminalCommand } from './terminal-command.js';
-import {
-  buildConcurrentWorktreeNote,
-  buildInterruptedResumeNote,
-  buildOnboardingPreamble,
-} from './onboarding.js';
+import { buildConcurrentWorktreeNote, buildInterruptedResumeNote } from './onboarding.js';
 import type { MarkerFileSync } from './onboarding.js';
+import { launchPrompt, worktreeFreshness } from './launch-prompt.js';
 import { SessionRefs } from './session-refs.js';
 import { TerminalAgentMonitor } from './terminal-agent-monitor.js';
 import { assertWindowsPromptFits } from './windows-prompt.js';
@@ -407,9 +404,6 @@ export class SessionService extends EventEmitter {
     if (input.cwd !== undefined) {
       throw ApiError.badRequest('cwd_terminal_only', 'cwd applies to terminal sessions only');
     }
-    // Windows: an interactive agent's prompt is a command-line argument
-    // (headless turns send it on stdin), refused before anything is created.
-    if (agentMode === 'interactive') assertWindowsPromptFits(input.prompt);
     if (input.account_id === undefined) {
       throw ApiError.badRequest('account_required', 'an agent session needs an account_id');
     }
@@ -441,6 +435,17 @@ export class SessionService extends EventEmitter {
 
     const separateBranch = input.separate_branch !== false;
     const separateWorktree = input.separate_worktree !== false; // agents: own dir by default
+    // Windows: an interactive agent's first prompt goes on its command line
+    // (headless turns send it on stdin), so one too long is refused here,
+    // before any worktree or session row exists. It is measured with each
+    // launch text the worktree it lands in may give it, onboarding notes too.
+    if (agentMode === 'interactive')
+      assertWindowsPromptFits(() => {
+        const settings = this.deps.profiles.getSettings(project.profile_id);
+        return worktreeFreshness(input, separateBranch, separateWorktree).map((fresh) =>
+          launchPrompt(settings, repo.onboarding_notes, input.prompt, fresh),
+        );
+      });
     const sessionId = randomUUID();
     const worktree = await this.resolveSessionWorktree({
       repo,
@@ -474,13 +479,7 @@ export class SessionService extends EventEmitter {
     // heads-up rather than going in bare. The launch text is the profile's
     // template (Settings → Sessions), falling back to the built-in default.
     const settings = this.deps.profiles.getSettings(project.profile_id);
-    const preamble = worktree.created
-      ? buildOnboardingPreamble(
-          settings.onboardingTemplate,
-          repo.onboarding_notes,
-          input.prompt ?? null,
-        )
-      : buildConcurrentWorktreeNote(settings.concurrentTemplate, input.prompt ?? null);
+    const preamble = launchPrompt(settings, repo.onboarding_notes, input.prompt, worktree.created);
     const launchOpts = {
       worktreePath: worktree.worktreePath,
       sessionId,
@@ -1052,6 +1051,12 @@ export class SessionService extends EventEmitter {
       account: this.deps.accounts.get(session.account_id),
       session,
       logs: this.deps.logs,
+      // Joining the worktree puts the concurrency note before the briefing.
+      launchPromptFor: (briefing) =>
+        buildConcurrentWorktreeNote(
+          this.deps.profiles.getSettings(project.profile_id).concurrentTemplate,
+          briefing,
+        ),
     });
     // `join_worktree` lands the new session in the source's directory, on
     // whatever branch is checked out there — no second `git worktree add`, and

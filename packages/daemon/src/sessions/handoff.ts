@@ -25,8 +25,9 @@ const TRANSCRIPT_BUDGET = 12_000;
 
 /**
  * Windows only: every adapter passes the prompt as one argument, so the
- * quoted prompt is kept within WINDOWS_PROMPT_BUDGET, which session creation
- * enforces too; each git section is bounded as well.
+ * quoted prompt, with the launch text the new session puts before it, is kept
+ * within WINDOWS_PROMPT_BUDGET, which session creation enforces too; each git
+ * section is bounded as well.
  */
 const WINDOWS_GIT_SECTION_BUDGET = 4_000;
 
@@ -35,6 +36,11 @@ export interface HandoffSources {
   account: Account;
   session: Session;
   logs: LogStore;
+  /**
+   * The first prompt the receiving session's launch sends for this briefing,
+   * which Windows measures against the budget; the briefing alone if absent.
+   */
+  launchPromptFor?: (briefing: string) => string;
 }
 
 /** The full first prompt for the receiving agent. */
@@ -64,7 +70,7 @@ export async function buildHandoffPrompt(
       boundedCommits,
       boundedStatus,
     );
-    const overflow = windowsPromptOverflow(prompt);
+    const overflow = windowsPromptOverflow(sources.launchPromptFor?.(prompt) ?? prompt);
     if (overflow <= 0 || budget === 0) return prompt;
     budget = Math.max(0, budget - overflow);
   }
