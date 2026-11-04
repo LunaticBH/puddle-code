@@ -159,17 +159,17 @@ describe('the Windows supervisor', () => {
     expect(h.log.join('\n')).toMatch(/another puddled serves this home/);
   });
 
-  it('keeps supervising the connector beside a daemon that another launcher started', async () => {
+  it('steps aside, connector included, for a daemon that another launcher started', async () => {
     const h = harness({ connector: true });
     const { done } = h.start();
     await until(() => h.connectors.length === 1);
     h.daemons[0]!.exit(DAEMON_ALREADY_ACTIVE_EXIT);
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    expect(h.daemons).toHaveLength(1);
-    // Disabling the connector's supervision leaves nothing to do.
-    h.state.wanted = false;
-    expect((await supervisorRequest(h.home, 'reconcile')).kind).toBe('answered');
+    // Lingering without a daemon, it would answer a launch as the one starting it.
     expect(await done).toBe(0);
+    expect(h.connectors[0]!.stop).toHaveBeenCalledOnce();
+    expect(h.daemons).toHaveLength(1);
+    expect(h.pids.at(-1)).toBeNull();
+    expect(await supervisorRequest(h.home, 'status')).toEqual({ kind: 'absent' });
   });
 
   it('restarts a crashed daemon with doubling backoff, then gives up', async () => {
@@ -207,6 +207,14 @@ describe('the Windows supervisor', () => {
     expect(await done).toBe(0);
     expect(h.daemons).toHaveLength(1);
     expect(h.log.join('\n')).toMatch(/another puddled took over this home/);
+
+    const supervised = harness({ connector: true });
+    const second = supervised.start();
+    await until(() => supervised.connectors.length === 1);
+    supervised.state.hostPipe = 'unknown';
+    supervised.daemons[0]!.exit(1);
+    expect(await second.done).toBe(0);
+    expect(supervised.connectors[0]!.stop).toHaveBeenCalledOnce();
   });
 
   it('defers to a supervisor that already runs, and refuses a squatter on its pipe', async () => {

@@ -14,11 +14,14 @@ import {
  * is supervised, the connector as its children, restarting either after an
  * abnormal exit with backoff (1 s doubling to 60 s), and gives up after ten
  * failures in ten minutes. A daemon that exits 0 was asked to stop, so the
- * supervisor stops the connector and exits 0; one that found its control
- * pipe served exits DAEMON_ALREADY_ACTIVE_EXIT and is never restarted
- * beside the daemon that serves it. The supervisor's own private pipe makes
- * it single-instance per home and takes `status`, `reconcile`,
- * `restart_connector` and `shutdown`.
+ * supervisor stops the connector and exits 0. One that found its control
+ * pipe served exits DAEMON_ALREADY_ACTIVE_EXIT, and a restart that finds
+ * the pipe served starts none: another daemon serves the home, so the
+ * supervisor stops the connector and exits 0 too, never lingering beside a
+ * daemon it does not run (a launch would take it for the one starting its
+ * daemon). Once that daemon exits, the next launch starts the task again.
+ * The supervisor's own private pipe makes it single-instance per home and
+ * takes `status`, `reconcile`, `restart_connector` and `shutdown`.
  */
 
 /** A supervised process: the daemon or the connector. */
@@ -118,8 +121,6 @@ export class WindowsSupervisor {
     child: undefined as SupervisedChild | undefined,
     timer: undefined as ReturnType<typeof setTimeout> | undefined,
     restarts: undefined as unknown as Restarts,
-    /** Another daemon serves the home: never start one beside it. */
-    retired: false,
   };
   private readonly connector = {
     child: undefined as SupervisedChild | undefined,
@@ -221,7 +222,7 @@ export class WindowsSupervisor {
   }
 
   private startDaemon(): void {
-    if (this.stopping || this.daemon.retired || this.daemon.child) return;
+    if (this.stopping || this.daemon.child) return;
     let child: SupervisedChild;
     try {
       child = this.deps.spawnDaemon();
@@ -269,11 +270,10 @@ export class WindowsSupervisor {
     }, delay);
   }
 
+  /** Never start a daemon beside the one that serves the home: leave the home to it. */
   private retireDaemon(reason: string): void {
-    this.daemon.retired = true;
     this.deps.writePid(null);
-    this.deps.log(`${reason}; not starting it here`);
-    if (!this.deps.connectorWanted()) void this.shutdown('nothing left to supervise');
+    void this.shutdown(`${reason}; leaving the home to it`);
   }
 
   private async stopDaemon(child: SupervisedChild): Promise<void> {
@@ -303,9 +303,7 @@ export class WindowsSupervisor {
       this.connector.restarts.reset();
       clearTimeout(this.connector.timer);
       this.connector.timer = undefined;
-      void this.stopConnector().then(() => {
-        if (this.daemon.retired) void this.shutdown('nothing left to supervise');
-      });
+      void this.stopConnector();
       return;
     }
     if (this.connector.stopping.size > 0) {
