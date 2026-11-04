@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
-import { setEnv } from '@puddle/shared/node/platform';
+import { win32 } from 'node:path';
+import { findExecutable, getEnv, setEnv } from '@puddle/shared/node/platform';
 
 export class GitError extends Error {
   constructor(
@@ -52,11 +53,54 @@ export function backgroundGitEnv(
   return quiet;
 }
 
+let resolvedGit: { path: string | undefined; file: string } | null = null;
+
+/**
+ * The program git runs as. POSIX keeps the bare name: execvp searches PATH
+ * only. Windows resolves it here, because libuv would look for a bare `git`
+ * in the child's working directory before PATH, and every git child runs in
+ * a repository or worktree, where a tracked `git.exe` would run as the user
+ * on the first status poll. Only `.com` and `.exe` count, the extensions libuv
+ * itself tries, since Node will not start a batch file without a shell. The
+ * result is reused while PATH is unchanged. Throws ENOENT when PATH has no
+ * git.
+ */
+export function gitExecutable(
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  if (platform !== 'win32') return 'git';
+  const path = getEnv(env, 'PATH', platform);
+  if (resolvedGit && resolvedGit.path === path) return resolvedGit.file;
+  const file = findExecutable('git', { platform, env, pathext: '.COM;.EXE' });
+  if (file === null || !win32.isAbsolute(file)) {
+    throw Object.assign(new Error("spawn git ENOENT: git.exe was not found on the daemon's PATH"), {
+      code: 'ENOENT',
+      syscall: 'spawn git',
+      path: 'git',
+    });
+  }
+  resolvedGit = { path, file };
+  return file;
+}
+
+/** A spawn that found nothing (git uninstalled or moved) forgets the cached path. */
+function forgetMissingGit(err: { code?: unknown }): void {
+  if (err.code === 'ENOENT') resolvedGit = null;
+}
+
 /** All puddle git operations go through here: uniform errors, no shell quoting. */
 export function git(args: string[], opts: GitOptions = {}): Promise<string> {
   return new Promise((resolve, reject) => {
+    let file: string;
+    try {
+      file = gitExecutable(process.platform, opts.env);
+    } catch (err) {
+      reject(new GitError(args, null, (err as Error).message));
+      return;
+    }
     const child = execFile(
-      'git',
+      file,
       gitArgv(args),
       {
         cwd: opts.cwd,
@@ -69,6 +113,7 @@ export function git(args: string[], opts: GitOptions = {}): Promise<string> {
       },
       (err, stdout, stderr) => {
         if (err) {
+          forgetMissingGit(err);
           const code = typeof err.code === 'number' ? err.code : null;
           reject(new GitError(args, code, stderr || err.message));
           return;
@@ -76,7 +121,16 @@ export function git(args: string[], opts: GitOptions = {}): Promise<string> {
         resolve(stdout.trim());
       },
     );
-    if (opts.input !== undefined) child.stdin?.end(opts.input);
+    if (opts.input !== undefined && child.stdin) {
+      // Git can exit before it reads stdin: index.lock held by another git,
+      // or a pre-commit hook failing before `commit -F -` reads the message.
+      // With more than a pipe buffer (~64 KiB) still unwritten, the write
+      // then fails with EPIPE/EOF, and an unhandled stream 'error' would end
+      // the daemon. Git's own exit status and stderr still reach the callback
+      // above as a GitError, so the stream error itself is ignored.
+      child.stdin.on('error', () => {});
+      child.stdin.end(opts.input);
+    }
   });
 }
 
@@ -87,12 +141,20 @@ export function git(args: string[], opts: GitOptions = {}): Promise<string> {
  */
 export function gitBuffer(args: string[], opts: { cwd: string }): Promise<Buffer> {
   return new Promise((resolve, reject) => {
+    let file: string;
+    try {
+      file = gitExecutable();
+    } catch (err) {
+      reject(new GitError(args, null, (err as Error).message));
+      return;
+    }
     execFile(
-      'git',
+      file,
       gitArgv(args),
       { cwd: opts.cwd, maxBuffer: 16 * 1024 * 1024, encoding: 'buffer', windowsHide: true },
       (err, stdout, stderr) => {
         if (err) {
+          forgetMissingGit(err);
           const code = typeof err.code === 'number' ? err.code : null;
           const message = Buffer.isBuffer(stderr) ? stderr.toString('utf8') : err.message;
           reject(new GitError(args, code, message || err.message));

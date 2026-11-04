@@ -1,7 +1,7 @@
 import { closeSync, existsSync, openSync, readSync } from 'node:fs';
-import { dirname, extname, join, resolve } from 'node:path';
+import { dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import { getEnv, system32Path, type Environment } from './environment.js';
-import { findExecutable } from './executables.js';
+import { findExecutable, windowsExtensions } from './executables.js';
 
 /**
  * Spawning on Windows (docs/windows.md, decision 9). CreateProcess runs only
@@ -16,6 +16,13 @@ export interface ResolveSpawnOptions {
   platform?: NodeJS.Platform;
   /** Supplies PATH, PATHEXT, ComSpec and NODE_PATH; `process.env` by default. */
   env?: Environment;
+  /**
+   * The child's working directory. A relative path with a directory part
+   * (`.\tools\build.exe`, `bin\tool`) names a file there, as libuv and
+   * cmd.exe read it, and is resolved against `cwd` before it is looked up.
+   * Without `cwd` it is looked up from this process's own directory.
+   */
+  cwd?: string;
 }
 
 export interface ResolvedSpawn {
@@ -49,11 +56,12 @@ export class UnsafeCmdArgumentError extends Error {
 /**
  * How to spawn `file` with `args` without a shell. Identity on POSIX. On
  * Windows a bare name is first resolved with `findExecutable` (PATHEXT-aware,
- * never the working directory); `.exe`/`.com` and unknown kinds then spawn
- * directly, recognised shims become `node <script>`, and other `.cmd`/`.bat`
- * files run through `%ComSpec%`. Throws `UnsafeCmdArgumentError` for the
- * latter when an argument cannot be quoted for cmd.exe. Like
- * `findExecutable`, files are located with the native `path`.
+ * never the working directory), and a relative path with a directory part
+ * against `opts.cwd`; `.exe`/`.com` and unknown kinds then spawn directly,
+ * recognised shims become `node <script>`, and other `.cmd`/`.bat` files run
+ * through `%ComSpec%`. Throws `UnsafeCmdArgumentError` for the latter when an
+ * argument cannot be quoted for cmd.exe. Like `findExecutable`, files are
+ * located with the native `path`.
  */
 export function resolveSpawn(
   file: string,
@@ -63,7 +71,8 @@ export function resolveSpawn(
   const platform = opts.platform ?? process.platform;
   if (platform !== 'win32') return { file, args: [...args] };
   const env = opts.env ?? process.env;
-  const resolved = findExecutable(file, { platform, env }) ?? file;
+  const target = inWorkingDirectory(file, opts.cwd);
+  const resolved = findExecutable(target, { platform, env }) ?? target;
   const extension = extname(resolved).toLowerCase();
   if (extension !== '.cmd' && extension !== '.bat') return { file: resolved, args: [...args] };
   const shim = readNodeShim(resolved, env);
@@ -75,6 +84,19 @@ export function resolveSpawn(
     };
   }
   return viaCmd(resolved, args, env);
+}
+
+/**
+ * `file` resolved against `cwd` when it is a relative path with a directory
+ * part (a separator or a drive): the user chose that location, and it is
+ * never a PATH lookup. A bare name, an absolute path (native, or with a
+ * drive or UNC prefix), or any file when `cwd` is not given is kept.
+ */
+function inWorkingDirectory(file: string, cwd: string | undefined): string {
+  if (cwd === undefined || isAbsolute(file) || /^(?:[A-Za-z]:[\\/]|[\\/]{2})/.test(file)) {
+    return file;
+  }
+  return /[\\/]|^[A-Za-z]:/.test(file) ? resolve(cwd, file) : file;
 }
 
 /** `%ComSpec% /d /s /c "<quoted command line>"`; AutoRun commands are disabled. */
@@ -224,14 +246,23 @@ function readNodeShim(path: string, env: Environment): NodeShim | null {
 
 /**
  * The node.exe the shim would choose: an absolute one it names, else one
- * beside the shim, else node on PATH. Never `process.execPath`, which may
- * be Electron.
+ * beside the shim, else the first `node` on PATH, looked up as the shim
+ * does after its `SET PATHEXT=%PATHEXT:;.JS;=;%`. Never `process.execPath`,
+ * which may be Electron. When that first `node` is itself a batch file (a
+ * version manager's `node.cmd` shim, say), there is no node.exe to unwrap
+ * to: spawning the batch file directly would hand the arguments to an
+ * implicit cmd.exe with C runtime quoting, so null sends the whole shim
+ * through `viaCmd`'s strict quoting instead.
  */
 function shimNode(dir: string, absolute: string | null, env: Environment): string | null {
   if (absolute && existsSync(absolute)) return absolute;
   const beside = join(dir, 'node.exe');
   if (existsSync(beside)) return beside;
-  return findExecutable('node', { platform: 'win32', env });
+  const pathext = windowsExtensions(getEnv(env, 'PATHEXT', 'win32'))
+    .filter((extension) => extension.toLowerCase() !== '.js')
+    .join(';');
+  const found = findExecutable('node', { platform: 'win32', env, pathext });
+  return found !== null && /\.(?:exe|com)$/i.test(found) ? found : null;
 }
 
 function readSmallFile(path: string): string | null {

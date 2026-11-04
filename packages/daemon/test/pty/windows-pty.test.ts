@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { isPidAlive } from '@puddle/shared/node/platform';
+import { isPidAlive, system32Path } from '@puddle/shared/node/platform';
 import { LogStore } from '../../src/logs/log-store.js';
 import { stripAnsi } from '../../src/pty/ansi.js';
 import { PtyManager, type PtyExitEvent } from '../../src/pty/pty-manager.js';
@@ -82,6 +82,23 @@ describe('planPtySpawn', () => {
       Term: 'xterm-256color',
     });
   });
+
+  it('gives terminals the user’s working-directory program search, not the daemon’s', () => {
+    const plan = (base: Record<string, string>, platform: NodeJS.Platform = 'win32') =>
+      planPtySpawn('C:\\Windows\\System32\\cmd.exe', [], undefined, { platform, base }).env;
+    // disableCurrentDirectorySearch's value: `gradlew` in a cmd.exe terminal must still run.
+    expect(plan({ Path: 'C:\\Windows', NODEFAULTCURRENTDIRECTORYINEXEPATH: 'puddle' })).toEqual({
+      Path: 'C:\\Windows',
+      TERM: 'xterm-256color',
+    });
+    // A value the user set themselves stays.
+    expect(plan({ NoDefaultCurrentDirectoryInExePath: '1' })).toMatchObject({
+      NoDefaultCurrentDirectoryInExePath: '1',
+    });
+    expect(plan({ NoDefaultCurrentDirectoryInExePath: 'puddle' }, 'linux')).toEqual({
+      NoDefaultCurrentDirectoryInExePath: 'puddle',
+    });
+  });
 });
 
 describe('ConPTY facts', () => {
@@ -148,6 +165,28 @@ describe.skipIf(process.platform !== 'win32')('PtyManager on ConPTY', () => {
     await waitFor(() => /SHIM\[.*\]/.test(output().replace(/\r?\n/g, '')));
     const argv = JSON.parse(/SHIM(\[.*\])/.exec(output().replace(/\r?\n/g, ''))![1]!);
     expect(argv).toEqual(tricky);
+  });
+
+  it('runs a batch file beside the shell by bare name, as any cmd.exe does', async () => {
+    const { ptys, output } = manager();
+    const cwd = mkdtempSync(join(tmpdir(), 'puddle-sibling-'));
+    writeFileSync(join(cwd, 'puddle-sibling.bat'), '@echo SIBLING-%~1\r\n');
+    // The daemon's own setting, as disableCurrentDirectorySearch makes it.
+    const saved = Object.entries(process.env).filter(
+      ([name]) => name.toLowerCase() === 'nodefaultcurrentdirectoryinexepath',
+    );
+    for (const [name] of saved) delete process.env[name];
+    process.env.NoDefaultCurrentDirectoryInExePath = 'puddle';
+    try {
+      ptys.spawn('s6', 'agent', system32Path('cmd.exe'), ['/d', '/c', 'puddle-sibling ran'], {
+        cwd,
+      });
+    } finally {
+      delete process.env.NoDefaultCurrentDirectoryInExePath;
+      for (const [name, value] of saved) process.env[name] = value;
+    }
+    await waitFor(() => output().includes('SIBLING-ran') || output().includes('not recognized'));
+    expect(output()).toContain('SIBLING-ran');
   });
 
   it('applies a PATH override without a second Path spelling', async () => {

@@ -1,7 +1,12 @@
 #!/usr/bin/env node
+import { disableCurrentDirectorySearch } from '@puddle/shared/node/platform';
 import { parseArgs } from './cli/args.js';
 import { run } from './cli/run.js';
 import { CliError } from './lib/types.js';
+
+// Windows: a bare program name (ssh, npm, git) never resolves in the directory
+// the command was started from, which may be a repository. A no-op on POSIX.
+disableCurrentDirectorySearch();
 
 /**
  * Leave with `code`. On Windows an immediate process.exit can abort Node

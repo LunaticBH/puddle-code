@@ -107,6 +107,41 @@ it('resolves Windows venvs, Conda prefixes and home paths in the Windows layout'
   await expect(environments.resolvePython('$(touch wrong)', f.root)).rejects.toThrow();
 });
 
+it('never probes interpreters in Windows folders another local account could create', async () => {
+  const f = fixture('win32');
+  const drive = join(f.root, 'drive');
+  const programData = join(f.root, 'ProgramData');
+  const planted = [
+    join(programData, 'miniconda3', 'python.exe'),
+    join(programData, 'anaconda3', 'envs', 'x', 'python.exe'),
+    join(drive, 'Python399', 'python.exe'),
+  ];
+  for (const path of planted) {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, '');
+  }
+  const home = join(f.root, 'home');
+  mkdirSync(join(f.root, 'project'));
+  mkdirSync(home);
+  const runner = vi.fn(async (_command: CompilationCommand) => ({
+    exitCode: 0,
+    stdout: '{"ipykernel":false,"nbconvert":false}',
+    stderr: '',
+  }));
+  const environments = new NotebookEnvironments(
+    home,
+    { PATH: '', ProgramData: programData, SystemDrive: drive },
+    runner,
+    'win32',
+  );
+  const discovered = await environments.discover(
+    join(f.root, 'project', 'new.ipynb'),
+    join(f.root, 'project'),
+  );
+  expect(runner.mock.calls.map(([command]) => command.file)).toEqual([]);
+  expect(discovered).toEqual([]);
+});
+
 it('lists the interpreters the Windows py launcher reports', () => {
   expect(
     launcherInterpreters(
@@ -147,6 +182,15 @@ it('runs Windows interpreters with UTF-8 stdio and their Conda prefix activated'
     'C:\\Windows',
   ]);
   expect(pythonEnvironment(plain, { Path: 'C:\\Windows' }, 'win32')!.Path).toBe('C:\\Windows');
+  // A kernel's `!make html` finds make.bat beside the notebook, as in any console;
+  // a value the user set themselves stays.
+  const daemon = { Path: 'C:\\Windows', NoDefaultCurrentDirectoryInExePath: 'puddle' };
+  expect(pythonEnvironment(plain, daemon, 'win32')).toEqual({
+    Path: 'C:\\Windows',
+    PYTHONIOENCODING: 'utf-8',
+  });
+  const own = { NoDefaultCurrentDirectoryInExePath: '1' };
+  expect(pythonEnvironment(plain, own, 'win32')).toMatchObject(own);
 });
 
 it('finds the interpreter behind Windows console-script launchers', () => {

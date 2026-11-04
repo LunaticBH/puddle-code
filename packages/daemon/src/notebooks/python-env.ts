@@ -10,7 +10,11 @@ import {
   statSync,
 } from 'node:fs';
 import { dirname, extname, join, win32 } from 'node:path';
-import { prependPathEntry, setEnv } from '@puddle/shared/node/platform';
+import {
+  prependPathEntry,
+  restoreCurrentDirectorySearch,
+  setEnv,
+} from '@puddle/shared/node/platform';
 
 /**
  * The environment a notebook Python (the package probe, pip and the kernel
@@ -25,6 +29,9 @@ import { prependPathEntry, setEnv } from '@puddle/shared/node/platform';
  *   and importing zmq or nbconvert then fails or crashes the interpreter.
  *   The prefix's directories go first on PATH, in the order activation uses,
  *   including for a venv created from a Conda base interpreter.
+ * - The daemon's own `NoDefaultCurrentDirectoryInExePath` setting is taken
+ *   out, so a notebook's `!make html` finds make.bat beside it, as in any
+ *   other console.
  */
 export function pythonEnvironment(
   python: string,
@@ -33,6 +40,7 @@ export function pythonEnvironment(
 ): NodeJS.ProcessEnv | undefined {
   if (platform !== 'win32') return undefined;
   const env = { ...base };
+  restoreCurrentDirectorySearch(env, platform);
   setEnv(env, 'PYTHONIOENCODING', 'utf-8', platform);
   const prefix = condaPrefixOf(python);
   if (prefix) {

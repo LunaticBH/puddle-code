@@ -3,7 +3,12 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PROTOCOL_VERSION } from '@puddle/shared';
+import { disableCurrentDirectorySearch } from '@puddle/shared/node/platform';
 import { startDaemon } from './daemon.js';
+
+// Windows: a bare program name never resolves in a child's working directory
+// (a repository or worktree). A no-op on POSIX.
+disableCurrentDirectorySearch();
 
 // Inlined by esbuild in release tarballs (scripts/build-tarball.mjs); dev tsc
 // builds fall back to reading the adjacent package.json.

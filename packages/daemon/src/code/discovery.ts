@@ -101,9 +101,15 @@ function findWindowsExecutable(name: string, directories: readonly string[]): st
 /**
  * Windows: PATH (quotes stripped; relative and unexpanded `%VAR%` entries
  * dropped, so nothing resolves against the daemon's working directory), the
- * active venv's `Scripts`, then the default locations of common installers.
- * Versioned installations (`Python312`, `R-4.4.1`, `Ruby33-x64`) are found
- * with one directory listing, never a recursive walk.
+ * active venv's `Scripts`, then the default locations of common installers
+ * that only this user or an administrator can create: the user profile and
+ * `%ProgramFiles%`. Folders any local account may create, the system drive's
+ * root and `%ProgramData%`, are never searched: another user could plant
+ * `C:\Python399\python.exe` or `C:\msys64\ucrt64\bin\gcc.exe` before the
+ * real installer runs. MSYS2, Strawberry Perl, RubyInstaller and Chocolatey
+ * installs there are found through PATH instead, and python.org's all-user
+ * installs through the py launcher. Versioned installations (`Python312`,
+ * `R-4.4.1`) are found with one directory listing, never a recursive walk.
  */
 function windowsSearchDirectories(env: NodeJS.ProcessEnv, home: string): string[] {
   const variable = (name: string) => getEnv(env, name, 'win32');
@@ -111,10 +117,6 @@ function windowsSearchDirectories(env: NodeJS.ProcessEnv, home: string): string[
     root ? [join(root, ...parts)] : [];
   const localAppData = variable('LOCALAPPDATA');
   const programFiles = variable('ProgramFiles');
-  const systemDrive = variable('SystemDrive');
-  const driveRoot = systemDrive ? `${systemDrive.replace(/[\\/]+$/, '')}${sep}` : undefined;
-  // python.org installs per user and, for older installers, at the drive root.
-  const pythons = [...under(localAppData, 'Programs', 'Python'), ...(driveRoot ? [driveRoot] : [])];
   return [
     ...new Set(
       [
@@ -127,16 +129,14 @@ function windowsSearchDirectories(env: NodeJS.ProcessEnv, home: string): string[
         ...under(variable('APPDATA'), 'npm'),
         ...under(localAppData, 'pnpm'),
         ...under(localAppData, 'Microsoft', 'WinGet', 'Links'),
-        ...under(variable('ProgramData'), 'chocolatey', 'bin'),
-        ...pythons.flatMap((root) => versioned(root, /^Python3\d*$/i, ['', 'Scripts'])),
+        ...under(localAppData, 'Programs', 'Python').flatMap((root) =>
+          versioned(root, /^Python3\d*$/i, ['', 'Scripts']),
+        ),
         ...under(programFiles, 'nodejs'),
         ...under(programFiles, 'Go', 'bin'),
         ...under(programFiles, 'LLVM', 'bin'),
         ...under(programFiles, 'Git', 'bin'),
         ...under(programFiles, 'R').flatMap((root) => versioned(root, /^R-/i, ['bin'])),
-        ...under(driveRoot, 'msys64', 'ucrt64', 'bin'),
-        ...under(driveRoot, 'Strawberry', 'perl', 'bin'),
-        ...versioned(driveRoot, /^Ruby/i, ['bin']),
       ].filter(isSearchableDirectory),
     ),
   ];

@@ -16,6 +16,7 @@ import { controlResponseSchema } from '@puddle/shared';
 import { ipcPath, jsonLines } from '@puddle/shared/node';
 import {
   deleteEnv,
+  disableCurrentDirectorySearch,
   getEnv,
   isPidAlive,
   killProcessTree,
@@ -80,7 +81,9 @@ export function windowsRuntime(home: string, version: string): WindowsRuntime {
 /**
  * The environment a detached daemon starts with. An overridden PUDDLE_HOME
  * is passed on absolute: the daemon runs in the user's home directory, where
- * a relative one would name another home.
+ * a relative one would name another home. The search of a child's working
+ * directory for a bare program name is off from the daemon's first
+ * instruction, whichever app launched it.
  */
 export function daemonEnvironment(
   source: NodeJS.ProcessEnv = process.env,
@@ -94,6 +97,7 @@ export function daemonEnvironment(
   if (home !== undefined && getEnv(env, 'PUDDLE_HOME', 'win32') !== undefined) {
     setEnv(env, 'PUDDLE_HOME', win32.resolve(home), 'win32');
   }
+  disableCurrentDirectorySearch(env, 'win32');
   return env;
 }
 

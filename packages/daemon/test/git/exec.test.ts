@@ -1,8 +1,26 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
-import { backgroundGitEnv, git, gitArgv, GitError } from '../../src/git/exec.js';
+import { afterEach, describe, expect, it } from 'vitest';
+import { system32Path } from '@puddle/shared/node/platform';
+import {
+  backgroundGitEnv,
+  git,
+  gitArgv,
+  gitBuffer,
+  GitError,
+  gitExecutable,
+} from '../../src/git/exec.js';
+
+const temporary: string[] = [];
+afterEach(() => {
+  for (const path of temporary.splice(0)) rmSync(path, { recursive: true, force: true });
+});
+function directory(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'puddle-git-exec-'));
+  temporary.push(dir);
+  return dir;
+}
 
 describe('git argv', () => {
   it('is the caller’s own on POSIX', () => {
@@ -43,6 +61,74 @@ describe('git argv', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('rejects with git’s own failure when git exits before reading a large stdin', async () => {
+    // Windows stages pathspecs through stdin; a held index.lock makes git
+    // exit before reading them, so most of a >64 KiB input never drains.
+    const dir = directory();
+    await git(['init', '-q'], { cwd: dir });
+    writeFileSync(join(dir, '.git', 'index.lock'), '');
+    const paths = Array.from({ length: 4000 }, (_, i) => `src/a/deep/directory/file-${i}.ts`);
+    const error = await git(
+      ['--literal-pathspecs', 'add', '-A', '--pathspec-from-file=-', '--pathspec-file-nul'],
+      { cwd: dir, input: paths.join('\0') },
+    ).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(GitError);
+    expect((error as GitError).exitCode).toBe(128);
+    expect((error as GitError).stderr).toMatch(/index\.lock/);
+    // A stdin write failure surfacing later would be an unhandled 'error' event.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  });
+});
+
+describe('git executable', () => {
+  it('is the bare name on POSIX, which execvp looks up on PATH only', () => {
+    expect(gitExecutable('linux', {})).toBe('git');
+    expect(gitExecutable('darwin', { PATH: '' })).toBe('git');
+  });
+
+  it('is the absolute git.exe from PATH on Windows, skipping batch files and relative entries', () => {
+    const wrapper = directory();
+    writeFileSync(join(wrapper, 'git.cmd'), '');
+    const bin = directory();
+    writeFileSync(join(bin, 'git.exe'), '');
+    expect(gitExecutable('win32', { Path: ['.', 'cmd', wrapper, bin].join(';') })).toBe(
+      join(bin, 'git.exe'),
+    );
+    let error: unknown;
+    try {
+      gitExecutable('win32', { Path: wrapper });
+    } catch (err) {
+      error = err;
+    }
+    expect(error).toMatchObject({ code: 'ENOENT', path: 'git' });
+  });
+
+  it('rejects with a GitError when PATH has no git', async () => {
+    const error = await git(['--version'], { env: { PATH: directory() } }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(GitError);
+    expect((error as GitError).stderr).toMatch(/ENOENT/);
+  });
+
+  it.runIf(process.platform === 'win32')(
+    'never runs a git.exe planted in the working directory',
+    async () => {
+      const repo = directory();
+      // Any executable will do: hostname.exe fails on git's argv.
+      copyFileSync(system32Path('hostname.exe'), join(repo, 'git.exe'));
+      // A plain user environment: Claude Code's own shells set this, hiding the lookup.
+      const saved = process.env.NoDefaultCurrentDirectoryInExePath;
+      delete process.env.NoDefaultCurrentDirectoryInExePath;
+      try {
+        expect(await git(['--version'], { cwd: repo })).toMatch(/^git version /);
+        expect((await gitBuffer(['--version'], { cwd: repo })).toString('utf8')).toMatch(
+          /^git version /,
+        );
+      } finally {
+        if (saved !== undefined) process.env.NoDefaultCurrentDirectoryInExePath = saved;
+      }
+    },
+  );
 });
 
 describe('background git environment', () => {

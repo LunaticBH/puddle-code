@@ -7,7 +7,12 @@ import {
 } from 'node:child_process';
 import { win32 } from 'node:path';
 import { promisify } from 'node:util';
-import { resolveSpawn, setEnv, type Environment } from '@puddle/shared/node/platform';
+import {
+  resolveSpawn,
+  restoreCurrentDirectorySearch,
+  setEnv,
+  type Environment,
+} from '@puddle/shared/node/platform';
 
 const execFileAsync = promisify(execFile);
 
@@ -88,7 +93,9 @@ export function spawnAgent(
 /**
  * `{ ...base, ...overrides }` for an agent child's environment. Windows keys
  * are case-insensitive, so there each override replaces every other spelling
- * of its key rather than adding a duplicate the child resolves arbitrarily.
+ * of its key rather than adding a duplicate the child resolves arbitrarily,
+ * and the daemon's own `NoDefaultCurrentDirectoryInExePath` setting is taken
+ * out, as for a terminal: the Codex app-server runs the agent's commands.
  */
 export function agentEnv(
   overrides: Record<string, string>,
@@ -97,6 +104,7 @@ export function agentEnv(
 ): Environment {
   if (platform !== 'win32') return { ...base, ...overrides };
   const env: Environment = { ...base };
+  restoreCurrentDirectorySearch(env, platform);
   for (const [key, value] of Object.entries(overrides)) setEnv(env, key, value, platform);
   return env;
 }

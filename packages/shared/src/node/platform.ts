@@ -15,7 +15,9 @@ export {
 } from './environment.js';
 export {
   DEFAULT_PATHEXT,
+  disableCurrentDirectorySearch,
   findExecutable,
+  restoreCurrentDirectorySearch,
   windowsExtensions,
   type FindExecutableOptions,
 } from './executables.js';

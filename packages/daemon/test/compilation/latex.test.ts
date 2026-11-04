@@ -63,7 +63,7 @@ describe('LaTeX tool discovery', () => {
     };
     const onPath = join(root, 'on path');
     const miktex = join(root, 'Local', 'Programs', 'MiKTeX', 'miktex', 'bin', 'x64');
-    const texlive = join(root, 'drive', 'texlive', '2025', 'bin', 'windows');
+    const texlive = join(root, 'home', 'texlive', '2025', 'bin', 'windows');
     const tinytex = join(root, 'Roaming', 'TinyTeX', 'bin', 'windows');
     const xelatex = tool(onPath, 'xelatex.exe');
     // Never run: Windows cannot start an extensionless file.
@@ -76,7 +76,6 @@ describe('LaTeX tool discovery', () => {
         Path: [`"${onPath}"`, '%TEXLIVE%\\bin', ''].join(';'),
         LOCALAPPDATA: join(root, 'Local'),
         APPDATA: join(root, 'Roaming'),
-        SystemDrive: join(root, 'drive'),
       },
       home: join(root, 'home'),
       platform: 'win32',
@@ -84,6 +83,27 @@ describe('LaTeX tool discovery', () => {
     expect(toolchain.paths).toMatchObject({ xelatex, pdflatex, lualatex, biber });
     expect(toolchain.searchPath.split(';')[0]).toBe(onPath);
     expect(toolchain.searchPath).not.toContain('%');
+  });
+
+  it('never searches Windows folders another local account could create', () => {
+    const root = mkdtempSync(join(tmpdir(), 'puddle-tex-planted-'));
+    const drive = join(root, 'drive');
+    const texlive = join(drive, 'texlive', '2025', 'bin', 'windows');
+    const strawberry = join(drive, 'Strawberry', 'perl', 'bin');
+    for (const dir of [texlive, strawberry]) mkdirSync(dir, { recursive: true });
+    writeFileSync(join(texlive, 'pdflatex.exe'), '');
+    writeFileSync(join(strawberry, 'perl.exe'), '');
+    const miktex = join(root, 'miktex', 'bin', 'x64');
+    mkdirSync(miktex, { recursive: true });
+    writeFileSync(join(miktex, 'latexmk.exe'), '');
+    const toolchain = discoverLatexToolchain({
+      env: { PATH: miktex, SystemDrive: drive },
+      home: join(root, 'home'),
+      platform: 'win32',
+    });
+    // No planted engine, and no planted Perl to switch MiKTeX's latexmk on.
+    expect(toolchain.paths).toEqual({});
+    expect(toolchain.searchPath).not.toContain(drive);
   });
 
   it('offers latexmk on Windows only with a Perl to run it', () => {

@@ -409,9 +409,13 @@ export class WorktreeManager {
     return (await git(['status', '--porcelain'], { cwd: worktreePath })) === '';
   }
 
-  /** Mutexed fetch for project-open, periodic and manual fetches. Throws on failure. */
-  fetchRepo(repo: Repo): Promise<void> {
-    return this.runGitMutation(repo.path, () => this.fetchCore(repo));
+  /**
+   * Mutexed fetch for project-open, periodic and manual fetches. Throws on
+   * failure. `interactive` (Settings' "Fetch now") keeps the inherited
+   * environment, so Git Credential Manager can sign the user in on Windows.
+   */
+  fetchRepo(repo: Repo, opts: { interactive?: boolean } = {}): Promise<void> {
+    return this.runGitMutation(repo.path, () => this.fetchCore(repo, opts));
   }
 
   /**
@@ -433,11 +437,15 @@ export class WorktreeManager {
       .filter((path) => !known.has(key(path)));
   }
 
-  /** Never prompts on Windows: these fetches run unattended (see `backgroundGitEnv`). */
-  private async fetchCore(repo: Repo): Promise<void> {
+  /**
+   * Never prompts on Windows unless `interactive`: the other fetches run
+   * unattended (see `backgroundGitEnv`).
+   */
+  private async fetchCore(repo: Repo, opts: { interactive?: boolean } = {}): Promise<void> {
     if (!repo.fetch_enabled) return;
     if (!(await this.hasOrigin(repo))) return; // no remote → freshness degrades silently (SPEC §4)
-    await git(['fetch', 'origin'], { cwd: repo.path, env: backgroundGitEnv(this.platform) });
+    const env = opts.interactive ? undefined : backgroundGitEnv(this.platform);
+    await git(['fetch', 'origin'], { cwd: repo.path, env });
     this.deps.repos.setLastFetchedAt(repo.id, new Date().toISOString());
   }
 

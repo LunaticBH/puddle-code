@@ -4,8 +4,13 @@ import { randomUUID } from 'node:crypto';
 import { parseArgs } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import { puddlangStartSchema, PUDDLANG_MAX_SOURCE } from '@puddle/shared';
+import { disableCurrentDirectorySearch } from '@puddle/shared/node/platform';
 import { connectPuddlang } from './puddlang/client.js';
 import { serveMcp } from './puddlang/mcp.js';
+
+// Windows: ssh never resolves in the directory pudl was started from, which
+// may be a repository. A no-op on POSIX.
+disableCurrentDirectorySearch();
 
 const help = `pudl — Puddle's Ultimate Domain Language (puddlang)
 

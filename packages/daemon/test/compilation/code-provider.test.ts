@@ -1,5 +1,6 @@
 import {
   chmodSync,
+  copyFileSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -7,11 +8,11 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { compilationCapabilitiesResponseSchema, type Session } from '@puddle/shared';
-import { isPidAlive } from '@puddle/shared/node/platform';
+import { isPidAlive, system32Path } from '@puddle/shared/node/platform';
 import { CodeProvider, createCodeProviders } from '../../src/code/provider.js';
 import { codeSearchDirectories, findCodeExecutable } from '../../src/code/discovery.js';
 import { CODE_RECIPES, managedBinaryName, recipeExecutables } from '../../src/code/recipes.js';
@@ -288,6 +289,30 @@ describe('code tool discovery and process bounds', () => {
     expect(dirs).not.toContain('/usr/bin');
   });
 
+  it('never searches Windows folders another local account could create', () => {
+    const home = directory();
+    const drive = directory();
+    const programData = directory();
+    const planted = [
+      join(drive, 'Python399'),
+      join(drive, 'msys64', 'ucrt64', 'bin'),
+      join(drive, 'Strawberry', 'perl', 'bin'),
+      join(drive, 'Ruby33-x64', 'bin'),
+      join(programData, 'chocolatey', 'bin'),
+    ];
+    for (const dir of planted) mkdirSync(dir, { recursive: true });
+    writeFileSync(join(drive, 'Python399', 'python.exe'), '');
+    writeFileSync(join(drive, 'msys64', 'ucrt64', 'bin', 'gcc.exe'), '');
+    const env = { SystemDrive: drive, ProgramData: programData };
+    const dirs = codeSearchDirectories(env, home, 'win32');
+    expect(dirs.filter((dir) => dir.startsWith(drive) || dir.startsWith(programData))).toEqual([]);
+    expect(findCodeExecutable(['python'], dirs, 'win32')).toBeNull();
+    expect(findCodeExecutable(['gcc'], dirs, 'win32')).toBeNull();
+    // An installation the user put on PATH is still found.
+    const msys = join(drive, 'msys64', 'ucrt64', 'bin');
+    expect(codeSearchDirectories({ ...env, Path: msys }, home, 'win32')[0]).toBe(msys);
+  });
+
   it('chooses Windows executable names and an .exe managed binary on Windows', () => {
     expect(recipeExecutables(recipe('python'), 'win32')).toEqual(['python', 'py', 'python3']);
     expect(recipeExecutables(recipe('c'), 'win32')).not.toContain('cc');
@@ -334,6 +359,69 @@ describe('code tool discovery and process bounds', () => {
     });
     expect(windows.options.detached).toBeUndefined();
   });
+
+  it('runs a Windows command with the user’s working-directory program search', () => {
+    // A build script the command starts may call a sibling tool by bare name.
+    const env = { Path: 'C:\\Windows', NoDefaultCurrentDirectoryInExePath: 'puddle' };
+    const command = { file: process.execPath, args: [], cwd: directory(), env };
+    expect(compilationSpawn(command, 'win32').options.env).toEqual({ Path: 'C:\\Windows' });
+    expect(compilationSpawn(command, 'linux').options.env).toBe(env);
+    const own = { ...command, env: { NoDefaultCurrentDirectoryInExePath: '1' } };
+    expect(compilationSpawn(own, 'win32').options.env).toEqual(own.env);
+  });
+
+  it('refuses a Windows command missing from PATH instead of searching its working directory', () => {
+    const cwd = directory();
+    writeFileSync(join(cwd, 'planted.exe'), '');
+    const command = { file: 'planted', args: [], cwd, env: { PATH: directory() } };
+    expect(() => compilationSpawn(command, 'win32')).toThrow(/spawn planted ENOENT/);
+    // POSIX execvp never looks in the working directory: the name stays as given.
+    expect(compilationSpawn(command, 'linux').file).toBe('planted');
+  });
+
+  it('starts a relative Windows path from the command’s working directory, as on POSIX', () => {
+    const cwd = directory();
+    mkdirSync(join(cwd, 'tools'));
+    writeFileSync(join(cwd, 'tools', 'build.exe'), '');
+    // A template such as `./tools/build.sh {{source}}` on POSIX, `.\tools\build.exe` here.
+    const command = { file: './tools/build', args: ['main.c'], cwd, env: { PATH: directory() } };
+    expect(compilationSpawn(command, 'win32')).toMatchObject({
+      file: join(cwd, 'tools', 'build.exe'),
+      args: ['main.c'],
+      options: { cwd },
+    });
+    expect(compilationSpawn(command, 'linux').file).toBe('./tools/build');
+  });
+
+  it.runIf(process.platform === 'win32')(
+    'runs an explicit .\\ path from the command’s working directory end to end',
+    async () => {
+      const cwd = directory();
+      mkdirSync(join(cwd, 'tools'));
+      // Any executable will do; hostname.exe prints this machine's name.
+      copyFileSync(system32Path('hostname.exe'), join(cwd, 'tools', 'probe.exe'));
+      const result = await runCompilationCommand({ file: '.\\tools\\probe.exe', args: [], cwd });
+      expect(result.stdout.trim().toLowerCase()).toBe(hostname().toLowerCase());
+    },
+  );
+
+  it.runIf(process.platform === 'win32')(
+    'never runs an executable planted in the command’s working directory',
+    async () => {
+      const cwd = directory();
+      copyFileSync(system32Path('hostname.exe'), join(cwd, 'puddle-planted.exe'));
+      // A plain user environment: Claude Code's own shells set this, hiding the lookup.
+      const saved = process.env.NoDefaultCurrentDirectoryInExePath;
+      delete process.env.NoDefaultCurrentDirectoryInExePath;
+      try {
+        await expect(
+          runCompilationCommand({ file: 'puddle-planted', args: [], cwd, env: process.env }),
+        ).rejects.toThrow(/Could not start Compilation command: spawn puddle-planted ENOENT/);
+      } finally {
+        if (saved !== undefined) process.env.NoDefaultCurrentDirectoryInExePath = saved;
+      }
+    },
+  );
 
   it('stops the whole process tree when a command times out', async () => {
     const cwd = directory();
