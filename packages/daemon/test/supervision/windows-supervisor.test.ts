@@ -2,7 +2,7 @@ import { mkdtempSync } from 'node:fs';
 import type { Server, Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { ipcPath, ipcProof, listenPrivate } from '@puddle/shared/node';
 import {
   DAEMON_ALREADY_ACTIVE_EXIT,
@@ -22,8 +22,8 @@ import {
  */
 interface FakeChild extends SupervisedChild {
   exit(code: number | null): void;
-  stop: ReturnType<typeof vi.fn>;
-  kill: ReturnType<typeof vi.fn>;
+  stop: Mock<() => void>;
+  kill: Mock<() => Promise<void>>;
 }
 
 function fakeChild(pid: number, onStop?: (child: FakeChild) => void): FakeChild {
@@ -33,8 +33,8 @@ function fakeChild(pid: number, onStop?: (child: FakeChild) => void): FakeChild 
     pid,
     exited,
     exit: (code) => exit(code),
-    stop: vi.fn(() => onStop?.(child)),
-    kill: vi.fn(async () => exit(null)),
+    stop: vi.fn<() => void>(() => onStop?.(child)),
+    kill: vi.fn<() => Promise<void>>(async () => exit(null)),
   };
   return child;
 }
