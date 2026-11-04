@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  hostNameProblem,
   hostPathKey,
   hostStyleForPlatform,
   isHostPathish,
@@ -111,5 +112,31 @@ describe('typedRootRelativePath', () => {
   it('turns a Windows host’s backslashes into the wire form', () => {
     expect(typedRootRelativePath('docs\\notes.md', 'win32')).toBe('docs/notes.md');
     expect(typedRootRelativePath('\\docs\\sub\\', 'win32')).toBe('docs/sub');
+  });
+});
+
+describe('hostNameProblem', () => {
+  it('accepts every name on a POSIX host, as before', () => {
+    for (const name of ['a:b', 'CON', 'notes.', 'trailing ', 'what?', 'a\\b']) {
+      expect(hostNameProblem(name, 'posix'), name).toBeNull();
+    }
+  });
+
+  it("flags the names a Windows host refuses with the daemon's own rule", () => {
+    expect(hostNameProblem('a:b.ts', 'win32')).toMatch(/cannot contain/);
+    expect(hostNameProblem('what?', 'win32')).toMatch(/cannot contain/);
+    expect(hostNameProblem('notes.', 'win32')).toMatch(/end in a dot or a space/);
+    expect(hostNameProblem('con.txt', 'win32')).toMatch(/reserved device name/);
+    expect(hostNameProblem('notes.md', 'win32')).toBeNull();
+    expect(hostNameProblem('.env', 'win32')).toBeNull();
+  });
+
+  it('checks every segment of a typed path, either separator', () => {
+    expect(hostNameProblem('docs/NUL/notes.md', 'win32')).toMatch(/'NUL' is a reserved/);
+    expect(hostNameProblem('docs\\a|b', 'win32')).toMatch(/cannot contain/);
+    expect(hostNameProblem('docs\\con', 'win32')).toMatch(/reserved device name/);
+    expect(hostNameProblem('docs/notes.md', 'win32')).toBeNull();
+    // Separators themselves, and empty segments, are not names.
+    expect(hostNameProblem('docs//notes.md/', 'win32')).toBeNull();
   });
 });

@@ -1,4 +1,10 @@
-import { hostDirname, hostPathStyle, normaliseHostPath, type HostPathStyle } from '@puddle/shared';
+import {
+  hostDirname,
+  hostPathStyle,
+  normaliseHostPath,
+  windowsNameProblem,
+  type HostPathStyle,
+} from '@puddle/shared';
 
 /**
  * The UI's decisions about HOST paths that `@puddle/shared`'s path helpers
@@ -45,6 +51,22 @@ export function typedRootRelativePath(input: string, style: HostPathStyle): stri
   const trimmed = input.trim();
   const slashed = style === 'win32' ? trimmed.replaceAll('\\', '/') : trimmed;
   return slashed.replace(/^\/+/, '').replace(/\/+$/, '');
+}
+
+/**
+ * Why a name typed for a new or renamed entry cannot be stored on the host,
+ * or null. Only a Windows host refuses names (reserved device names,
+ * `<>:"|?*`, a trailing dot or space: `windowsNameProblem`), and it checks
+ * every segment of a typed `a\b` or `a/b`, as the daemon does before it
+ * answers 400 `invalid_name`. A POSIX host accepts every name, as before.
+ */
+export function hostNameProblem(name: string, style: HostPathStyle): string | null {
+  if (style !== 'win32') return null;
+  for (const segment of name.split(/[\\/]/)) {
+    const problem = segment === '' ? null : windowsNameProblem(segment);
+    if (problem !== null) return problem;
+  }
+  return null;
 }
 
 /** Whether an absolute directory is the top of its tree: `/`, a drive root, or a UNC share. */

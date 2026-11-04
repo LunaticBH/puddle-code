@@ -8,6 +8,7 @@ import {
   renameEntry,
   transferEntry,
 } from '../../lib/queries/worktree-queries';
+import { windowsRefusalMessage } from '../../lib/transport/windows-refusals';
 import { basename, joinPath, type VisibleRow } from './explorer-paths';
 import {
   sameFiletree,
@@ -36,7 +37,19 @@ export interface ExplorerFs {
   paste(clipboard: ExplorerClipboardState, targetDir: string): Promise<string[]>;
 }
 
-const message = (e: unknown, fallback: string) => (e instanceof Error ? e.message : fallback);
+const message = (e: unknown, fallback: string) =>
+  windowsRefusalMessage(e) ?? (e instanceof Error ? e.message : fallback);
+
+/**
+ * A bulk operation's failure toast: its count, followed by the reason when a
+ * Windows host refused an item (a name it cannot store, an entry another
+ * program holds open), since "Couldn't delete 2 items" alone hides the fix.
+ */
+function bulkFailure(summary: string, failures: unknown[]): string {
+  const refusal = failures.map(windowsRefusalMessage).find((m) => m !== null) ?? null;
+  if (refusal === null) return summary;
+  return failures.length === 1 ? refusal : `${summary}. ${refusal}`;
+}
 
 export function useExplorerFs(sid: string, root?: string, directory = root ?? ''): ExplorerFs {
   const qc = useQueryClient();
@@ -90,15 +103,25 @@ export function useExplorerFs(sid: string, root?: string, directory = root ?? ''
           toast.error(
             paths.length === 1
               ? message(failed[0]!.reason, `Couldn't move ${basename(paths[0]!)}`)
-              : `Couldn't move ${failed.length} item${failed.length > 1 ? 's' : ''}`,
+              : bulkFailure(
+                  `Couldn't move ${failed.length} item${failed.length > 1 ? 's' : ''}`,
+                  failed.map((f) => f.reason),
+                ),
           );
         }
       },
       async remove(paths) {
         const results = await Promise.allSettled(paths.map((p) => deleteEntry(sid, p, root)));
         invalidate();
-        const failed = results.filter((r) => r.status === 'rejected').length;
-        if (failed > 0) toast.error(`Couldn't delete ${failed} item${failed > 1 ? 's' : ''}`);
+        const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+        const failed = rejected.length;
+        if (failed > 0)
+          toast.error(
+            bulkFailure(
+              `Couldn't delete ${failed} item${failed > 1 ? 's' : ''}`,
+              rejected.map((r) => r.reason),
+            ),
+          );
         else
           toast.success(
             paths.length === 1 ? `Deleted ${basename(paths[0]!)}` : `Deleted ${paths.length} items`,
@@ -136,7 +159,10 @@ export function useExplorerFs(sid: string, root?: string, directory = root ?? ''
         );
         if (failedPaths.length > 0) {
           toast.error(
-            `Couldn't paste ${failedPaths.length} item${failedPaths.length > 1 ? 's' : ''}`,
+            bulkFailure(
+              `Couldn't paste ${failedPaths.length} item${failedPaths.length > 1 ? 's' : ''}`,
+              results.flatMap((r) => (r.status === 'rejected' ? [r.reason] : [])),
+            ),
           );
         }
         return failedPaths;

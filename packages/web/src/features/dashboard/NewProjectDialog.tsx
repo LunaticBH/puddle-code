@@ -46,6 +46,7 @@ import {
   projectColourSupported,
 } from '../../lib/transport/protocol-support';
 import { useDebouncedValue } from '../../lib/hooks/use-debounced-value';
+import { windowsRefusalMessage } from '../../lib/transport/windows-refusals';
 
 /** '/a/b/' → '/a/b'; keeps the root slash. A Windows path becomes native: `c:/a/` → `C:\a`. */
 function normalisePath(path: string): string {
@@ -265,7 +266,7 @@ export function NewProjectDialog({
       onOpenChange(false);
       void navigate(`/project/${project.id}`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(windowsRefusalMessage(e) ?? (e instanceof Error ? e.message : String(e)));
     }
   };
 

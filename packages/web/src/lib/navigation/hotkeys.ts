@@ -20,7 +20,8 @@ import { desktopBridge } from '../desktop';
  * would swallow; the DESKTOP shell — no chrome competing for keys — forks the
  * few where a native gesture is more intuitive (`desktopBinding`). Only the
  * defaults fork: a per-profile override applies in both shells. A Windows
- * client reads either set with Ctrl for ⌘ (`shellDefaultBinding`).
+ * client reads either set with Ctrl for ⌘ (`shellDefaultBinding`), and there a
+ * focused terminal keeps plain Ctrl+letter chords (`terminalKeepsChord`).
  */
 export interface HotkeyAction {
   id: string;
@@ -222,9 +223,10 @@ export function shellDefaultBinding(
 
 /**
  * The canonical binding a keydown maps to, or null for a bare modifier press.
- * Off a Mac, AltGr is a character key, not a modifier: Windows reports it as
- * Ctrl+Alt, so AltGr+E typing `€` on a German layout must not fire a Ctrl+Alt+E
- * shortcut.
+ * On a Windows client AltGr is a character key, not a modifier: Windows
+ * reports it as Ctrl+Alt, so AltGr+E typing `€` on a German layout must not
+ * fire a Ctrl+Alt+E shortcut. Mac and Linux clients read every keydown as
+ * before.
  */
 export function eventBinding(
   e: KeyboardEvent,
@@ -232,7 +234,7 @@ export function eventBinding(
 ): string | null {
   const code = e.code;
   if (!code || /^(Control|Alt|Shift|Meta)(Left|Right)$/.test(code)) return null;
-  if (client !== 'mac' && e.getModifierState?.('AltGraph')) return null;
+  if (client === 'windows' && e.getModifierState?.('AltGraph')) return null;
   const parts: string[] = [];
   if (e.ctrlKey) parts.push('ctrl');
   if (e.altKey) parts.push('alt');
@@ -265,38 +267,41 @@ function codeLabel(code: string): string {
   return CODE_LABEL[code] ?? code;
 }
 
-/** Key names where a Mac glyph would mean nothing to a Windows or Linux user. */
-const TEXT_CODE_LABEL: Record<string, string> = { Space: 'Space', Enter: 'Enter', Tab: 'Tab' };
+/** Windows names for the modifiers, and for keys whose Mac glyph means nothing there. */
+const WINDOWS_MODIFIER_LABEL: Record<string, string> = {
+  ctrl: 'Ctrl',
+  alt: 'Alt',
+  shift: 'Shift',
+  meta: 'Win',
+};
+const WINDOWS_CODE_LABEL: Record<string, string> = { Space: 'Space', Enter: 'Enter', Tab: 'Tab' };
 
 /**
- * A binding string in the client's own notation: Mac glyphs on a Mac
- * (`shift+meta+KeyE` → `⇧⌘E`), and spelled-out keys elsewhere
- * (`ctrl+alt+KeyW` → `Ctrl+Alt+W`, with `meta` named `Win` on Windows and
- * `Super` on Linux).
+ * A binding string as the client spells shortcuts: spelled-out keys on a
+ * Windows client (`ctrl+alt+KeyW` → `Ctrl+Alt+W`, `meta` named `Win`), and
+ * Mac glyphs everywhere else (`shift+meta+KeyE` → `⇧⌘E`), as before.
  */
 export function formatBinding(binding: string, client: ClientPlatform = CLIENT_PLATFORM): string {
   if (!binding) return '—';
   const parts = binding.split('+');
   const code = parts.pop() ?? '';
-  if (client === 'mac') return parts.map((m) => SYMBOL[m] ?? m).join('') + codeLabel(code);
-  const names: Record<string, string> = {
-    ctrl: 'Ctrl',
-    alt: 'Alt',
-    shift: 'Shift',
-    meta: client === 'windows' ? 'Win' : 'Super',
-  };
-  return [...parts.map((m) => names[m] ?? m), TEXT_CODE_LABEL[code] ?? codeLabel(code)].join('+');
+  if (client !== 'windows') return parts.map((m) => SYMBOL[m] ?? m).join('') + codeLabel(code);
+  return [
+    ...parts.map((m) => WINDOWS_MODIFIER_LABEL[m] ?? m),
+    WINDOWS_CODE_LABEL[code] ?? codeLabel(code),
+  ].join('+');
 }
 
 /**
  * The label of a FIXED shortcut written for ⌘ (the explorer's ⌘C, ⌥⌘C, …),
- * whose handlers accept Ctrl as well: ⌘ glyphs on a Mac, Ctrl elsewhere.
+ * whose handlers accept Ctrl as well: Ctrl on a Windows client, the ⌘ glyphs
+ * everywhere else.
  */
 export function formatPrimaryShortcut(
   binding: string,
   client: ClientPlatform = CLIENT_PLATFORM,
 ): string {
-  return formatBinding(client === 'mac' ? binding : metaAsCtrl(binding), client);
+  return formatBinding(client === 'windows' ? metaAsCtrl(binding) : binding, client);
 }
 
 // --- runtime handler registry (components register on mount) ---
@@ -346,6 +351,49 @@ export const hotkeyBinding = (id: string): string => bindingsSnapshot[id] ?? '';
 export function actionForBinding(binding: string): string | undefined {
   for (const [id, b] of Object.entries(bindingsSnapshot)) if (b === binding) return id;
   return undefined;
+}
+
+/**
+ * Whether a focused terminal keeps a chord even though an app shortcut uses
+ * it. On a Windows client the defaults written for ⌘ use Ctrl, so a plain
+ * Ctrl+letter (Ctrl+K, Ctrl+W, Ctrl+T, Ctrl+B, Ctrl+N…) would otherwise take
+ * the control characters shells and agents read: readline's Ctrl+K and
+ * Ctrl+W, PSReadLine's Ctrl+R, an agent's Ctrl+T or Ctrl+B. Those chords stay
+ * with the terminal; app shortcuts with Shift or Alt still win, as anywhere
+ * else in the app. Mac and Linux clients keep every rule as before.
+ */
+export function terminalKeepsChord(
+  binding: string,
+  client: ClientPlatform = CLIENT_PLATFORM,
+): boolean {
+  return client === 'windows' && /^ctrl\+Key[A-Z]$/.test(binding);
+}
+
+/** Whether a focused terminal keeps `action`'s chord: a terminal-owned action, or `terminalKeepsChord`. */
+export function yieldsToTerminal(
+  action: HotkeyAction,
+  binding: string,
+  client: ClientPlatform = CLIENT_PLATFORM,
+): boolean {
+  return action.deferInTerminal === true || terminalKeepsChord(binding, client);
+}
+
+/**
+ * The app action a keydown in a focused terminal runs instead of reaching the
+ * PTY, when "App shortcuts in terminals" is on (SPEC §11): a registered,
+ * non-editor action the terminal does not keep (`yieldsToTerminal`), else
+ * undefined and the terminal receives the key.
+ */
+export function terminalAppShortcut(
+  binding: string | null,
+  client: ClientPlatform = CLIENT_PLATFORM,
+): string | undefined {
+  if (binding === null) return undefined;
+  const id = actionForBinding(binding);
+  const action = id !== undefined ? ACTION_BY_ID.get(id) : undefined;
+  if (id === undefined || action === undefined || action.editor) return undefined;
+  if (yieldsToTerminal(action, binding, client)) return undefined;
+  return handlers.has(id) ? id : undefined;
 }
 
 /**

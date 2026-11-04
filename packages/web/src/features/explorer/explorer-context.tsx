@@ -11,8 +11,9 @@ import {
 import { useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import type { CompilationFileTarget, GitStatus, Session, TreeResponse } from '@puddle/shared';
-import { sameHostPath } from '../../lib/host-path';
+import { hostNameProblem, hostStyleForPlatform, sameHostPath } from '../../lib/host-path';
 import { useDaemonVersion, useHostInfo } from '../../lib/queries/queries';
+import { windowsRefusalMessage } from '../../lib/transport/windows-refusals';
 import { clearPendingReveal, onReveal } from '../../lib/navigation/reveal-in-tree';
 import { isSecondClick, type ClickStamp } from '../../lib/second-click';
 import {
@@ -112,6 +113,8 @@ export interface ExplorerCtx {
   beginCreate(parentDir: string, kind: 'file' | 'dir'): void;
   cancelEdit(): void;
   commitEdit(name: string): void;
+  /** Why the host cannot store a typed name (Windows rules), or null; checked before committing. */
+  nameProblem(name: string): string | null;
 
   requestDelete(paths: string[]): void;
   /** Copy the given paths (absolute or worktree-relative), one per line. */
@@ -205,7 +208,11 @@ export function ExplorerProvider({
             files.length === 1 ? `Uploaded ${files[0]!.name}` : `Uploaded ${files.length} files`,
           );
         })
-        .catch((e: unknown) => toast.error(e instanceof Error ? e.message : 'Upload failed'));
+        .catch((e: unknown) =>
+          toast.error(
+            windowsRefusalMessage(e) ?? (e instanceof Error ? e.message : 'Upload failed'),
+          ),
+        );
     },
     [sid, root, readOnly, qc, treeKey],
   );
@@ -216,6 +223,11 @@ export function ExplorerProvider({
   const version = useDaemonVersion();
   const protocol = version.data?.protocol;
   const host = useHostInfo();
+  const hostStyle = hostStyleForPlatform(host.data?.platform);
+  const nameProblem = useCallback(
+    (name: string) => hostNameProblem(name.trim(), hostStyle),
+    [hostStyle],
+  );
   const target = useMemo<ExplorerClipboardTarget>(
     () => ({ sid, root, directory: rootPath, host: hostIdentity(host.data) }),
     [sid, root, rootPath, host.data],
@@ -762,6 +774,7 @@ export function ExplorerProvider({
     beginCreate,
     cancelEdit,
     commitEdit,
+    nameProblem,
     requestDelete,
     copyPathToClipboard,
     download,

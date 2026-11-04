@@ -4,14 +4,14 @@ import { formatPrimaryShortcut } from '../../lib/navigation/hotkeys';
 import { RevealInFileManagerItem } from './RevealInFileManagerItem';
 
 // The explorer's fixed keys (not rebindable; its handler takes ⌘ or Ctrl),
-// labelled in the client's notation: `⌥⌘C` on a Mac, `Ctrl+Alt+C` elsewhere.
+// labelled in the client's notation: `Ctrl+Alt+C` on Windows, `⌥⌘C` elsewhere.
 const KEYS = {
   cut: formatPrimaryShortcut('meta+KeyX'),
   copy: formatPrimaryShortcut('meta+KeyC'),
   paste: formatPrimaryShortcut('meta+KeyV'),
   copyPath: formatPrimaryShortcut('alt+meta+KeyC'),
   copyRelativePath: formatPrimaryShortcut('alt+shift+meta+KeyC'),
-  delete: CLIENT_PLATFORM === 'mac' ? '⌘⌫' : 'Delete',
+  delete: CLIENT_PLATFORM === 'windows' ? 'Delete' : '⌘⌫',
 };
 
 /** A short right-aligned keyboard-shortcut hint inside a file menu row. */

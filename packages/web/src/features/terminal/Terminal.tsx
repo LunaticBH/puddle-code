@@ -6,14 +6,14 @@ import { SearchAddon, type ISearchOptions } from '@xterm/addon-search';
 import '@xterm/xterm/css/xterm.css';
 import { HOME_STREAM, type SessionStatus } from '@puddle/shared';
 import { useClientSettings } from '../../lib/settings/client-settings';
-import {
-  actionForBinding,
-  eventBinding,
-  getHotkeyAction,
-  getHotkeyHandler,
-} from '../../lib/navigation/hotkeys';
+import { eventBinding, terminalAppShortcut } from '../../lib/navigation/hotkeys';
 import { daemonAnswersColourQueries } from '../../lib/transport/protocol-support';
-import { useDaemonVersion, useHostPathStyle, useProfileSettings } from '../../lib/queries/queries';
+import {
+  useDaemonVersion,
+  useHostInfo,
+  useHostPathStyle,
+  useProfileSettings,
+} from '../../lib/queries/queries';
 import { useCurrentProfileId } from '../profile/profile-store';
 import { FindWidget } from '../find/FindWidget';
 import { isValidFindPattern } from '../find/find-matches';
@@ -215,11 +215,15 @@ export function Terminal({
   const appShortcutsRef = useRef(appShortcuts);
   appShortcutsRef.current = appShortcuts;
   // The HOST's path style (POSIX until `/api/host` answers): it picks the
-  // file-link patterns and xterm's ConPTY mode. A ref, so the live terminal
-  // follows a host-info answer that lands after it mounted.
+  // file-link patterns and xterm's ConPTY mode, tuned by the host's Windows
+  // build. Refs, so the live terminal follows a host-info answer that lands
+  // after it mounted.
   const hostStyle = useHostPathStyle();
   const hostStyleRef = useRef(hostStyle);
   hostStyleRef.current = hostStyle;
+  const osBuild = useHostInfo().data?.osBuild;
+  const osBuildRef = useRef(osBuild);
+  osBuildRef.current = osBuild;
   const find = useFindControls({
     // A terminal owns its key event before it bubbles to the window; the
     // custom xterm handler below opens this same control.
@@ -363,7 +367,7 @@ export function Terminal({
       // the dialogue opened nothing (fixed 2026-08-05). Route them through the
       // same open path as the URL provider below: no dialogue, real URL.
       linkHandler: { activate: (_event, uri) => openUri(uri) },
-      ...windowsPtyOptions(hostStyleRef.current),
+      ...windowsPtyOptions(hostStyleRef.current, osBuildRef.current),
     });
     preserveXtermScrollUp(xterm);
     hasReplayRef.current = false;
@@ -494,21 +498,15 @@ export function Terminal({
       // WITHOUT preventDefault makes xterm skip the key entirely, so the
       // event bubbles to the window dispatcher (HotkeysHost) that runs the
       // action. Actions the registry marks terminal-owned (`deferInTerminal`,
-      // e.g. ⌃A/⌃`) or editor-bound stay with the terminal, exactly as the
-      // dispatcher itself would yield them.
-      if (e.type === 'keydown' && appShortcutsRef.current) {
-        const binding = eventBinding(e);
-        const id = binding !== null ? actionForBinding(binding) : undefined;
-        const action = id !== undefined ? getHotkeyAction(id) : undefined;
-        if (
-          id !== undefined &&
-          action !== undefined &&
-          !action.editor &&
-          !action.deferInTerminal &&
-          getHotkeyHandler(id) !== undefined
-        ) {
-          return false;
-        }
+      // e.g. ⌃A/⌃`), editor-bound ones and, on a Windows client, plain
+      // Ctrl+letter chords (`terminalKeepsChord`) stay with the terminal,
+      // exactly as the dispatcher itself would yield them.
+      if (
+        e.type === 'keydown' &&
+        appShortcutsRef.current &&
+        terminalAppShortcut(eventBinding(e)) !== undefined
+      ) {
+        return false;
       }
       if (!IS_MAC) return true;
       const seq = macLineEditSequence(e);
@@ -744,9 +742,9 @@ export function Terminal({
   // A host never changes under a running daemon, so nothing is ever unset.
   useEffect(() => {
     const xterm = xtermRef.current;
-    const { windowsPty } = windowsPtyOptions(hostStyle);
+    const { windowsPty } = windowsPtyOptions(hostStyle, osBuild);
     if (xterm && windowsPty) xterm.options.windowsPty = windowsPty;
-  }, [hostStyle]);
+  }, [hostStyle, osBuild]);
 
   // A FRESH PTY under an attached viewer (a resume, or an account migration —
   // "stop the process, repoint the account, resume", SPEC §5) needs the same

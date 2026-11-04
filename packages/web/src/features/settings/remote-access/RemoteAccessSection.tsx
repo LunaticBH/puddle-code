@@ -8,7 +8,6 @@ import {
 } from '@puddle/shared';
 import { api, ApiError } from '../../../lib/transport/api';
 import { useCurrentProfileId } from '../../profile/profile-store';
-import { hostStyleForPlatform } from '../../../lib/host-path';
 import { useHostInfo, useProfiles } from '../../../lib/queries/queries';
 import { Button } from '../../../components/ui/button';
 import { Disclosure } from '../../../components/ui/disclosure';
@@ -24,12 +23,11 @@ import { RegistrationForm } from './RegistrationForm';
 import { PairingInvitation } from './PairingInvitation';
 import { DeviceList } from './DeviceList';
 import { DeleteRegistrationDialog } from './DeleteRegistrationDialog';
+import { remoteAccessUnsupported } from './remote-access-support';
 
 export function RemoteAccessSection() {
   const queryClient = useQueryClient();
   const host = useHostInfo();
-  // The relay connector does not run on Windows hosts in v1 (docs/windows.md).
-  const windowsHost = hostStyleForPlatform(host.data?.platform) === 'win32';
   const profile = useCurrentProfileId();
   const profiles = useProfiles();
   const profileName = profiles.data?.find((row) => row.id === profile)?.name ?? 'this profile';
@@ -45,12 +43,14 @@ export function RemoteAccessSection() {
   const status = useQuery({
     queryKey: ['cockpit-remote', profile],
     queryFn: async () => cockpitRemoteStatusSchema.parse(await api('GET', path)),
-    refetchInterval: busy ? false : 5000,
+    // An unsupported host's answer never changes under a running cockpit.
+    refetchInterval: (query) =>
+      busy || query.state.data?.availability === 'unsupported' ? false : 5000,
     refetchOnWindowFocus: !busy,
     refetchOnReconnect: !busy,
     retry: false,
     gcTime: 0,
-    enabled: !!profile && !windowsHost,
+    enabled: !!profile,
   });
   const act = async (request: CockpitRemoteRequest): Promise<boolean> => {
     if (busy || !profile) return false;
@@ -106,55 +106,48 @@ export function RemoteAccessSection() {
     }
   };
   const data = status.data;
+  // One path for a host that cannot offer remote access (Windows in v1).
+  const unsupported = remoteAccessUnsupported(data, host.data?.platform);
   const unavailable = status.error instanceof ApiError && status.error.status === 404;
   const disabled = busy || status.isError;
-  const title = (
-    <SectionTitle
-      note={`${profileName} on ${host.data?.displayName || host.data?.hostname || 'this host'} · only this profile’s projects and sessions`}
-    >
-      Remote access
-    </SectionTitle>
-  );
-  if (windowsHost) {
-    return (
-      <div>
-        {title}
-        <p role="status" className="mt-5 text-sm text-fg-secondary">
-          Remote access is not available on Windows hosts yet.
-        </p>
-      </div>
-    );
-  }
   return (
     <div>
-      {title}
+      <SectionTitle
+        note={`${profileName} on ${host.data?.displayName || host.data?.hostname || 'this host'} · only this profile’s projects and sessions`}
+      >
+        Remote access
+      </SectionTitle>
       <div className="mt-5 flex items-center justify-between gap-3">
         <span role="status" className="text-sm font-medium">
-          {status.isError
-            ? 'Status unavailable'
-            : !data
-              ? 'Checking remote access…'
-              : data.availability !== 'ready'
-                ? 'Daemon upgrade required'
-                : !data.configured
-                  ? 'Not configured'
-                  : !data.enabled
-                    ? 'Disabled'
-                    : data.connected
-                      ? 'Connected to relay'
-                      : 'Enabled · relay disconnected'}
+          {unsupported
+            ? 'Not supported on Windows hosts'
+            : status.isError
+              ? 'Status unavailable'
+              : !data
+                ? 'Checking remote access…'
+                : data.availability !== 'ready'
+                  ? 'Daemon upgrade required'
+                  : !data.configured
+                    ? 'Not configured'
+                    : !data.enabled
+                      ? 'Disabled'
+                      : data.connected
+                        ? 'Connected to relay'
+                        : 'Enabled · relay disconnected'}
         </span>
-        <Button
-          variant="ghost"
-          size="sm"
-          disabled={busy}
-          onClick={() => void status.refetch({ cancelRefetch: false })}
-        >
-          <RefreshCw />
-          Refresh status
-        </Button>
+        {!unsupported && (
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={busy}
+            onClick={() => void status.refetch({ cancelRefetch: false })}
+          >
+            <RefreshCw />
+            Refresh status
+          </Button>
+        )}
       </div>
-      {status.isError && (
+      {status.isError && !unsupported && (
         <p role="alert" className="mt-3 text-sm text-danger">
           {unavailable
             ? 'This cockpit does not provide remote controls. Update Puddle and reopen this window.'
@@ -171,10 +164,17 @@ export function RemoteAccessSection() {
           {message}
         </p>
       )}
-      {data?.availability !== undefined && data.availability !== 'ready' && (
+      {unsupported ? (
         <p className="mt-3 text-sm text-fg-secondary">
-          Update the daemon on this host, then refresh status to set up mobile access.
+          Remote access is not available for Windows hosts yet.
         </p>
+      ) : (
+        data?.availability !== undefined &&
+        data.availability !== 'ready' && (
+          <p className="mt-3 text-sm text-fg-secondary">
+            Update the daemon on this host, then refresh status to set up mobile access.
+          </p>
+        )
       )}
       {data?.availability === 'ready' && (
         <>

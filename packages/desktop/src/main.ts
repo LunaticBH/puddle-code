@@ -41,6 +41,7 @@ import { readX11Workspace, restoreX11Workspace } from './x11-workspace.js';
 import { refreshNavigation } from './refresh-navigation.js';
 import { DesktopNotifications } from './notifications.js';
 import { windowsUpdateTarget } from './update-target.js';
+import { WINDOWS_MINIMISE, WINDOWS_VIEW_MENU } from './windows-menu.js';
 
 /**
  * The desktop shell (SPEC §10): an Electron main process that drives the SAME
@@ -648,7 +649,10 @@ function buildMenu(): void {
     },
     // editMenu is load-bearing on macOS: without it ⌘C/⌘V/⌘A do nothing.
     { role: 'editMenu' },
-    { role: 'viewMenu' },
+    // Windows: Reload moves to F5, yielding Ctrl+R to the renderer (windows-menu.ts).
+    process.platform === 'win32'
+      ? { role: 'viewMenu', submenu: WINDOWS_VIEW_MENU }
+      : { role: 'viewMenu' },
     {
       // The windowMenu role keeps macOS's automatic open-window list; the
       // custom submenu puts New Window (the host picker) at the top.
@@ -659,7 +663,8 @@ function buildMenu(): void {
         // accelerator would swallow it before the hotkey dispatcher ever saw it.
         { label: 'New Window', accelerator: 'CmdOrCtrl+Shift+N', click: openHostPicker },
         { type: 'separator' },
-        { role: 'minimize' },
+        // Windows: no Ctrl+M, which a focused terminal keeps (windows-menu.ts).
+        process.platform === 'win32' ? WINDOWS_MINIMISE : { role: 'minimize' },
         // `zoom` is a macOS role; Windows gets the frame's own maximise button.
         ...(process.platform === 'win32'
           ? []

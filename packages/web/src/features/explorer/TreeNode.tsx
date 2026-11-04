@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ChevronRight, FolderClosed, FolderOpen, Link2 } from 'lucide-react';
+import { toast } from 'sonner';
 import type { TreeEntry } from '@puddle/shared';
 import {
   ContextMenu,
@@ -10,6 +11,7 @@ import {
 } from '../../components/ui/context-menu';
 import { HoverMarquee } from '../../components/hover-marquee';
 import { cn } from '../../lib/utils';
+import { invalidNameMessage } from '../../lib/transport/windows-refusals';
 import { useWorktreeTree } from '../../lib/queries/worktree-queries';
 import { encodeTabTransfer, TAB_MIME } from '../workspace/tabs/tab-transfer';
 import { isCompilableSource } from '../editor/compilation/compilation-kind';
@@ -52,22 +54,30 @@ function setCountDragImage(e: React.DragEvent, count: number) {
   requestAnimationFrame(() => chip.remove());
 }
 
-/** The inline text input used for both rename and new-entry creation (VSCode-style, no dialog). */
+/**
+ * The inline text input used for both rename and new-entry creation
+ * (VSCode-style, no dialog). A name the host cannot store (`problemOf`: only
+ * Windows hosts refuse any) is flagged as it is typed: Enter keeps the row
+ * open to fix it, and leaving the row abandons the edit with the reason.
+ */
 function EditRow({
   depth,
   initial,
   icon,
   onCommit,
   onCancel,
+  problemOf,
 }: {
   depth: number;
   initial: string;
   icon: React.ReactNode;
   onCommit: (name: string) => void;
   onCancel: () => void;
+  problemOf: (name: string) => string | null;
 }) {
   const ref = useRef<HTMLInputElement>(null);
   const done = useRef(false);
+  const [problem, setProblem] = useState<string | null>(null);
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
@@ -87,34 +97,59 @@ function EditRow({
     });
     return () => cancelAnimationFrame(raf);
   }, [initial]);
-  const commit = () => {
+  const commit = (leaving: boolean) => {
     if (done.current) return;
+    const value = ref.current?.value ?? '';
+    const invalid = problemOf(value);
+    if (invalid !== null && !leaving) {
+      setProblem(invalid);
+      return;
+    }
     done.current = true;
-    onCommit(ref.current?.value ?? '');
+    if (invalid === null) onCommit(value);
+    else {
+      toast.error(invalidNameMessage(value.trim(), invalid));
+      onCancel();
+    }
   };
   return (
-    <div
-      className="flex h-6 items-center gap-1 pr-2 compact:h-5"
-      style={{ paddingLeft: depth * INDENT_PX + 8 }}
-    >
-      <span className="size-3.5 shrink-0" />
-      {icon}
-      <input
-        ref={ref}
-        defaultValue={initial}
-        spellCheck={false}
-        onKeyDown={(e) => {
-          e.stopPropagation();
-          if (e.key === 'Enter') commit();
-          else if (e.key === 'Escape') {
-            done.current = true;
-            onCancel();
-          }
-        }}
-        onBlur={commit}
-        className="min-w-0 flex-1 bg-surface text-sm text-fg outline-none"
-      />
-    </div>
+    <>
+      <div
+        className="flex h-6 items-center gap-1 pr-2 compact:h-5"
+        style={{ paddingLeft: depth * INDENT_PX + 8 }}
+      >
+        <span className="size-3.5 shrink-0" />
+        {icon}
+        <input
+          ref={ref}
+          defaultValue={initial}
+          spellCheck={false}
+          aria-invalid={problem !== null || undefined}
+          onChange={(e) => {
+            if (problem !== null) setProblem(problemOf(e.target.value));
+          }}
+          onKeyDown={(e) => {
+            e.stopPropagation();
+            if (e.key === 'Enter') commit(false);
+            else if (e.key === 'Escape') {
+              done.current = true;
+              onCancel();
+            }
+          }}
+          onBlur={() => commit(true)}
+          className="min-w-0 flex-1 bg-surface text-sm text-fg outline-none"
+        />
+      </div>
+      {problem !== null && (
+        <p
+          role="alert"
+          className="pb-1 pr-2 text-2xs text-danger"
+          style={{ paddingLeft: depth * INDENT_PX + 8 + 36 }}
+        >
+          {problem}.
+        </p>
+      )}
+    </>
   );
 }
 
@@ -181,6 +216,7 @@ export function TreeNode({
           )
         }
         onCommit={ex.commitEdit}
+        problemOf={ex.nameProblem}
         onCancel={ex.cancelEdit}
       />
     );
@@ -417,6 +453,7 @@ function CreateRow({ depth, kind }: { depth: number; kind: 'file' | 'dir' }) {
         ex.commitEdit(value);
       }}
       onCancel={ex.cancelEdit}
+      problemOf={ex.nameProblem}
     />
   );
 }
