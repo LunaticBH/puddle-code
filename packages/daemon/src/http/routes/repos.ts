@@ -226,7 +226,8 @@ export function repoRoutes(deps: RepoRouteDeps): Hono {
     .post('/:id/fetch', async (c) => {
       const repo = deps.repos.get(idParam(c));
       try {
-        await deps.worktrees.fetchRepo(repo);
+        // A user's click: Git Credential Manager may sign them in (docs/windows.md, decision 12).
+        await deps.worktrees.fetchRepo(repo, { interactive: true });
       } catch (e) {
         throw new ApiError(502, 'fetch_failed', (e as Error).message);
       }
