@@ -28,7 +28,7 @@ let wrapper: string;
 let output = '';
 let legacy: Server | undefined;
 const previousHome = process.env.PUDDLE_HOME;
-// The loopback server is OpenSSH's POSIX sshd; Windows hosts are not SSH targets.
+// The loopback server is OpenSSH's POSIX sshd; windows-host.test.ts covers a Windows one.
 const loopbackSsh = process.platform !== 'win32' && existsSync('/usr/sbin/sshd');
 
 beforeAll(async () => {
