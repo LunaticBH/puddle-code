@@ -1,5 +1,5 @@
-import { execFile, spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   createReadStream,
   createWriteStream,
@@ -14,18 +14,21 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { copyFile } from 'node:fs/promises';
 import * as http from 'node:http';
 import type { Server } from 'node:net';
 import { basename, join, resolve, win32 } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
-import { initialisePrivateHome, ipcPath, listenPrivate } from '@puddle/shared/node';
-import { renameWithRetry, system32Path } from '@puddle/shared/node/platform';
+import { initialisePrivateHome, ipcPath, listenPrivate, rotateIpcNonce } from '@puddle/shared/node';
+import { isPidAlive, renameWithRetry, system32Path } from '@puddle/shared/node/platform';
+import { readCurrentVersion } from './current-link.js';
 import { parseSums } from './desktop-update.js';
 import { releaseArchiveName, releaseAssetUrl } from './releases.js';
 import {
-  controlPipePresent,
+  controlPipeState,
+  homeDaemonPids,
   startWindowsDaemon,
   stopWindowsDaemon,
   windowsRuntime,
@@ -49,6 +52,10 @@ import { pinnedDaemonVersion, repoSlug } from '../version.js';
 const ZIP_NAME = /^puddled-v(\d[^-]*)-win32-[a-z0-9]+\.zip$/;
 const CACHE_KEEP = 2;
 const LOCK_WAIT_MS = 10 * 60_000;
+/** ensureDaemon's start allowance: Defender scans a freshly unpacked runtime. */
+const SERVE_WAIT_MS = 60_000;
+/** Longer than the shared process table keeps a snapshot. */
+const PROCESS_SNAPSHOT_MS = 300;
 
 export interface WindowsInstallOptions {
   home?: string;
@@ -97,10 +104,10 @@ export async function installWindowsDaemon(opts: WindowsInstallOptions = {}): Pr
     throw new CliError('not_installed', `tarball not found: ${local}`);
   }
 
-  const lock = await acquireInstallLock(home, logger);
+  let lock = await acquireInstallLock(home, logger);
   try {
     const runtime = windowsRuntime(home, version);
-    if (existsSync(runtime.dir) && smokeTest(runtime, version, home)) {
+    if (existsSync(runtime.dir) && (await smokeTest(runtime, version, home))) {
       logger.info(`version ${version} already installed`);
     } else {
       const archive = local ?? (await download(home, version, opts.fetchFn ?? fetch, logger));
@@ -112,8 +119,8 @@ export async function installWindowsDaemon(opts: WindowsInstallOptions = {}): Pr
         rmSync(runtime.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
       }
       mkdirSync(runtime.dir, { recursive: true });
-      await extract(archive, runtime.dir);
-      if (!smokeTest(runtime, version, home)) {
+      await extract(home, archive, runtime.dir);
+      if (!(await smokeTest(runtime, version, home))) {
         rmSync(runtime.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
         throw new CliError(
           'not_installed',
@@ -122,21 +129,82 @@ export async function installWindowsDaemon(opts: WindowsInstallOptions = {}): Pr
         );
       }
     }
-    const running = await controlPipePresent(home);
-    if (running && opts.replaceRunning === false) {
-      logger.info('puddled was started meanwhile — leaving it running');
-    } else if (running || existsSync(join(home, 'puddled.pid'))) {
+    let pipe = await controlPipeState(home);
+    if (pipe === 'foreign') {
+      // Another account serves a name an earlier run used. Renamed under the
+      // lock, the home's pipes leave it behind; the lock moves with them, and
+      // its new name, keyed by the private ipc-key, says nothing of the
+      // daemon's.
+      logger.warn('a process that is not this home’s daemon holds its control pipe — renaming it');
+      rotateIpcNonce(home);
+      lock = await relock(home, lock, logger);
+      pipe = await controlPipeState(home);
+    }
+    const running = pipe === 'daemon' || pipe === 'unknown';
+    const pidFile = existsSync(join(home, 'puddled.pid'));
+    // A launcher that only needs a daemon never stops one that another
+    // launcher started, even one that has not served its pipe yet.
+    const starting =
+      opts.replaceRunning === false && !running && pidFile && (await daemonStarting(home));
+    const leave = opts.replaceRunning === false && (running || starting);
+    if (leave) {
+      logger.info(`puddled was ${running ? 'started' : 'starting'} meanwhile — leaving it running`);
+    } else if (running || pidFile) {
       await stopWindowsDaemon(home, { logger });
     }
-    pointCurrent(home, version);
+    // The launcher that started a running daemon pointed `current` at it.
+    if (!leave || readCurrentVersion(home, 'win32') === undefined) pointCurrent(home, version);
     writeFileSync(join(home, 'bin', 'puddled.cmd'), windowsLauncher());
     pruneCache(join(home, 'cache'));
     writeFileSync(join(home, 'supervisor'), 'detached\n');
-    if (!running || opts.replaceRunning !== false) await startWindowsDaemon(home, version);
+    if (leave) {
+      logger.info(`puddled ${version} is unpacked; the running daemon was left in place`);
+      return;
+    }
+    const pid = await startWindowsDaemon(home, version);
+    // Until it serves its pipe, the next lock holder's probe could not see it.
+    await servedOrGone(home, pid);
     logger.info(`installed puddled ${version} under ${home} (supervisor: detached)`);
   } finally {
     await new Promise<void>((resolve) => lock.close(() => resolve()));
   }
+}
+
+/**
+ * Whether a daemon of this home runs, identified by its command line. The
+ * shared process table answers from a snapshot up to 250 ms old, which a
+ * daemon spawned since then is missing from: while `puddled.pid` names a
+ * live process the snapshot lacks, the table is asked once more after that.
+ */
+async function daemonStarting(home: string): Promise<boolean> {
+  let recorded = 0;
+  try {
+    recorded = Number.parseInt(readFileSync(join(home, 'puddled.pid'), 'utf8'), 10);
+  } catch {
+    // Removed by a stop meanwhile.
+  }
+  for (let attempt = 0; ; attempt++) {
+    const pids = await homeDaemonPids(home).catch(() => [] as number[]);
+    if (pids.length > 0) return true;
+    if (attempt > 0 || !(recorded > 0) || !isPidAlive(recorded, 'win32')) return false;
+    await sleep(PROCESS_SNAPSHOT_MS);
+  }
+}
+
+/** Until the daemon just started holds its control pipe or exits, within the start allowance. */
+async function servedOrGone(home: string, pid: number): Promise<void> {
+  const deadline = Date.now() + SERVE_WAIT_MS;
+  while (Date.now() < deadline && isPidAlive(pid, 'win32')) {
+    if ((await controlPipeState(home, 1000)) !== 'absent') return;
+    await sleep(100);
+  }
+}
+
+/** After rotateIpcNonce: hold the lock's new name before releasing the old one. */
+async function relock(home: string, held: Server, logger: Logger): Promise<Server> {
+  const renamed = await acquireInstallLock(home, logger);
+  await new Promise<void>((resolve) => held.close(() => resolve()));
+  return renamed;
 }
 
 /** A pipe server as a mutex: it vanishes with its process, so no lock is ever stale. */
@@ -158,24 +226,33 @@ async function acquireInstallLock(home: string, logger: Logger): Promise<Server>
   }
 }
 
-/** `node.exe daemon\puddled.mjs --version` must name the expected release. */
-function smokeTest(runtime: ReturnType<typeof windowsRuntime>, version: string, home: string) {
+/**
+ * `node.exe daemon\puddled.mjs --version` must name the expected release.
+ * Asynchronous: the desktop runs this in Electron's main process, and the
+ * run loads the whole daemon bundle with its native addons.
+ */
+async function smokeTest(
+  runtime: ReturnType<typeof windowsRuntime>,
+  version: string,
+  home: string,
+): Promise<boolean> {
   const log = join(home, 'logs', 'install-smoke.log');
   if (!existsSync(runtime.node) || !existsSync(runtime.entry)) return false;
-  const result = spawnSync(runtime.node, [runtime.entry, '--version'], {
-    windowsHide: true,
-    encoding: 'utf8',
-    // A freshly unpacked runtime is scanned by Defender on its first run.
-    timeout: 120_000,
-  });
-  if (result.status === 0 && result.stdout.startsWith(`puddled ${version} `)) {
+  const result = await new Promise<{ error: Error | null; stdout: string; stderr: string }>(
+    (done) =>
+      execFile(
+        runtime.node,
+        [runtime.entry, '--version'],
+        // A freshly unpacked runtime is scanned by Defender on its first run.
+        { windowsHide: true, encoding: 'utf8', timeout: 120_000 },
+        (error, stdout, stderr) => done({ error, stdout, stderr }),
+      ),
+  );
+  if (result.error === null && result.stdout.startsWith(`puddled ${version} `)) {
     rmSync(log, { force: true });
     return true;
   }
-  writeFileSync(
-    log,
-    `${result.error?.message ?? ''}\n${result.stdout ?? ''}${result.stderr ?? ''}`,
-  );
+  writeFileSync(log, `${result.error?.message ?? ''}\n${result.stdout}${result.stderr}`);
   return false;
 }
 
@@ -220,8 +297,24 @@ async function download(
       rmSync(archive, { force: true });
       throw new CliError('not_installed', 'checksum mismatch — deleted the download');
     }
-  });
+  }).catch(downloadFailure);
   return archive;
+}
+
+/**
+ * Offline, refused or cut short, fetch rejects with no status at all. Such
+ * a download is as unusable as an HTTP error and as recoverable: a launcher
+ * falls back on any `not_installed` (startLocalWindows).
+ */
+function downloadFailure(err: unknown): never {
+  if (err instanceof CliError) throw err;
+  const reason = err instanceof Error ? err.message : String(err);
+  const cause = err instanceof Error && err.cause instanceof Error ? ` (${err.cause.message})` : '';
+  throw new CliError(
+    'not_installed',
+    `download failed: ${reason}${cause}`,
+    'check the network connection, or pass --tarball <path> (a puddled-v<version>-win32-x64.zip)',
+  );
 }
 
 /** A local zip is verified when its `<zip>.sha256` sits beside it, as with --tarball elsewhere. */
@@ -261,26 +354,51 @@ async function withEnvironmentProxy<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
-/** Unpack the archive's single top-level folder into `dest`. */
-function extract(archive: string, dest: string): Promise<void> {
+/**
+ * Unpack the archive's single top-level folder into `dest`, under `home`.
+ * System32's tar.exe reads its arguments in the ANSI code page, so a path
+ * outside it (a CJK profile name on an English install) would reach it as
+ * `?`. It runs in the home, whose name travels intact as the working
+ * directory, and is given only ASCII paths relative to it; an archive that
+ * has no such path is copied into the cache first.
+ */
+async function extract(home: string, archive: string, dest: string): Promise<void> {
   const tar = system32Path('tar.exe');
-  return new Promise((resolve, reject) => {
-    execFile(
-      tar,
-      ['-xf', archive, '--strip-components', '1', '-C', dest],
-      { windowsHide: true, timeout: 10 * 60_000, maxBuffer: 1024 * 1024 },
-      (error, _stdout, stderr) => {
-        if (!error) return resolve();
-        reject(
-          new CliError(
-            'not_installed',
-            `extraction failed: ${String(stderr).trim() || error.message}`,
-            existsSync(tar) ? undefined : 'tar.exe ships with Windows 10 1803 and later',
-          ),
-        );
-      },
-    );
-  });
+  let source = win32.relative(home, archive);
+  let copy: string | undefined;
+  if (!asciiInside(source)) {
+    copy = join(home, 'cache', `.extract-${randomBytes(8).toString('hex')}.zip`);
+    await copyFile(archive, copy);
+    source = win32.relative(home, copy);
+  }
+  try {
+    await new Promise<void>((resolve, reject) => {
+      execFile(
+        tar,
+        ['-xf', source, '--strip-components', '1', '-C', win32.relative(home, dest)],
+        { cwd: home, windowsHide: true, timeout: 10 * 60_000, maxBuffer: 1024 * 1024 },
+        (error, _stdout, stderr) => {
+          if (!error) return resolve();
+          reject(
+            new CliError(
+              'not_installed',
+              `extraction failed: ${String(stderr).trim() || error.message}`,
+              existsSync(tar) ? undefined : 'tar.exe ships with Windows 10 1803 and later',
+            ),
+          );
+        },
+      );
+    });
+  } finally {
+    if (copy !== undefined) rmSync(copy, { force: true });
+  }
+}
+
+/** A printable-ASCII path below the working directory: tar.exe receives it unchanged. */
+function asciiInside(relative: string): boolean {
+  return (
+    /^[\x20-\x7e]+$/.test(relative) && !relative.startsWith('..') && !win32.isAbsolute(relative)
+  );
 }
 
 /**

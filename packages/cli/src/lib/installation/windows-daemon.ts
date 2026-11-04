@@ -13,7 +13,7 @@ import { connect } from 'node:net';
 import { homedir } from 'node:os';
 import { join, win32 } from 'node:path';
 import { controlResponseSchema } from '@puddle/shared';
-import { ipcPath, jsonLines } from '@puddle/shared/node';
+import { checkIpcProof, ipcChallenge, ipcPath, jsonLines } from '@puddle/shared/node';
 import {
   deleteEnv,
   disableCurrentDirectorySearch,
@@ -155,26 +155,63 @@ function openRotated(file: string): number {
   return openSync(file, 'a');
 }
 
-/** Whether the home's control pipe exists. Anything but "not found" counts as present. */
-export function controlPipePresent(home: string): Promise<boolean> {
+/**
+ * What holds the home's control pipe. `daemon`: a server that proves it can
+ * read the home (one still starting answers `unavailable`, with its proof).
+ * `foreign`: one that answers without that proof, so it is not this home's
+ * daemon, whatever it says: another account's process squatting a name that
+ * an earlier run used. `unknown`: no answer, or no access to the pipe (an
+ * elevated daemon as well as another account's); it is waited for, never
+ * replaced (docs/windows.md, decision 6).
+ */
+export type ControlPipeState = 'absent' | 'daemon' | 'foreign' | 'unknown';
+
+/** Probe with a challenged `open`; a lease the daemon grants ends with the probe's connection. */
+export function controlPipeState(home: string, timeoutMs = 3000): Promise<ControlPipeState> {
+  const challenge = ipcChallenge();
   return new Promise((resolve) => {
     const socket = connect(ipcPath(home, 'host'));
-    socket.once('connect', () => {
+    let settled = false;
+    const settle = (state: ControlPipeState) => {
+      if (settled) return;
+      settled = true;
       socket.destroy();
-      resolve(true);
-    });
-    socket.once('error', (err: NodeJS.ErrnoException) => resolve(err.code !== 'ENOENT'));
+      resolve(state);
+    };
+    socket.setTimeout(timeoutMs, () => settle('unknown'));
+    socket.once('error', (err: NodeJS.ErrnoException) =>
+      settle(err.code === 'ENOENT' ? 'absent' : 'unknown'),
+    );
+    socket.once('close', () => settle('unknown'));
+    jsonLines(
+      socket,
+      (value) => {
+        const reply = controlResponseSchema.safeParse(value);
+        const proof = reply.success && 'proof' in reply.data ? reply.data.proof : undefined;
+        settle(checkIpcProof(home, 'host', challenge, proof) ? 'daemon' : 'foreign');
+      },
+      () => settle('foreign'),
+    );
+    socket.once('connect', () => socket.write(JSON.stringify({ t: 'open', challenge }) + '\n'));
   });
+}
+
+/** Whether a daemon may hold the home's control pipe: neither nothing nor a proven impostor. */
+export async function controlPipePresent(home: string): Promise<boolean> {
+  const state = await controlPipeState(home);
+  return state === 'daemon' || state === 'unknown';
 }
 
 /**
  * `unsupported`: a pre-25.7 daemon (`invalid_control`). `unavailable`: one
- * still starting (`unavailable`), or one that does not answer.
+ * still starting (`unavailable`), or one that does not answer. `foreign`: a
+ * server without this home's proof (see ControlPipeState), never a daemon.
  */
-export type ShutdownOutcome = 'stopping' | 'unsupported' | 'unavailable' | 'absent';
+export type ShutdownOutcome = 'stopping' | 'unsupported' | 'unavailable' | 'absent' | 'foreign';
 
 /** Ask the home's daemon to stop over its private control pipe. */
 export function requestDaemonShutdown(home: string, timeoutMs = 5000): Promise<ShutdownOutcome> {
+  const challenge = ipcChallenge();
   return new Promise((resolve) => {
     const socket = connect(ipcPath(home, 'host'));
     let settled = false;
@@ -193,16 +230,18 @@ export function requestDaemonShutdown(home: string, timeoutMs = 5000): Promise<S
       socket,
       (value) => {
         const message = controlResponseSchema.safeParse(value);
-        if (!message.success) return settle('unavailable');
+        if (!message.success) return settle('foreign');
         const reply = message.data;
+        const proof = 'proof' in reply ? reply.proof : undefined;
+        if (!checkIpcProof(home, 'host', challenge, proof)) return settle('foreign');
         if (reply.t === 'shutting_down') return settle('stopping');
         settle(
           reply.t === 'error' && reply.code === 'invalid_control' ? 'unsupported' : 'unavailable',
         );
       },
-      () => settle('unavailable'),
+      () => settle('foreign'),
     );
-    socket.once('connect', () => socket.write(JSON.stringify({ t: 'shutdown' }) + '\n'));
+    socket.once('connect', () => socket.write(JSON.stringify({ t: 'shutdown', challenge }) + '\n'));
   });
 }
 
@@ -262,8 +301,10 @@ export async function stopWindowsDaemon(home: string, opts: StopOptions = {}): P
   for (;;) {
     outcome = await requestDaemonShutdown(home);
     pids = await homeDaemonPids(home, list).catch(() => [] as number[]);
-    if (outcome === 'absent' && pids.length === 0) return clearPidFile(home);
-    const answerable = outcome === 'unavailable' || (outcome === 'absent' && pids.length > 0);
+    // An impostor's pipe hides no daemon of this home: only identified pids count.
+    const noPipe = outcome === 'absent' || outcome === 'foreign';
+    if (noPipe && pids.length === 0) return clearPidFile(home);
+    const answerable = outcome === 'unavailable' || (noPipe && pids.length > 0);
     if (!answerable || Date.now() >= starting) break;
     await sleep(500);
   }

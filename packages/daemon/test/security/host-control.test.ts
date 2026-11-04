@@ -4,7 +4,14 @@ import { dirname, join } from 'node:path';
 import { connect, type Socket } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import { CONTROL_MAX_BYTES, PROTOCOL_VERSION, controlResponseSchema } from '@puddle/shared';
-import { ipcPath, jsonLines, secret } from '@puddle/shared/node';
+import {
+  checkIpcProof,
+  ipcChallenge,
+  ipcPath,
+  ipcProof,
+  jsonLines,
+  secret,
+} from '@puddle/shared/node';
 import { startHostControl } from '../../src/security/control.js';
 import { LeaseRegistry } from '../../src/security/leases.js';
 
@@ -106,6 +113,43 @@ describe('private host control', () => {
     f.socket.write(JSON.stringify({ t: 'shutdown' }) + '\n');
     expect(await received).toEqual({ t: 'error', code: 'unavailable' });
     expect(requested).toBe(0);
+  });
+
+  it('proves it can read the home to a client that sends a challenge, and only then', async () => {
+    let requested = 0;
+    let ready = false;
+    const f = await fixture({ onShutdown: () => requested++, ready: () => ready });
+    const challenge = ipcChallenge();
+    // Starting: the answer a Windows client waits on must be proven too.
+    const starting = reply(f.socket);
+    f.socket.write(JSON.stringify({ t: 'open', challenge }) + '\n');
+    const unavailable = await starting;
+    expect(unavailable).toEqual({
+      t: 'error',
+      code: 'unavailable',
+      proof: ipcProof(f.home, 'host', challenge),
+    });
+    ready = true;
+    const open = (message: object) => {
+      const socket = connect(ipcPath(f.home, 'host'));
+      cleanup.push(() => {
+        socket.destroy();
+      });
+      const answer = reply(socket);
+      socket.write(JSON.stringify(message) + '\n');
+      return answer;
+    };
+    const grant = await open({ t: 'open', challenge });
+    expect(grant.t).toBe('authority');
+    expect('proof' in grant && checkIpcProof(f.home, 'host', challenge, grant.proof)).toBe(true);
+    // POSIX clients send no challenge and receive exactly the old answer.
+    expect(Object.keys(await open({ t: 'open' }))).not.toContain('proof');
+    const other = ipcChallenge();
+    expect(await open({ t: 'shutdown', challenge: other })).toEqual({
+      t: 'shutting_down',
+      proof: ipcProof(f.home, 'host', other),
+    });
+    expect(requested).toBe(1);
   });
 
   it.skipIf(process.platform === 'win32')(

@@ -293,12 +293,18 @@ function isInside(path: string, root: string): boolean {
  * (DETACHED_PROCESS), where Windows PowerShell exits without running its
  * command, and kills non-detached children with their parent. The root
  * travels in the environment, inside quotes, so cmd.exe never parses it.
+ * The `if` is bracketed: unbracketed, its body would run to the closing
+ * parenthesis and take the one-second wait with it.
  */
+export const TREE_CLEANUP_COMMAND =
+  'for /l %i in (1,1,60) do @(rmdir /s /q "%PUDDLE_CLEANUP_ROOT%" 2>nul & ' +
+  '(if not exist "%PUDDLE_CLEANUP_ROOT%" exit /b 0) & ping -n 2 127.0.0.1 >nul)';
+
+/** cmd.exe's argv for TREE_CLEANUP_COMMAND, passed verbatim. */
+export const treeCleanupArgs = (): string[] => ['/d', '/s', '/c', `"${TREE_CLEANUP_COMMAND}"`];
+
 function removeTreeAfterExit(root: string): void {
-  const retry =
-    'for /l %i in (1,1,60) do @(rmdir /s /q "%PUDDLE_CLEANUP_ROOT%" 2>nul & ' +
-    'if not exist "%PUDDLE_CLEANUP_ROOT%" exit /b 0 & ping -n 2 127.0.0.1 >nul)';
-  const child = spawn(system32Path('cmd.exe'), ['/d', '/s', '/c', `"${retry}"`], {
+  const child = spawn(system32Path('cmd.exe'), treeCleanupArgs(), {
     detached: true,
     stdio: 'ignore',
     windowsHide: true,

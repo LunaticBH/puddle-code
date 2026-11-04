@@ -19,6 +19,15 @@ export interface ConnectionAuthority {
   close(): void;
 }
 
+/**
+ * Windows: each channel's `open` carries a fresh challenge, and the first
+ * authority is believed only with a valid proof (see `ipcProof`).
+ */
+export interface ServerProof {
+  challenge(): string;
+  verify(challenge: string, proof: string | undefined): boolean;
+}
+
 /** One client-participating control channel, independent of SSH forwarding pids. */
 export class HostControlClient implements ConnectionAuthority {
   private status: AuthorityState = 'upstream_unavailable';
@@ -50,6 +59,7 @@ export class HostControlClient implements ConnectionAuthority {
       message: string,
     ) => Error = (_code, message) => new Error(message),
     private readonly profile?: string,
+    private readonly serverProof?: ServerProof,
   ) {
     this.timer = setInterval(() => {
       if (this.channel && performance.now() >= this.until)
@@ -107,6 +117,7 @@ export class HostControlClient implements ConnectionAuthority {
       }
       this.channel = channel;
       this.until = performance.now() + CONNECTION_POLICY.leaseMs;
+      const challenge = this.serverProof?.challenge();
       await new Promise<void>((resolve, reject) => {
         let pendingAt: number | null = null;
         let initial = true;
@@ -131,6 +142,22 @@ export class HostControlClient implements ConnectionAuthority {
             if (this.channel !== channel || pendingAt === null) return channel.destroy();
             const message = controlResponseSchema.parse(value);
             if (message.t !== 'authority') {
+              channel.destroy();
+              return;
+            }
+            // Before anything it says is used, a mismatch included: an
+            // impostor must not trigger a daemon upgrade either.
+            if (
+              initial &&
+              challenge !== undefined &&
+              !this.serverProof!.verify(challenge, message.proof)
+            ) {
+              reject(
+                this.error(
+                  'daemon_unreachable',
+                  'The host control pipe is not served by this home’s daemon',
+                ),
+              );
               channel.destroy();
               return;
             }
@@ -177,7 +204,11 @@ export class HostControlClient implements ConnectionAuthority {
         channel.once('error', closed);
         channel.once('close', closed);
         channel.once('end', closed);
-        send({ t: 'open', ...(this.profile ? { profile: this.profile } : {}) });
+        send({
+          t: 'open',
+          ...(this.profile ? { profile: this.profile } : {}),
+          ...(challenge !== undefined ? { challenge } : {}),
+        });
       });
     } finally {
       this.connecting = false;

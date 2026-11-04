@@ -13,6 +13,7 @@ import { clientHome, hostPaths } from '../paths.js';
 import { isLocalWindows } from '../transport/local.js';
 import type { Transport } from '../transport/transport.js';
 import { CliError, type CliEvent, type Logger, silentLogger } from '../types.js';
+import { pinnedDaemonVersion } from '../version.js';
 
 /**
  * A running cockpit: the UI server (and tunnel, in SSH mode) behind one
@@ -89,8 +90,12 @@ export async function ensureDaemon(
     return null;
   });
   if (!inspection && mismatch) throw mismatch;
-  const install = async (replaceRunning = true) => {
-    await installDaemon(transport, { ...opts, ...(replaceRunning ? {} : { replaceRunning }) });
+  const install = async (replaceRunning = true, version?: string) => {
+    await installDaemon(transport, {
+      ...opts,
+      ...(version !== undefined ? { version } : {}),
+      ...(replaceRunning ? {} : { replaceRunning }),
+    });
     return waitAfterInstall(transport, opts, logger, true, startTimeoutMs);
   };
   if (inspection) {
@@ -118,7 +123,14 @@ export async function ensureDaemon(
       throw err;
     }
   }
-  if (localWindows) return startLocalWindows(transport, logger, startTimeoutMs, install);
+  if (localWindows) {
+    return startLocalWindows(transport, logger, startTimeoutMs, install, {
+      // An explicit release or archive is what the caller asked for.
+      keepInstalled: opts.version === undefined && opts.tarball === undefined,
+      // Pinned to this launcher's own release (the default), so it never comes back here.
+      retry: () => ensureDaemon(transport, { ...opts, version: pinnedDaemonVersion() }),
+    });
+  }
   if ((await installedVersion(transport)) !== null) {
     logger.info(`restarting puddled on ${transport.label}`);
   }
@@ -130,12 +142,20 @@ export async function ensureDaemon(
  * one that is starting, or too busy to answer, is waited for rather than
  * replaced (an ambiguous probe is not an absent daemon). Otherwise install
  * or start it, leaving alone one that another launcher starts meanwhile.
+ *
+ * With nothing running (after every reboot: there is no logon autostart),
+ * the installed `bin\current` is started, as a POSIX supervisor restarts it:
+ * version changes are the handshake's and `puddle upgrade`'s, never a side
+ * effect of which launcher happens to start first. Only when that tree
+ * cannot run is this launcher's own release installed; one whose protocol
+ * is incompatible is handed back to the handshake through `retry`.
  */
 async function startLocalWindows(
   transport: Transport,
   logger: Logger,
   timeoutMs: number,
-  install: (replaceRunning: boolean) => Promise<DaemonEndpoint>,
+  install: (replaceRunning: boolean, version?: string) => Promise<DaemonEndpoint>,
+  opts: { keepInstalled: boolean; retry: () => Promise<DaemonEndpoint> },
 ): Promise<DaemonEndpoint> {
   if (await controlPipePresent(clientHome())) {
     logger.info('puddled is starting on this machine — waiting for it');
@@ -151,7 +171,19 @@ async function startLocalWindows(
       );
     }
   }
-  if ((await installedVersion(transport)) !== null) logger.info('starting puddled on this machine');
+  const installed = await installedVersion(transport);
+  if (installed === null) return install(false);
+  logger.info('starting puddled on this machine');
+  if (!opts.keepInstalled) return install(false);
+  try {
+    // An installed tree is smoke-tested and started in place: no download.
+    return await install(false, installed);
+  } catch (err) {
+    if (!(err instanceof CliError)) throw err;
+    if (err.code === 'protocol_mismatch') return opts.retry();
+    if (err.code !== 'not_installed') throw err;
+    logger.warn(`puddled ${installed} cannot start (${err.message}) — installing this release`);
+  }
   return install(false);
 }
 

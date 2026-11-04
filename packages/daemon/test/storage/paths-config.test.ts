@@ -2,6 +2,7 @@ import { existsSync, chmodSync, mkdtempSync, readFileSync, statSync, writeFileSy
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { ipcPath } from '@puddle/shared/node';
 import {
   applyAgentPath,
   loadConfig,
@@ -37,6 +38,18 @@ describe('resolvePaths', () => {
     expect(canonicalHome(typed.toLowerCase(), 'win32')).toBe(join(parent, '.puddle'));
     expect(resolvePaths(typed).worktreesDir).toBe(join(parent, '.puddle', 'worktrees'));
   });
+
+  it.runIf(process.platform === 'win32')(
+    'names the control pipe the CLI computes from the home as typed',
+    () => {
+      // `$env:PUDDLE_HOME = 'c:\…'`: the daemon binds under its canonical home.
+      const home = join(mkdtempSync(join(tmpdir(), 'puddle-home-parent-')), '.puddle');
+      const typed = home[0]!.toLowerCase() + home.slice(1).toUpperCase();
+      const daemon = resolvePaths(typed).home;
+      expect(daemon).not.toBe(typed);
+      expect(ipcPath(typed, 'host')).toBe(ipcPath(daemon, 'host'));
+    },
+  );
 
   it('lays out every path under the given home', () => {
     const home = '/x/home';

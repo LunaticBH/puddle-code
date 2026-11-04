@@ -1,6 +1,6 @@
 import { relayDaemonUpgradePrompt } from './daemon-upgrade-prompt.js';
 import { requestCockpitShutdown, requestInvitation } from '../lib/auth/launcher.js';
-import { clientHome } from '../lib/paths.js';
+import { clientHome, prepareClientHome } from '../lib/paths.js';
 import { spawn } from 'node:child_process';
 import { closeSync, mkdirSync, openSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -90,6 +90,8 @@ export async function launchDetached(opts: {
   }
 
   const logFile = cockpitLogPath(target);
+  // Often the first write to a new home: on Windows it must start private.
+  prepareClientHome();
   mkdirSync(dirname(logFile), { recursive: true });
   const fd = openSync(logFile, 'w');
   const argv = opts.argv ?? process.argv.slice(2);
@@ -184,6 +186,7 @@ async function followStartup(
  */
 export function spawnDetachedRefresh(target: string, argv: string[], refreshId: string): void {
   const logFile = cockpitLogPath(target);
+  prepareClientHome();
   mkdirSync(dirname(logFile), { recursive: true });
   const fd = openSync(logFile, 'a');
   const env: NodeJS.ProcessEnv = {

@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
@@ -25,6 +25,8 @@ import type { Transport } from '../../src/lib/transport/transport.js';
 import {
   standaloneInstallation,
   removeStandaloneCli,
+  TREE_CLEANUP_COMMAND,
+  treeCleanupArgs,
   windowsStandaloneLauncher,
   windowsUpgradeCommand,
 } from '../../src/lib/installation/standalone-cli.js';
@@ -332,6 +334,14 @@ describe('Windows standalone launchers (any OS)', () => {
     );
   });
 
+  it('waits a second between self-removal retries, not only once the tree is gone', () => {
+    // cmd.exe runs everything after an unbracketed `if` as its body.
+    expect(TREE_CLEANUP_COMMAND).toContain(
+      '& (if not exist "%PUDDLE_CLEANUP_ROOT%" exit /b 0) & ping -n 2 127.0.0.1 >nul)',
+    );
+    expect(treeCleanupArgs()).toEqual(['/d', '/s', '/c', `"${TREE_CLEANUP_COMMAND}"`]);
+  });
+
   it('falls back to the absolute root across drives', () => {
     expect(windowsStandaloneLauncher('D:\\tools\\puddle', 'C:\\bin')).toBe(
       '@rem puddle standalone launcher\r\n' +
@@ -373,16 +383,18 @@ describe('Windows standalone launchers (any OS)', () => {
 // Every run passes -NoPathUpdate: the default edits the real HKCU PATH, which
 // scripts/test-cli-tarball.mjs exercises on disposable CI runners only.
 describe.runIf(process.platform === 'win32')('Windows standalone CLI installer', () => {
-  function windowsFixture() {
+  /** `profile` names the user's home folder; the archive sits beside it. */
+  function windowsFixture(profile = 'home') {
     const temp = mkdtempSync(join(tmpdir(), 'puddle-ps-installer-'));
     temps.push(temp);
-    const home = join(temp, 'home');
+    const home = join(temp, profile);
     const localAppData = join(home, 'AppData', 'Local');
     const prefix = join(localAppData, 'puddle', 'cli');
     const bin = join(localAppData, 'puddle', 'bin');
     const launcher = join(bin, 'puddle.cmd');
     const stage = join(temp, 'stage', 'puddle-cli-v1.2.3');
-    const archive = join(temp, `puddle-cli-v1.2.3-win32-x64.zip`);
+    const packed = join(temp, `puddle-cli-v1.2.3-win32-x64.zip`);
+    const archive = profile === 'home' ? packed : join(home, `puddle-cli-v1.2.3-win32-x64.zip`);
     mkdirSync(localAppData, { recursive: true });
     mkdirSync(join(stage, 'cli', 'public'), { recursive: true });
     mkdirSync(join(stage, 'bin'));
@@ -404,7 +416,7 @@ describe.runIf(process.platform === 'win32')('Windows standalone CLI installer',
     ])
       writeFileSync(join(stage, 'cli', file), 'fixture');
     const pack = () => {
-      rmSync(archive, { force: true });
+      rmSync(packed, { force: true });
       // Stored, not deflated: the fixture carries a whole node.exe.
       execFileSync(join(systemRoot, 'System32', 'tar.exe'), [
         '-a',
@@ -412,11 +424,12 @@ describe.runIf(process.platform === 'win32')('Windows standalone CLI installer',
         'zip:compression=store',
         '-c',
         '-f',
-        archive,
+        packed,
         '-C',
         join(temp, 'stage'),
         'puddle-cli-v1.2.3',
       ]);
+      if (archive !== packed) copyFileSync(packed, archive);
       const hash = createHash('sha256').update(readFileSync(archive)).digest('hex');
       writeFileSync(`${archive}.sha256`, `${hash}  puddle-cli-v1.2.3-win32-x64.zip\n`);
     };
@@ -606,4 +619,49 @@ describe.runIf(process.platform === 'win32')('Windows standalone CLI installer',
       standaloneInstallation(join(f.stage, 'cli', 'index.js'), process.execPath, 'win32'),
     ).toThrow(expect.objectContaining({ hint: expect.stringContaining('install.ps1') }));
   });
+
+  it('installs under a profile whose name the ANSI code page cannot hold', async () => {
+    // CJK and Cyrillic: neither fits cp1252, so tar.exe would read `?` for them.
+    const f = windowsFixture('测试 Иван');
+    f.install();
+    expect(runLauncher(f.launcher, ['--help'])).toContain('fixture CLI help');
+    expect(
+      readdirSync(realpathSync(f.prefix)).filter((name) => name.startsWith('.download.')),
+    ).toEqual([]);
+    const release = realpathSync(join(f.prefix, 'current'));
+    const installation = standaloneInstallation(
+      join(release, 'cli', 'index.js'),
+      join(release, 'bin', 'node.exe'),
+      'win32',
+    );
+    await removeStandaloneCli(installation!, 'win32');
+    expect(existsSync(f.prefix)).toBe(false);
+  });
+
+  it('keeps retrying a self-removal until the exiting process releases the tree', async () => {
+    const temp = mkdtempSync(join(tmpdir(), 'puddle-ps-cleanup-'));
+    temps.push(temp);
+    const tree = join(temp, 'cli');
+    const held = join(tree, 'versions', '1.2.3', 'bin');
+    mkdirSync(held, { recursive: true });
+    writeFileSync(join(tree, 'INSTALLATION'), 'puddle-cli\n');
+    // A working directory cannot be removed: the stand-in for the exiting node.exe.
+    const holder = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 2500)'], {
+      cwd: held,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    await new Promise((resolve) => holder.once('spawn', resolve));
+    const started = Date.now();
+    const cleanup = spawn(join(systemRoot, 'System32', 'cmd.exe'), treeCleanupArgs(), {
+      stdio: 'ignore',
+      windowsHide: true,
+      windowsVerbatimArguments: true,
+      env: { ...process.env, PUDDLE_CLEANUP_ROOT: tree },
+    });
+    const code = await new Promise((resolve) => cleanup.once('exit', resolve));
+    expect(code).toBe(0);
+    expect(existsSync(tree)).toBe(false);
+    expect(Date.now() - started).toBeGreaterThan(1500);
+  }, 30_000);
 });

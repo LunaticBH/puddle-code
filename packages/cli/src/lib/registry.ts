@@ -6,7 +6,7 @@ import {
   type WindowsProcess,
 } from '@puddle/shared/node/platform';
 import { join } from 'node:path';
-import { clientHome } from './paths.js';
+import { clientHome, prepareClientHome } from './paths.js';
 
 /**
  * The cockpit registry: one JSON file per target under ~/.puddle/cockpits/,
@@ -65,6 +65,7 @@ export function cockpitLogPath(target: string): string {
 }
 
 export function writeCockpitRecord(record: CockpitRecord): void {
+  prepareClientHome();
   privateDirectory(cockpitsDir());
   atomicPrivateJson(cockpitRecordPath(record.target), sanitise(record));
 }

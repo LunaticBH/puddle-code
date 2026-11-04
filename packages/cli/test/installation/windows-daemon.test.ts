@@ -4,9 +4,11 @@ import type { Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ipcPath, listenPrivate } from '@puddle/shared/node';
+import { ipcPath, ipcProof, listenPrivate } from '@puddle/shared/node';
 import { isPidAlive, type WindowsProcess } from '@puddle/shared/node/platform';
 import {
+  controlPipePresent,
+  controlPipeState,
   daemonEnvironment,
   isHomeDaemon,
   requestDaemonShutdown,
@@ -21,13 +23,28 @@ afterEach(async () => {
   }
 });
 
-/** A stand-in for the daemon's control endpoint that answers every line with `reply`. */
-async function control(home: string, reply: object | null, onRequest?: () => void) {
+/** The proof the home's daemon adds to its answer to `request`; none without a challenge. */
+function proofFor(home: string, request: Buffer): { proof?: string } {
+  const { challenge } = JSON.parse(request.toString()) as { challenge?: string };
+  return challenge === undefined ? {} : { proof: ipcProof(home, 'host', challenge) };
+}
+
+/**
+ * A stand-in for the daemon's control endpoint that answers every line with
+ * `reply`, proving it can read the home unless it is an `impostor`.
+ */
+async function control(
+  home: string,
+  reply: object | null,
+  onRequest?: () => void,
+  impostor = false,
+) {
   const server = await listenPrivate(ipcPath(home, 'host'), (socket) => {
     socket.on('error', () => {});
-    socket.on('data', () => {
+    socket.on('data', (request: Buffer) => {
       onRequest?.();
-      if (reply) socket.end(JSON.stringify(reply) + '\n');
+      const proof = impostor ? {} : proofFor(home, request);
+      if (reply) socket.end(JSON.stringify({ ...reply, ...proof }) + '\n');
     });
   });
   servers.push(server);
@@ -129,18 +146,45 @@ describe('the detached Windows supervisor', () => {
     expect(await requestDaemonShutdown(silent, 300)).toBe('unavailable');
   });
 
+  it('believes only a pipe server that proves it can read the home', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'puddle-windows-daemon-'));
+    expect(await controlPipeState(home)).toBe('absent');
+    const starting = await control(home, { t: 'error', code: 'unavailable' });
+    expect(await controlPipeState(home)).toBe('daemon');
+    expect(await controlPipePresent(home)).toBe(true);
+    await new Promise<void>((resolve) => starting.close(() => resolve()));
+    servers.splice(servers.indexOf(starting), 1);
+
+    // Another account squatting a name it saw: it can say anything but the proof.
+    await control(home, { t: 'shutting_down' }, undefined, true);
+    expect(await controlPipeState(home)).toBe('foreign');
+    expect(await controlPipePresent(home)).toBe(false);
+    expect(await requestDaemonShutdown(home)).toBe('foreign');
+    // Nothing of this home's is running, so there is nothing to stop or wait for.
+    writeFileSync(join(home, 'puddled.pid'), '4242\n');
+    await stopWindowsDaemon(home, { list: async () => [] });
+    expect(existsSync(join(home, 'puddled.pid'))).toBe(false);
+  });
+
+  it('waits for a pipe that answers nothing, never replacing it', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'puddle-windows-daemon-'));
+    await control(home, null);
+    expect(await controlPipeState(home, 300)).toBe('unknown');
+  });
+
   it('waits for a starting daemon to accept the shutdown rather than terminating it', async () => {
     const home = mkdtempSync(join(tmpdir(), 'puddle-windows-daemon-'));
     let requests = 0;
     const server = await listenPrivate(ipcPath(home, 'host'), (socket) => {
       socket.on('error', () => {});
-      socket.on('data', () => {
+      socket.on('data', (request: Buffer) => {
         requests++;
+        const proof = proofFor(home, request);
         if (requests < 3) {
-          socket.end(JSON.stringify({ t: 'error', code: 'unavailable' }) + '\n');
+          socket.end(JSON.stringify({ t: 'error', code: 'unavailable', ...proof }) + '\n');
           return;
         }
-        socket.end(JSON.stringify({ t: 'shutting_down' }) + '\n');
+        socket.end(JSON.stringify({ t: 'shutting_down', ...proof }) + '\n');
         server.close();
       });
     });
