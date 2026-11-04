@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   connectorConfigSchema,
+  connectorProvenSchema,
   connectorRegistrationSchema,
   connectorSetupSchema,
   connectorLocalRequestSchema,
@@ -15,6 +16,8 @@ import {
 import {
   atomicPrivateJson,
   checkIpcEndpoint,
+  checkIpcProof,
+  ipcChallenge,
   ipcPath,
   jsonLines,
   readPrivateJson,
@@ -34,18 +37,34 @@ async function exchange(
   request: ConnectorLocalRequest,
   profile: string,
 ): Promise<RemoteAdminResponse> {
-  const path = ipcPath(home, `remote-${profile}`);
+  const scope = `remote-${profile}`;
+  const path = ipcPath(home, scope);
   // A missing Windows pipe reports ENOENT from the connect below instead.
   checkIpcEndpoint(path);
+  // Windows (25.7): the request goes only to a server that proves it reads the home.
+  const challenge = process.platform === 'win32' ? ipcChallenge() : undefined;
   return new Promise((resolve, reject) => {
     const socket = connect(path);
     const timer = setTimeout(() => {
       socket.destroy();
       reject(new Error('Connector control unavailable'));
     }, 5000);
+    let proven = challenge === undefined;
     const stop = jsonLines(
       socket,
       (value) => {
+        if (!proven) {
+          const reply = connectorProvenSchema.safeParse(value);
+          if (!reply.success || !checkIpcProof(home, scope, challenge!, reply.data.proof)) {
+            // Not this home's connector: as good as none for an offline fallback.
+            reject(Object.assign(new Error('Connector control unavailable'), { code: 'EFOREIGN' }));
+            socket.destroy();
+            return;
+          }
+          proven = true;
+          socket.write(JSON.stringify(request) + '\n');
+          return;
+        }
         const result = remoteAdminResponseSchema.parse(value);
         socket.destroy();
         resolve(result);
@@ -55,7 +74,11 @@ async function exchange(
         reject(new Error('Invalid connector response'));
       },
     );
-    socket.on('connect', () => socket.write(JSON.stringify(request) + '\n'));
+    socket.on('connect', () =>
+      socket.write(
+        JSON.stringify(challenge === undefined ? request : { t: 'challenge', challenge }) + '\n',
+      ),
+    );
     socket.on('error', reject);
     socket.on('close', () => {
       clearTimeout(timer);
@@ -78,9 +101,10 @@ async function requestUnlocked(
     const directory = profileDirectory(home, profile);
     if (request.t === 'delete_registration') {
       // A timeout or lost acknowledgement does not prove the live writer has stopped.
-      // Only mutate offline when its socket is absent or refuses connections.
+      // Only mutate offline when its socket is absent or refuses connections, or
+      // (Windows) another program holds the name, so this home's runtime cannot.
       const code = (error as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT' && code !== 'ECONNREFUSED') throw error;
+      if (code !== 'ENOENT' && code !== 'ECONNREFUSED' && code !== 'EFOREIGN') throw error;
       deleteRegistration(directory);
       await flushRegistrationCleanup(directory);
       return { enabled: false, connected: false };
@@ -164,7 +188,7 @@ async function configureUnlocked(
   if (setup.code && existing) retireRegistration(profileDirectory(home, profile), existing);
   atomicPrivateJson(path, connectorConfigSchema.parse(config));
   try {
-    if (setup.managed) installConnectorSupervisor(home);
+    if (setup.managed) await installConnectorSupervisor(home);
   } catch (error) {
     atomicPrivateJson(path, { ...config, enabled: false });
     throw error;

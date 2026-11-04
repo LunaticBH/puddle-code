@@ -6,7 +6,7 @@ import {
   type ControlRequest,
   type VersionResponse,
 } from '../index.js';
-import { jsonLines, secret } from './security.js';
+import { checkIpcProof, ipcChallenge, jsonLines, secret } from './security.js';
 
 export type AuthorityState =
   'ready' | 'upstream_expired' | 'upstream_unavailable' | 'protocol_mismatch';
@@ -26,6 +26,14 @@ export interface ConnectionAuthority {
 export interface ServerProof {
   challenge(): string;
   verify(challenge: string, proof: string | undefined): boolean;
+}
+
+/** A Windows pipe's server must show that it can read the home before it is believed. */
+export function homeDaemonProof(home: string): ServerProof {
+  return {
+    challenge: ipcChallenge,
+    verify: (challenge, proof) => checkIpcProof(home, 'host', challenge, proof),
+  };
 }
 
 /** One client-participating control channel, independent of SSH forwarding pids. */

@@ -5,6 +5,7 @@ import WebSocket from 'ws';
 import {
   REMOTE_POLICY,
   REMOTE_PROTOCOL_VERSION,
+  connectorChallengeSchema,
   connectorConfigSchema,
   connectorNotificationSchema,
   connectorLocalRequestSchema,
@@ -17,6 +18,7 @@ import {
 import {
   atomicPrivateJson,
   ipcPath,
+  ipcProof,
   jsonLines,
   listenPrivate,
   privateDirectory,
@@ -104,9 +106,21 @@ export async function startConnector(home: string, profile: string) {
     adminSockets.add(socket);
     socket.setTimeout(5000, () => socket.destroy());
     let used = false;
+    let challenged = false;
     const stop = jsonLines(
       socket,
       (value) => {
+        // Windows (25.7): one optional challenge first, proving this server
+        // reads the home, before the single request.
+        if (process.platform === 'win32' && !used && !challenged) {
+          const challenge = connectorChallengeSchema.safeParse(value);
+          if (challenge.success) {
+            challenged = true;
+            const proof = ipcProof(home, `remote-${profile}`, challenge.data.challenge);
+            socket.write(JSON.stringify({ t: 'proven', proof }) + '\n');
+            return;
+          }
+        }
         if (used) return socket.destroy();
         used = true;
         let result: RemoteAdminResponse;

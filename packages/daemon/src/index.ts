@@ -3,7 +3,10 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PROTOCOL_VERSION } from '@puddle/shared';
-import { disableCurrentDirectorySearch } from '@puddle/shared/node/platform';
+import {
+  DAEMON_ALREADY_ACTIVE_EXIT,
+  disableCurrentDirectorySearch,
+} from '@puddle/shared/node/platform';
 import { startDaemon } from './daemon.js';
 
 // Windows: a bare program name never resolves in a child's working directory
@@ -49,6 +52,18 @@ const daemon = await startDaemon({
     console.log('shutdown requested over host control — sessions become interrupted');
     process.exit(0);
   },
+}).catch((err: unknown) => {
+  // Windows: another daemon serves this home. The supervisor reads this
+  // status as "never compete" rather than as a crash to restart.
+  if (
+    process.platform === 'win32' &&
+    err instanceof Error &&
+    err.message.includes('already active')
+  ) {
+    console.error(`${err.message}: another puddled serves this home`);
+    process.exit(DAEMON_ALREADY_ACTIVE_EXIT);
+  }
+  throw err;
 });
 console.log(`puddled ${version} listening on http://127.0.0.1:${daemon.port}`);
 

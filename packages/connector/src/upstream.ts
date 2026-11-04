@@ -8,7 +8,7 @@ import {
   type PushPreference,
 } from '@puddle/shared';
 import { checkIpcEndpoint, ipcPath } from '@puddle/shared/node';
-import { HostControlClient } from '@puddle/shared/node/host-control';
+import { HostControlClient, homeDaemonProof } from '@puddle/shared/node/host-control';
 import type { EncryptedChannel } from '@puddle/remote-transport';
 import { permittedRequest, permittedTerminal } from './policy.js';
 import { ImageUploads, ImageUploadError } from './image-uploads.js';
@@ -42,6 +42,8 @@ export class RemoteUpstream {
       false,
       undefined,
       profile,
+      // Windows: a squatter on the host pipe must not receive remote traffic.
+      process.platform === 'win32' ? homeDaemonProof(home) : undefined,
     );
     this.authority.onChange(() => {
       if (this.authority.state !== 'ready') close();

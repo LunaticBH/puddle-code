@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { profileId } from '../common.js';
 import { connectorSetupSchema } from '../../remote/service.js';
+import { ipcChallengeSchema } from './connection-auth.js';
 import {
   remoteAdminRequestSchema,
   remoteDeviceSchema,
@@ -16,6 +17,21 @@ export const connectorLocalRequestSchema = z.union([
   z.object({ t: z.literal('delete_registration') }).strict(),
 ]);
 export type ConnectorLocalRequest = z.infer<typeof connectorLocalRequestSchema>;
+
+/**
+ * Windows only (protocol 25.7): the optional first line on a connector pipe
+ * (`remote-<profile>` and the manager's `remote`), answered `proven` with
+ * `ipcProof(home, <scope>, challenge)` before the one request it serves.
+ * A pipe's name protects nothing on Windows, so the daemon's notifications
+ * and the CLI's administrative requests go only to a server that proves it
+ * can read the home. POSIX clients never send it.
+ */
+export const connectorChallengeSchema = z
+  .object({ t: z.literal('challenge'), challenge: ipcChallengeSchema })
+  .strict();
+export const connectorProvenSchema = z
+  .object({ t: z.literal('proven'), proof: z.string().regex(/^[a-f0-9]{64}$/) })
+  .strict();
 
 /** Trusted local/SSH cockpit controls. Never admitted by the encrypted remote policy. */
 export const cockpitRemoteRequestSchema = z.union([
@@ -40,16 +56,16 @@ export const cockpitRegistrationCheckSchema = z
 
 /**
  * Deliberately excludes routing credentials, account tokens and host private keys.
- * `unsupported` (protocol 25.7): the host's platform has no connector
- * supervision yet (Windows hosts, docs/windows.md).
+ * `task_scheduler` (protocol 25.7): a Windows host whose daemon supervisor
+ * runs from a per-user scheduled task (docs/windows.md).
  */
 export const cockpitRemoteStatusSchema = z.object({
-  availability: z.enum(['ready', 'not_installed', 'upgrade_required', 'unsupported']),
+  availability: z.enum(['ready', 'not_installed', 'upgrade_required']),
   configured: z.boolean(),
   enabled: z.boolean(),
   connected: z.boolean(),
   canDeleteRegistration: z.boolean().optional(),
-  supervisor: z.enum(['systemd', 'launchd']).nullable(),
+  supervisor: z.enum(['systemd', 'launchd', 'task_scheduler']).nullable(),
   host: remoteIdSchema.optional(),
   peer: remotePeerSchema.optional(),
   service: remoteOriginSchema.optional(),

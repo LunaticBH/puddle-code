@@ -1,11 +1,11 @@
-import { checkIpcProof, ipcChallenge } from '@puddle/shared/node';
-import { HostControlClient, type ServerProof } from '@puddle/shared/node/host-control';
+import { HostControlClient, homeDaemonProof } from '@puddle/shared/node/host-control';
 import { clientHome } from '../paths.js';
 import { isLocalWindows } from '../transport/local.js';
 import type { Transport } from '../transport/transport.js';
 import { CliError } from '../types.js';
 import { openControlChannel } from './control-channel.js';
 export type { AuthorityState, ConnectionAuthority } from '@puddle/shared/node/host-control';
+export { homeDaemonProof } from '@puddle/shared/node/host-control';
 
 /** The local/SSH shell is itself the participating client. */
 export class HostConnection extends HostControlClient {
@@ -18,14 +18,6 @@ export class HostConnection extends HostControlClient {
       isLocalWindows(transport) ? homeDaemonProof(clientHome()) : undefined,
     );
   }
-}
-
-/** A Windows pipe's server must show that it can read the home before it is believed. */
-export function homeDaemonProof(home: string): ServerProof {
-  return {
-    challenge: ipcChallenge,
-    verify: (challenge, proof) => checkIpcProof(home, 'host', challenge, proof),
-  };
 }
 
 export async function acquireAuthority(transport: Transport): Promise<HostConnection> {

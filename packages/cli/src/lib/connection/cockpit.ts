@@ -141,12 +141,14 @@ export async function ensureDaemon(
  * Windows never competes with a daemon that holds the home's control pipe:
  * one that is starting, or too busy to answer, is waited for rather than
  * replaced (an ambiguous probe is not an absent daemon). Otherwise install
- * or start it, leaving alone one that another launcher starts meanwhile.
+ * or start it, leaving alone one that another launcher, or the home's
+ * supervisor, starts meanwhile.
  *
- * With nothing running (after every reboot: there is no logon autostart),
- * the installed `bin\current` is started, as a POSIX supervisor restarts it:
- * version changes are the handshake's and `puddle upgrade`'s, never a side
- * effect of which launcher happens to start first. Only when that tree
+ * With nothing running (the logon task did not run, or the daemon was
+ * stopped), the installed `bin\current` is started through the home's
+ * supervisor (its scheduled task, else WMI), as a POSIX supervisor restarts
+ * it: version changes are the handshake's and `puddle upgrade`'s, never a
+ * side effect of which launcher happens to start first. Only when that tree
  * cannot run is this launcher's own release installed; one whose protocol
  * is incompatible is handed back to the handshake through `retry`.
  */

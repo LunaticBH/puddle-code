@@ -22,7 +22,18 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import { initialisePrivateHome, ipcPath, listenPrivate, rotateIpcNonce } from '@puddle/shared/node';
-import { isPidAlive, renameWithRetry, system32Path } from '@puddle/shared/node/platform';
+import {
+  isPidAlive,
+  registerSupervisorTask,
+  renameWithRetry,
+  shipsSupervisor,
+  startWindowsSupervisor,
+  supervisorRequest,
+  system32Path,
+  unregisterWindowsTask,
+  supervisorTaskName,
+  type StartSupervisorOptions,
+} from '@puddle/shared/node/platform';
 import { readCurrentVersion } from './current-link.js';
 import { parseSums } from './desktop-update.js';
 import { releaseArchiveName, releaseAssetUrl } from './releases.js';
@@ -31,6 +42,7 @@ import {
   homeDaemonPids,
   startWindowsDaemon,
   stopWindowsDaemon,
+  stopWindowsSupervisor,
   windowsRuntime,
 } from './windows-daemon.js';
 import { clientHome } from '../paths.js';
@@ -71,7 +83,15 @@ export interface WindowsInstallOptions {
   replaceRunning?: boolean;
   logger?: Logger;
   fetchFn?: typeof fetch;
+  /** Seams for tests: no test registers a real scheduled task. */
+  supervision?: WindowsSupervisionSeams;
 }
+
+/** Task Scheduler and WMI through an injected PowerShell, and the detached fallback. */
+export type WindowsSupervisionSeams = Pick<
+  StartSupervisorOptions,
+  'powershell' | 'spawnDetached' | 'waitMs'
+>;
 
 /** The version a Windows release archive's file name carries. */
 export function versionFromArchiveName(file: string): string | undefined {
@@ -107,14 +127,20 @@ export async function installWindowsDaemon(opts: WindowsInstallOptions = {}): Pr
   let lock = await acquireInstallLock(home, logger);
   try {
     const runtime = windowsRuntime(home, version);
-    if (existsSync(runtime.dir) && (await smokeTest(runtime, version, home))) {
+    // Development builds share a version: a local archive replaces a tree of
+    // its version that was built before the supervisor.
+    const outdated =
+      local !== undefined && existsSync(runtime.dir) && !shipsSupervisor(runtime.dir);
+    if (existsSync(runtime.dir) && !outdated && (await smokeTest(runtime, version, home))) {
       logger.info(`version ${version} already installed`);
     } else {
       const archive = local ?? (await download(home, version, opts.fetchFn ?? fetch, logger));
       if (local !== undefined) await verifyLocalArchive(local, logger);
       if (existsSync(runtime.dir)) {
         // A broken tree may still be the running daemon's: its files are locked.
-        logger.info(`existing version ${version} failed validation — reinstalling`);
+        logger.info(
+          `existing version ${version} ${outdated ? 'predates the Windows supervisor' : 'failed validation'} — reinstalling`,
+        );
         await stopWindowsDaemon(home, { logger });
         rmSync(runtime.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
       }
@@ -130,41 +156,54 @@ export async function installWindowsDaemon(opts: WindowsInstallOptions = {}): Pr
       }
     }
     let pipe = await controlPipeState(home);
-    if (pipe === 'foreign') {
+    let answer = await supervisorRequest(home, 'status');
+    let supervisor = answer.kind;
+    if (pipe === 'foreign' || supervisor === 'foreign') {
       // Another account serves a name an earlier run used. Renamed under the
       // lock, the home's pipes leave it behind; the lock moves with them, and
       // its new name, keyed by the private ipc-key, says nothing of the
-      // daemon's.
-      logger.warn('a process that is not this home’s daemon holds its control pipe — renaming it');
+      // daemon's. A supervisor of this home would be left on the old names.
+      logger.warn(
+        pipe === 'foreign'
+          ? 'a process that is not this home’s daemon holds its control pipe — renaming it'
+          : 'a process that is not this home’s supervisor holds its pipe — renaming it',
+      );
+      if (supervisor === 'answered') await stopWindowsSupervisor(home, { logger });
       rotateIpcNonce(home);
       lock = await relock(home, lock, logger);
       pipe = await controlPipeState(home);
+      answer = await supervisorRequest(home, 'status');
+      supervisor = answer.kind;
     }
     const running = pipe === 'daemon' || pipe === 'unknown';
+    // A supervisor between restarts, or starting its daemon, counts as running
+    // it; one that is exiting (it gave up, or was asked to stop) runs none, and
+    // is waited out by the stop below rather than left to answer the next start.
+    const exiting = answer.kind === 'answered' && answer.state.stopping;
+    const supervising = (supervisor === 'answered' && !exiting) || supervisor === 'unavailable';
     const pidFile = existsSync(join(home, 'puddled.pid'));
     // A launcher that only needs a daemon never stops one that another
     // launcher started, even one that has not served its pipe yet.
     const starting =
-      opts.replaceRunning === false && !running && pidFile && (await daemonStarting(home));
+      opts.replaceRunning === false &&
+      !running &&
+      (supervising || (pidFile && (await daemonStarting(home))));
     const leave = opts.replaceRunning === false && (running || starting);
     if (leave) {
       logger.info(`puddled was ${running ? 'started' : 'starting'} meanwhile — leaving it running`);
-    } else if (running || pidFile) {
+    } else if (running || pidFile || supervising || exiting) {
       await stopWindowsDaemon(home, { logger });
     }
     // The launcher that started a running daemon pointed `current` at it.
     if (!leave || readCurrentVersion(home, 'win32') === undefined) pointCurrent(home, version);
     writeFileSync(join(home, 'bin', 'puddled.cmd'), windowsLauncher());
     pruneCache(join(home, 'cache'));
-    writeFileSync(join(home, 'supervisor'), 'detached\n');
+    const kind = await supervise(home, leave, logger, opts.supervision ?? {});
     if (leave) {
       logger.info(`puddled ${version} is unpacked; the running daemon was left in place`);
       return;
     }
-    const pid = await startWindowsDaemon(home, version);
-    // Until it serves its pipe, the next lock holder's probe could not see it.
-    await servedOrGone(home, pid);
-    logger.info(`installed puddled ${version} under ${home} (supervisor: detached)`);
+    logger.info(`installed puddled ${version} under ${home} (supervisor: ${kind})`);
   } finally {
     await new Promise<void>((resolve) => lock.close(() => resolve()));
   }
@@ -191,10 +230,83 @@ async function daemonStarting(home: string): Promise<boolean> {
   }
 }
 
-/** Until the daemon just started holds its control pipe or exits, within the start allowance. */
-async function servedOrGone(home: string, pid: number): Promise<void> {
+/**
+ * Register the home's logon task and start its supervisor (none on the
+ * `leave` path, whose daemon already runs), recording the supervisor marker:
+ * `task` when the task is registered, else `detached`, under which the next
+ * launch starts the supervisor again and remote access cannot be enabled.
+ * A release from before the supervisor runs its daemon detached, as it did.
+ */
+async function supervise(
+  home: string,
+  leave: boolean,
+  logger: Logger,
+  seams: WindowsSupervisionSeams,
+): Promise<'task' | 'detached'> {
+  const marker = join(home, 'supervisor');
+  const current = readCurrentVersion(home, 'win32');
+  if (current === undefined || !shipsSupervisor(windowsRuntime(home, current).dir)) {
+    if (readMarker(marker) === 'task') {
+      // Its action would run a supervisor this release does not ship.
+      await unregisterWindowsTask(supervisorTaskName(home), seams).catch(() => false);
+    }
+    writeFileSync(marker, 'detached\n');
+    if (leave || current === undefined) return 'detached';
+    const pid = await startWindowsDaemon(home, current);
+    // Until it serves its pipe, the next lock holder's probe could not see it.
+    await servedOrGone(home, () => isPidAlive(pid, 'win32'));
+    return 'detached';
+  }
+  // Idempotent: the action names the `current` junction, so an upgrade only refreshes it.
+  const registration = await registerSupervisorTask(home, { ...seams, start: !leave });
+  if (!registration.registered) {
+    logger.warn(
+      `could not register the scheduled task that starts puddled at logon ` +
+        `(${registration.error ?? 'Task Scheduler refused it'}); launches start it instead, ` +
+        'and remote access cannot be enabled on this machine',
+    );
+  }
+  const kind = registration.registered ? 'task' : 'detached';
+  writeFileSync(marker, `${kind}\n`);
+  if (leave) return kind;
+  const started = await startWindowsSupervisor(home, {
+    ...seams,
+    task: registration.registered,
+    // Its user disabled the task: no logon start, and none from here either.
+    ...(registration.disabled
+      ? { started: { ran: false, state: 'disabled' as const } }
+      : registration.ran !== undefined
+        ? {
+            started: {
+              ran: registration.ran,
+              state: registration.state ?? 'unknown',
+              ...(registration.error !== undefined ? { error: registration.error } : {}),
+            },
+          }
+        : {}),
+    logger,
+  });
+  // One that started meanwhile may still run the connector of the release before.
+  if (started === 'running') await supervisorRequest(home, 'restart_connector');
+  await servedOrGone(home, async () => (await supervisorRequest(home, 'status')).kind !== 'absent');
+  return kind;
+}
+
+function readMarker(path: string): string | undefined {
+  try {
+    return readFileSync(path, 'utf8').trim();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Until the daemon just started holds its control pipe, or what started it
+ * (the daemon itself, or its supervisor) is gone, within the start allowance.
+ */
+async function servedOrGone(home: string, alive: () => boolean | Promise<boolean>): Promise<void> {
   const deadline = Date.now() + SERVE_WAIT_MS;
-  while (Date.now() < deadline && isPidAlive(pid, 'win32')) {
+  while (Date.now() < deadline && (await alive())) {
     if ((await controlPipeState(home, 1000)) !== 'absent') return;
     await sleep(100);
   }

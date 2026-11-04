@@ -23,10 +23,14 @@
  *
  * On Windows the same tree ships as puddled-v<v>-win32-<arch>.zip (docs/windows.md):
  * bin\node.exe, node-pty's win32 prebuilds (conpty and winpty, no .pdb), and
- * puddled.cmd / puddle-connector.cmd for humans. The CLI and desktop start
- * bin\node.exe on daemon\puddled.mjs directly, never through cmd.exe.
+ * puddled.cmd / puddle-connector.cmd for humans, and daemon\supervisor.mjs:
+ * the resident supervisor that the home's scheduled task (or a launcher)
+ * starts, which runs bin\node.exe on daemon\puddled.mjs (and the connector)
+ * directly, never through cmd.exe. The task and WMI start it through
+ * bin\puddle-hidden.exe, a windowless launcher compiled here from
+ * packages/daemon/src/supervision/puddle-hidden.cs.
  */
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
@@ -130,6 +134,61 @@ async function bundleDaemon() {
   log(
     `bundled daemon (${(statSync(join(stage, 'daemon', 'puddled.mjs')).size / 1e6).toFixed(1)} MB)`,
   );
+}
+
+/*
+ * 1b — Windows only: the resident supervisor the home's scheduled task
+ * starts (docs/windows.md, decision 6). POSIX trees stay as they were.
+ */
+async function bundleWindowsSupervisor() {
+  await build({
+    entryPoints: [join(repoRoot, 'packages/daemon/src/windows-supervisor.ts')],
+    outfile: join(stage, 'daemon', 'supervisor.mjs'),
+    bundle: true,
+    platform: 'node',
+    target: 'node22',
+    format: 'esm',
+    alias: {
+      '@puddle/shared/node/platform': join(repoRoot, 'packages/shared/src/node/platform.ts'),
+      '@puddle/shared/node': join(repoRoot, 'packages/shared/src/node/security.ts'),
+      '@puddle/shared': join(repoRoot, 'packages/shared/src/index.ts'),
+    },
+    define: { __PUDDLED_VERSION__: JSON.stringify(version) },
+    sourcemap: false,
+    minify: false,
+    logLevel: 'warning',
+  });
+}
+
+/*
+ * 1c — Windows only: bin\puddle-hidden.exe, through which the home's
+ * scheduled task and WMI start the supervisor without a console window
+ * (docs/windows.md, decision 6). Built with the .NET Framework 4 C# compiler
+ * that every supported Windows ships, as the desktop's ssh-askpass.exe is.
+ */
+function compileWindowlessLauncher() {
+  const windir = process.env.SystemRoot ?? process.env.WINDIR ?? 'C:\\Windows';
+  const compiler = ['Framework64', 'Framework']
+    .map((framework) => join(windir, 'Microsoft.NET', framework, 'v4.0.30319', 'csc.exe'))
+    .find((candidate) => existsSync(candidate));
+  if (compiler === undefined) fail(`no .NET Framework C# compiler under ${windir}\\Microsoft.NET`);
+  mkdirSync(join(stage, 'bin'), { recursive: true });
+  try {
+    execFileSync(
+      compiler,
+      [
+        '/nologo',
+        '/target:winexe',
+        '/optimize+',
+        `/out:${join(stage, 'bin', 'puddle-hidden.exe')}`,
+        join(repoRoot, 'packages/daemon/src/supervision/puddle-hidden.cs'),
+      ],
+      { stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8' },
+    );
+  } catch (err) {
+    fail(`could not compile bin\\puddle-hidden.exe:\n${err.stdout ?? ''}${err.stderr ?? ''}`);
+  }
+  log('compiled bin\\puddle-hidden.exe');
 }
 
 /* 2 — copy the two native packages, pruned to their runtime shape. */
@@ -324,6 +383,21 @@ function smokeTestWindows() {
   }
   const connector = run('connector.mjs');
   if (!connector.startsWith('puddle-connector ')) fail('connector smoke test failed');
+  const supervisor = run('supervisor.mjs');
+  if (!supervisor.startsWith(`puddle-supervisor ${version}`)) {
+    fail(`supervisor smoke test failed: unexpected --version output ${JSON.stringify(supervisor)}`);
+  }
+  // The launcher's program has no console to print to: its status must come back.
+  const launched = spawnSync(
+    join(stage, 'bin', 'puddle-hidden.exe'),
+    [node, '-e', 'process.exit(7)'],
+    { windowsHide: true, timeout: 60_000 },
+  );
+  if (launched.status !== 7) {
+    fail(
+      `puddle-hidden.exe smoke test failed: status ${launched.status} (${launched.error ?? ''})`,
+    );
+  }
   execFileSync(
     node,
     [
@@ -337,7 +411,10 @@ function smokeTestWindows() {
     ],
     { cwd: join(stage, 'daemon'), stdio: 'inherit' },
   );
-  log(`smoke test passed: ${out.trim()}; ${connector.trim()}; conpty and sqlite load`);
+  log(
+    `smoke test passed: ${out.trim()}; ${connector.trim()}; ${supervisor.trim()}; ` +
+      'puddle-hidden.exe relays its status; conpty and sqlite load',
+  );
 }
 
 /* 6 — tar + checksum. */
@@ -378,6 +455,7 @@ function packWindows() {
 rmSync(stage, { recursive: true, force: true });
 mkdirSync(stage, { recursive: true });
 await bundleDaemon();
+if (windows) await bundleWindowsSupervisor();
 await build({
   entryPoints: ['runner', 'runtime-api', 'zod'].map((name) =>
     join(repoRoot, `packages/daemon/src/puddlang/${name}.ts`),
@@ -426,6 +504,7 @@ await build({
 });
 copyNativePackages();
 await stageNodeRuntime(repoRoot, stage, target, log);
+if (windows) compileWindowlessLauncher();
 writeMetadata();
 smokeTest();
 await smokePuddlang(stage);

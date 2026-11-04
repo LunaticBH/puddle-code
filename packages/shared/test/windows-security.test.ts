@@ -56,7 +56,8 @@ describe.skipIf(process.platform !== 'win32')('Windows Puddle home', () => {
     expect(icacls(home)).toBe(before);
   });
 
-  describe('outside the profile', () => {
+  // Each case runs Get-Acl and icacls several times, which a loaded machine can slow past 5 s.
+  describe('outside the profile', { timeout: 60_000 }, () => {
     // tmpdir() is inside the profile, so another folder plays the profile here.
     const savedProfile = process.env.USERPROFILE;
     beforeEach(() => {

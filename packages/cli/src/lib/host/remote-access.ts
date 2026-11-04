@@ -7,27 +7,59 @@ import {
   type CockpitRemoteStatus,
   type RemoteAdminResponse,
 } from '@puddle/shared';
-import { hostPaths } from '../paths.js';
+import { readCurrentVersion } from '../installation/current-link.js';
+import {
+  runWindowsConnector,
+  windowsConnectorInstalled,
+  type WindowsConnectorRunner,
+} from '../installation/windows-connector.js';
+import { clientHome, hostPaths } from '../paths.js';
 import { isLocalWindows } from '../transport/local.js';
 import type { Transport } from '../transport/transport.js';
 
 const binary = `${hostPaths.current}/bin/node ${hostPaths.current}/daemon/connector.mjs`;
 
-/** Windows hosts have no connector supervision in v1 (docs/windows.md). */
-export const WINDOWS_REMOTE_ACCESS_UNSUPPORTED =
-  'Remote access is not supported on Windows hosts yet.';
+interface Capabilities {
+  availability: CockpitRemoteStatus['availability'];
+  canDeleteRegistration: boolean;
+}
 
-/** Fixed host commands only; browser values travel exclusively through JSON stdin. */
+const capabilitiesOf = (version: string): Capabilities => ({
+  availability: version.includes('cockpit controls 2') ? 'ready' : 'upgrade_required',
+  canDeleteRegistration: version.includes('delete registration 1'),
+});
+
+/**
+ * Fixed host commands only; browser values travel exclusively through JSON
+ * stdin. On this Windows machine the installed node.exe runs the connector
+ * directly (docs/windows.md): there is no shell to give a command line to.
+ */
 export class RemoteAccessControl {
-  constructor(private readonly transport: Transport) {}
+  /** Windows: `--version` answers once per installed release, not on every status poll. */
+  private windowsCapabilities: { version: string; value: Capabilities } | undefined;
 
-  private async capabilities(): Promise<{
-    availability: CockpitRemoteStatus['availability'];
-    canDeleteRegistration: boolean;
-  }> {
+  constructor(
+    private readonly transport: Transport,
+    private readonly windows: { run?: WindowsConnectorRunner; home?: () => string } = {},
+  ) {}
+
+  private home(): string {
+    return this.windows.home?.() ?? clientHome();
+  }
+
+  /** One connector mode (`flag`) with JSON on stdin. */
+  private run(
+    flag: string,
+    opts: { stdin?: string; timeoutMs: number },
+  ): Promise<{ code: number; stdout: string }> {
     if (isLocalWindows(this.transport)) {
-      return { availability: 'unsupported', canDeleteRegistration: false };
+      return (this.windows.run ?? runWindowsConnector)(this.home(), [flag], opts);
     }
+    return this.transport.exec(`${binary} ${flag}`, opts);
+  }
+
+  private async capabilities(): Promise<Capabilities> {
+    if (isLocalWindows(this.transport)) return this.localWindowsCapabilities();
     const result = await this.transport.exec(
       `if test -f ${hostPaths.current}/daemon/connector.mjs; then ${binary} --version; else exit 44; fi`,
       { timeoutMs: 10_000 },
@@ -35,10 +67,24 @@ export class RemoteAccessControl {
     if (result.code === 44) return { availability: 'not_installed', canDeleteRegistration: false };
     if (result.code !== 0)
       throw new Error('Host control is unavailable. Check the host connection.');
-    return {
-      availability: result.stdout.includes('cockpit controls 2') ? 'ready' : 'upgrade_required',
-      canDeleteRegistration: result.stdout.includes('delete registration 1'),
-    };
+    return capabilitiesOf(result.stdout);
+  }
+
+  private async localWindowsCapabilities(): Promise<Capabilities> {
+    const home = this.home();
+    if (!windowsConnectorInstalled(home)) {
+      return { availability: 'not_installed', canDeleteRegistration: false };
+    }
+    const version = readCurrentVersion(home, 'win32');
+    if (version !== undefined && this.windowsCapabilities?.version === version) {
+      return this.windowsCapabilities.value;
+    }
+    const result = await this.run('--version', { timeoutMs: 10_000 });
+    if (result.code !== 0)
+      throw new Error('Host control is unavailable. Check the host connection.');
+    const value = capabilitiesOf(result.stdout);
+    this.windowsCapabilities = version === undefined ? undefined : { version, value };
+    return value;
   }
 
   async status(profile: string): Promise<CockpitRemoteStatus> {
@@ -53,7 +99,7 @@ export class RemoteAccessControl {
         supervisor: null,
         devices: [],
       };
-    const result = await this.transport.exec(`${binary} --inspect`, {
+    const result = await this.run('--inspect', {
       timeoutMs: 10_000,
       stdin: JSON.stringify({ profile }) + '\n',
     });
@@ -69,8 +115,6 @@ export class RemoteAccessControl {
     const request = cockpitRemoteRequestSchema.parse(value);
     profileId.parse(profile);
     const capabilities = await this.capabilities();
-    if (capabilities.availability === 'unsupported')
-      throw new Error(WINDOWS_REMOTE_ACCESS_UNSUPPORTED);
     if (capabilities.availability !== 'ready')
       throw new Error('Upgrade the daemon on this host to manage remote access here.');
     if (request.t === 'delete_registration' && !capabilities.canDeleteRegistration)
@@ -84,9 +128,10 @@ export class RemoteAccessControl {
         : request.t === 'reset'
           ? { profile }
           : { profile, request };
-    const result = await this.transport.exec(`${binary} ${flag}`, {
+    const result = await this.run(flag, {
       stdin: JSON.stringify(payload) + '\n',
-      timeoutMs: 30_000,
+      // A Windows enable may start the home's supervisor first.
+      timeoutMs: isLocalWindows(this.transport) && request.t === 'enable' ? 120_000 : 30_000,
     });
     // Do not reflect subprocess output: it can contain a registration code or invitation.
     if (result.code !== 0)

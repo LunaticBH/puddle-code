@@ -1,66 +1,56 @@
 import { spawn } from 'node:child_process';
-import {
-  closeSync,
-  mkdirSync,
-  openSync,
-  realpathSync,
-  renameSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
-import { connect } from 'node:net';
+import { closeSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, win32 } from 'node:path';
-import { controlResponseSchema } from '@puddle/shared';
-import { checkIpcProof, ipcChallenge, ipcPath, jsonLines } from '@puddle/shared/node';
 import {
-  deleteEnv,
-  disableCurrentDirectorySearch,
-  getEnv,
+  controlPipeState,
+  daemonEnvironment,
   isPidAlive,
   killProcessTree,
   listWindowsProcesses,
-  setEnv,
+  openRotated,
+  requestDaemonShutdown,
+  supervisorRequest,
+  type ShutdownOutcome,
   type WindowsProcess,
 } from '@puddle/shared/node/platform';
 import { sleep } from '../transport/net.js';
 import { CliError, type Logger, silentLogger } from '../types.js';
 
+export {
+  controlPipeState,
+  daemonEnvironment,
+  requestDaemonShutdown,
+  type ControlPipeState,
+  type ShutdownOutcome,
+} from '@puddle/shared/node/platform';
+
 /**
- * Windows supervision (docs/windows.md, decision 6): the `detached`
- * supervisor. There is no service manager, so the CLI or the desktop app
- * starts the versioned runtime itself — `bin\versions\<V>\bin\node.exe` on
- * `daemon\puddled.mjs`, never `process.execPath`, which may be Electron —
- * detached and windowless, with output appended to logs\puddled.*.log.
+ * Windows supervision (docs/windows.md, decision 6). The home's resident
+ * supervisor (`daemon\supervisor.mjs`, started at logon by its scheduled
+ * task, or by a launcher) runs the versioned runtime —
+ * `bin\versions\<V>\bin\node.exe` on `daemon\puddled.mjs`, never
+ * `process.execPath`, which may be Electron — and restarts it after a crash;
+ * see @puddle/shared/node/windows-supervision. A release without the
+ * supervisor still runs its daemon directly, detached and windowless
+ * (startWindowsDaemon).
  *
  * Never compete: the daemon's private control pipe is the single-instance
  * arbiter (a second daemon exits with "already active" before it opens the
- * database), and the daemon holds it until the database is closed. Stops use
+ * database), and the daemon holds it until the database is closed; the
+ * supervisor's own pipe does the same for supervisors. Stops end the
+ * supervisor first, which would otherwise start the daemon again, then use
  * the authenticated `shutdown` request (protocol 25.7) and wait for the pipe
  * to go; only a process whose command line proves it is this home's daemon
- * is ever terminated.
+ * or supervisor is ever terminated.
  */
 
-/** Rotated at spawn: nothing else trims a detached daemon's output. */
-const LOG_ROTATE_BYTES = 10 * 1024 * 1024;
 const SHUTDOWN_GRACE_MS = 15_000;
 /** How long a starting daemon may take to serve its pipe before it is terminated. */
 const STARTING_GRACE_MS = 15_000;
 const TERMINATE_GRACE_MS = 5_000;
-
-/**
- * Orchestration variables a supervisor's clean environment would not carry.
- * A daemon started from inside an agent session must not hand them to the
- * agents it spawns (CLAUDE.md); the rest are this CLI's own markers.
- */
-const INHERITED_MARKERS = [
-  'CLAUDECODE',
-  'PUDDLE_COCKPIT_CHILD',
-  'PUDDLE_REFRESH_ID',
-  'PUDDLE_INTERNAL_REFRESH',
-  'ELECTRON_RUN_AS_NODE',
-];
+/** How long a supervisor asked to stop may take to stop its daemon and connector. */
+const SUPERVISOR_GRACE_MS = 30_000;
 
 export interface WindowsRuntime {
   /** `<home>\bin\versions\<V>` */
@@ -76,29 +66,6 @@ export function windowsRuntime(home: string, version: string): WindowsRuntime {
     node: win32.join(dir, 'bin', 'node.exe'),
     entry: win32.join(dir, 'daemon', 'puddled.mjs'),
   };
-}
-
-/**
- * The environment a detached daemon starts with. An overridden PUDDLE_HOME
- * is passed on absolute: the daemon runs in the user's home directory, where
- * a relative one would name another home. The search of a child's working
- * directory for a bare program name is off from the daemon's first
- * instruction, whichever app launched it.
- */
-export function daemonEnvironment(
-  source: NodeJS.ProcessEnv = process.env,
-  home?: string,
-): NodeJS.ProcessEnv {
-  const env = { ...source };
-  for (const key of Object.keys(env)) {
-    if (/^CLAUDE_CODE_/i.test(key)) delete env[key];
-  }
-  for (const name of INHERITED_MARKERS) deleteEnv(env, name, 'win32');
-  if (home !== undefined && getEnv(env, 'PUDDLE_HOME', 'win32') !== undefined) {
-    setEnv(env, 'PUDDLE_HOME', win32.resolve(home), 'win32');
-  }
-  disableCurrentDirectorySearch(env, 'win32');
-  return env;
 }
 
 /** Start the daemon of `version`, detached and windowless; resolves with its pid. */
@@ -146,103 +113,10 @@ export async function startWindowsDaemon(
   }
 }
 
-function openRotated(file: string): number {
-  try {
-    if (statSync(file).size > LOG_ROTATE_BYTES) renameSync(file, `${file}.1`);
-  } catch {
-    // Absent, or held open by an exiting daemon: keep appending.
-  }
-  return openSync(file, 'a');
-}
-
-/**
- * What holds the home's control pipe. `daemon`: a server that proves it can
- * read the home (one still starting answers `unavailable`, with its proof).
- * `foreign`: one that answers without that proof, so it is not this home's
- * daemon, whatever it says: another account's process squatting a name that
- * an earlier run used. `unknown`: no answer, or no access to the pipe (an
- * elevated daemon as well as another account's); it is waited for, never
- * replaced (docs/windows.md, decision 6).
- */
-export type ControlPipeState = 'absent' | 'daemon' | 'foreign' | 'unknown';
-
-/** Probe with a challenged `open`; a lease the daemon grants ends with the probe's connection. */
-export function controlPipeState(home: string, timeoutMs = 3000): Promise<ControlPipeState> {
-  const challenge = ipcChallenge();
-  return new Promise((resolve) => {
-    const socket = connect(ipcPath(home, 'host'));
-    let settled = false;
-    const settle = (state: ControlPipeState) => {
-      if (settled) return;
-      settled = true;
-      socket.destroy();
-      resolve(state);
-    };
-    socket.setTimeout(timeoutMs, () => settle('unknown'));
-    socket.once('error', (err: NodeJS.ErrnoException) =>
-      settle(err.code === 'ENOENT' ? 'absent' : 'unknown'),
-    );
-    socket.once('close', () => settle('unknown'));
-    jsonLines(
-      socket,
-      (value) => {
-        const reply = controlResponseSchema.safeParse(value);
-        const proof = reply.success && 'proof' in reply.data ? reply.data.proof : undefined;
-        settle(checkIpcProof(home, 'host', challenge, proof) ? 'daemon' : 'foreign');
-      },
-      () => settle('foreign'),
-    );
-    socket.once('connect', () => socket.write(JSON.stringify({ t: 'open', challenge }) + '\n'));
-  });
-}
-
 /** Whether a daemon may hold the home's control pipe: neither nothing nor a proven impostor. */
 export async function controlPipePresent(home: string): Promise<boolean> {
   const state = await controlPipeState(home);
   return state === 'daemon' || state === 'unknown';
-}
-
-/**
- * `unsupported`: a pre-25.7 daemon (`invalid_control`). `unavailable`: one
- * still starting (`unavailable`), or one that does not answer. `foreign`: a
- * server without this home's proof (see ControlPipeState), never a daemon.
- */
-export type ShutdownOutcome = 'stopping' | 'unsupported' | 'unavailable' | 'absent' | 'foreign';
-
-/** Ask the home's daemon to stop over its private control pipe. */
-export function requestDaemonShutdown(home: string, timeoutMs = 5000): Promise<ShutdownOutcome> {
-  const challenge = ipcChallenge();
-  return new Promise((resolve) => {
-    const socket = connect(ipcPath(home, 'host'));
-    let settled = false;
-    const settle = (outcome: ShutdownOutcome) => {
-      if (settled) return;
-      settled = true;
-      socket.destroy();
-      resolve(outcome);
-    };
-    socket.setTimeout(timeoutMs, () => settle('unavailable'));
-    socket.once('error', (err: NodeJS.ErrnoException) =>
-      settle(err.code === 'ENOENT' ? 'absent' : 'unavailable'),
-    );
-    socket.once('close', () => settle('unavailable'));
-    jsonLines(
-      socket,
-      (value) => {
-        const message = controlResponseSchema.safeParse(value);
-        if (!message.success) return settle('foreign');
-        const reply = message.data;
-        const proof = 'proof' in reply ? reply.proof : undefined;
-        if (!checkIpcProof(home, 'host', challenge, proof)) return settle('foreign');
-        if (reply.t === 'shutting_down') return settle('stopping');
-        settle(
-          reply.t === 'error' && reply.code === 'invalid_control' ? 'unsupported' : 'unavailable',
-        );
-      },
-      () => settle('foreign'),
-    );
-    socket.once('connect', () => socket.write(JSON.stringify({ t: 'shutdown', challenge }) + '\n'));
-  });
 }
 
 /**
@@ -266,12 +140,32 @@ function canonicalHome(home: string): string {
   }
 }
 
+/**
+ * Whether `process` is a supervisor of this home: node.exe running
+ * `<home>\bin\current\daemon\supervisor.mjs` (as the task and launchers
+ * start it) or a versioned one. Never a daemon or connector of the home.
+ */
+export function isHomeSupervisor(candidate: WindowsProcess, home: string): boolean {
+  if (candidate.commandLine === null || candidate.command !== 'node') return false;
+  const commandLine = candidate.commandLine.replace(/\//g, '\\').toLowerCase();
+  const bin = win32.join(canonicalHome(home), 'bin').toLowerCase() + '\\';
+  return commandLine.includes(bin) && /\\daemon\\supervisor\.mjs\b/.test(commandLine);
+}
+
 /** Pids of this home's running daemons, by command line. */
 export async function homeDaemonPids(
   home: string,
   list: () => Promise<readonly WindowsProcess[]> = listWindowsProcesses,
 ): Promise<number[]> {
   return (await list()).filter((p) => isHomeDaemon(p, home)).map((p) => p.pid);
+}
+
+/** Pids of this home's running supervisors, by command line. */
+export async function homeSupervisorPids(
+  home: string,
+  list: () => Promise<readonly WindowsProcess[]> = listWindowsProcesses,
+): Promise<number[]> {
+  return (await list()).filter((p) => isHomeSupervisor(p, home)).map((p) => p.pid);
 }
 
 export interface StopOptions {
@@ -281,18 +175,67 @@ export interface StopOptions {
   graceMs?: number;
   startingGraceMs?: number;
   terminateGraceMs?: number;
+  supervisorGraceMs?: number;
 }
 
 /**
- * Stop whatever daemon serves this home: graceful shutdown first — waiting
- * for one that is still starting to be able to answer — then termination
- * of identity-checked processes only. Resolves once the control pipe is gone
- * (the daemon holds it until its database is closed) and every matching
- * process has exited; throws if one cannot be stopped.
+ * End the home's supervisor, which would otherwise restart the daemon a
+ * stop ends: asked over its pipe, it stops its daemon and connector itself.
+ * One that does not stop in time, or cannot be asked, is terminated with its
+ * children only when its command line identifies it (isHomeSupervisor): the
+ * pid its pipe reports is waited for, never terminated on that word alone.
+ */
+export async function stopWindowsSupervisor(home: string, opts: StopOptions = {}): Promise<void> {
+  const logger = opts.logger ?? silentLogger;
+  const list = opts.list ?? listWindowsProcesses;
+  const answer = await supervisorRequest(home, 'shutdown');
+  let pids = await homeSupervisorPids(home, list).catch(() => [] as number[]);
+  const reported = answer.kind === 'answered' ? answer.state.pid : undefined;
+  if (reported !== undefined) {
+    logger.info('stopping the Puddle supervisor on this machine');
+    const asked = [...new Set([reported, ...pids])];
+    if (await supervisorsGone(home, asked, opts.supervisorGraceMs ?? SUPERVISOR_GRACE_MS)) return;
+    pids = await homeSupervisorPids(home, list).catch(() => pids);
+  } else if (pids.length === 0) {
+    return;
+  }
+  for (const pid of pids) {
+    logger.warn(`the Puddle supervisor (pid ${pid}) did not stop — terminating it`);
+    await killProcessTree(pid, { platform: 'win32' });
+  }
+  if (await supervisorsGone(home, pids, opts.terminateGraceMs ?? TERMINATE_GRACE_MS)) return;
+  // Only an answering supervisor gets here without identified pids.
+  const named = pids.length > 0 ? pids.join(', ') : String(reported);
+  throw new CliError(
+    'daemon_unreachable',
+    'could not stop the Puddle supervisor on this machine',
+    `stop it in Task Manager (pid ${named}), then retry`,
+  );
+}
+
+async function supervisorsGone(home: string, pids: number[], timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const alive = pids.some((pid) => isPidAlive(pid, 'win32'));
+    const served = (await supervisorRequest(home, 'status', 1000)).kind;
+    if (!alive && served !== 'answered' && served !== 'unavailable') return true;
+    if (Date.now() >= deadline) return false;
+    await sleep(100);
+  }
+}
+
+/**
+ * Stop whatever daemon serves this home: its supervisor first, then
+ * graceful shutdown — waiting for a daemon that is still starting to be able
+ * to answer — then termination of identity-checked processes only. Resolves
+ * once the control pipe is gone (the daemon holds it until its database is
+ * closed) and every matching process has exited; throws if one cannot be
+ * stopped.
  */
 export async function stopWindowsDaemon(home: string, opts: StopOptions = {}): Promise<void> {
   const logger = opts.logger ?? silentLogger;
   const list = opts.list ?? listWindowsProcesses;
+  await stopWindowsSupervisor(home, opts);
   const starting = Date.now() + (opts.startingGraceMs ?? STARTING_GRACE_MS);
   let outcome: ShutdownOutcome;
   // A daemon that is stopping, starting, or wedged before it served its pipe

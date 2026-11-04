@@ -1,16 +1,46 @@
 import { existsSync } from 'node:fs';
+import type { Socket } from 'node:net';
 import { join } from 'node:path';
-import { connectorConfigSchema } from '@puddle/shared';
-import { ipcPath, listenPrivate, readPrivateJson } from '@puddle/shared/node';
+import { connectorChallengeSchema, connectorConfigSchema } from '@puddle/shared';
+import { ipcPath, ipcProof, jsonLines, listenPrivate, readPrivateJson } from '@puddle/shared/node';
 import { startConnector } from './runtime.js';
 import { profileDirectory, registeredProfiles } from './profile-state.js';
 import { deleteRegistration } from './delete-registration.js';
 import { startRegistrationCleanup } from './registration-cleanup.js';
 
+/**
+ * Windows (25.7): the lock answers one challenge with its proof, so the
+ * supervisor can tell this home's connector from a squatter on the name.
+ * It serves nothing else.
+ */
+function proveLock(home: string, socket: Socket): void {
+  socket.setTimeout(2000, () => socket.destroy());
+  socket.on('error', () => socket.destroy());
+  let used = false;
+  const stop = jsonLines(
+    socket,
+    (value) => {
+      if (used) return socket.destroy();
+      used = true;
+      const request = connectorChallengeSchema.safeParse(value);
+      if (!request.success) return socket.destroy();
+      const proof = ipcProof(home, 'remote', request.data.challenge);
+      socket.end(JSON.stringify({ t: 'proven', proof }) + '\n');
+    },
+    () => socket.destroy(),
+  );
+  socket.on('close', stop);
+}
+
 /** One supervised process, independent runtimes and private stores for each profile. */
 export async function startConnectorManager(home: string) {
   // Also excludes the old single-registration process before migration touches its files.
-  const lock = await listenPrivate(ipcPath(home, 'remote'), (socket) => socket.destroy());
+  const lock = await listenPrivate(
+    ipcPath(home, 'remote'),
+    process.platform === 'win32'
+      ? (socket) => proveLock(home, socket)
+      : (socket) => socket.destroy(),
+  );
   const live = new Map<
     string,
     { fingerprint: string; runtime: Awaited<ReturnType<typeof startConnector>> }

@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { win32 } from 'node:path';
 import { system32Path } from './environment.js';
 
@@ -223,7 +223,30 @@ export function currentWindowsUserSid(): string {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'ignore'],
   });
-  // `"host\user","S-1-5-21-…"`
+  return whoamiSid(output);
+}
+
+/** currentWindowsUserSid without blocking the event loop (the desktop's main process). */
+export function readCurrentWindowsUserSid(): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      system32Path('whoami.exe'),
+      ['/user', '/fo', 'csv', '/nh'],
+      { windowsHide: true, timeout: 10_000, encoding: 'utf8' },
+      (error, stdout) => {
+        if (error) return reject(error);
+        try {
+          resolve(whoamiSid(stdout));
+        } catch (err) {
+          reject(err as Error);
+        }
+      },
+    );
+  });
+}
+
+/** `"host\user","S-1-5-21-…"` */
+function whoamiSid(output: string): string {
   const sid = /"(S-1-\d+(?:-\d+)+)"\s*$/.exec(output.trim())?.[1];
   if (!sid) throw new Error('whoami did not report a user SID');
   return sid;
