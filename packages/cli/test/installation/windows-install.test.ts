@@ -367,6 +367,29 @@ describe.runIf(
     expect((await supervisorRequest(at, 'status')).kind).toBe('absent');
   }, 180_000);
 
+  it('supervises a home whose path holds %, which its logon task cannot start', async () => {
+    const at = freshHome(mkdtempSync(join(root, 'puddle-100%-')));
+    const scheduler = taskScheduler(true);
+    const { lines, ...log } = logger();
+    await installWindowsDaemon({
+      home: at,
+      tarball: zip,
+      logger: log,
+      supervision: scheduler.supervision,
+    });
+    expect(readFileSync(join(at, 'supervisor'), 'utf8')).toBe('detached\n');
+    expect(lines.join('\n')).toMatch(/Task Scheduler cannot start Puddle for a home whose path/);
+    // Task Scheduler would expand `%…%`: nothing is registered or started through it.
+    expect(scheduler.calls.filter((env) => 'PUDDLE_TASK_NAME' in env)).toEqual([]);
+    (await waitForStartedDaemon(new LocalTransport(), 60_000)).authority.close();
+    expect(await supervisorRequest(at, 'status')).toMatchObject({
+      kind: 'answered',
+      state: { daemon: pid(at) },
+    });
+    await stopWindowsDaemon(at);
+    expect((await supervisorRequest(at, 'status')).kind).toBe('absent');
+  }, 180_000);
+
   it('runs the connector while remote access is supervised, and stops it cleanly', async () => {
     const at = freshHome();
     mkdirSync(join(at, 'remote'), { recursive: true });

@@ -99,14 +99,17 @@ export function supervisorTaskName(home: string): string {
 }
 
 /**
- * Why a home cannot be supervised, if it cannot: Task Scheduler expands
- * `%NAME%` in the command it starts, and a quote or control character would
- * end or split an argument.
+ * Why the home's scheduled task cannot start its supervisor, if it cannot:
+ * Task Scheduler expands `%NAME%` in the command it starts, and a quote or
+ * control character would end or split an argument (Windows paths hold
+ * neither, but `%` is legal). WMI and the detached fallback hand the
+ * command line on unexpanded, so such a home is still supervised; only its
+ * logon start, and so remote access, are unavailable.
  */
-export function unsupervisableHome(home: string): string | undefined {
+export function unschedulableHome(home: string): string | undefined {
   // eslint-disable-next-line no-control-regex -- Refuse control characters at the trust boundary.
   if (/[%"\u0000-\u001f\u007f]/.test(home)) {
-    return `a Puddle home whose path holds %, " or a control character cannot be supervised: ${home}`;
+    return `Task Scheduler cannot start Puddle for a home whose path holds %, " or a control character: ${home}`;
   }
   return undefined;
 }
@@ -181,7 +184,7 @@ export async function registerSupervisorTask(
   home: string,
   opts: WindowsTaskOptions & { start?: boolean; startWaitMs?: number; userSid?: string } = {},
 ): Promise<WindowsTaskRegistration> {
-  const problem = unsupervisableHome(canonicalWindowsHome(home));
+  const problem = unschedulableHome(canonicalWindowsHome(home));
   if (problem !== undefined) return { registered: false, disabled: false, error: problem };
   let sid: string;
   try {
@@ -233,7 +236,8 @@ export async function waitForSupervisor(home: string, waitMs: number): Promise<b
  * Start the home's supervisor unless one runs: through its task, then WMI,
  * then as a detached child. A late start of an earlier way only meets the
  * supervisor pipe already served and exits, so falling through never leaves
- * two supervisors. Throws when no way brings the supervisor up.
+ * two supervisors. A home the task cannot start (unschedulableHome) skips
+ * it. Throws when no way brings the supervisor up.
  */
 export async function startWindowsSupervisor(
   home: string,
@@ -242,9 +246,7 @@ export async function startWindowsSupervisor(
   const waitMs = opts.waitMs ?? SUPERVISOR_WAIT_MS;
   const info = (line: string) => opts.logger?.info(line);
   if ((await supervisorRequest(home, 'status')).kind === 'answered') return 'running';
-  const problem = unsupervisableHome(canonicalWindowsHome(home));
-  if (problem !== undefined) throw new Error(problem);
-  if (opts.task) {
+  if (opts.task && unschedulableHome(canonicalWindowsHome(home)) === undefined) {
     let started = opts.started;
     try {
       started ??= await startWindowsTask(supervisorTaskName(home), opts);

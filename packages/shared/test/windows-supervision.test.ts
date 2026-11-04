@@ -161,6 +161,34 @@ describe('starting the supervisor', () => {
     expect(lines.join('\n')).toMatch(/no desktop session/);
   });
 
+  it('supervises a home holding % without its task, through WMI or a detached child', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'puddle-100%-'));
+    const { runner, calls } = powershell((env) => {
+      if ('PUDDLE_PROCESS_COMMAND' in env) void supervisor(home);
+      return { code: 0, pid: 77, error: '' };
+    });
+    // Neither registered nor started: Task Scheduler would expand `%…%` in its command.
+    expect(
+      await startWindowsSupervisor(home, { task: true, powershell: runner, waitMs: 3000 }),
+    ).toBe('process');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.PUDDLE_PROCESS_COMMAND).toContain('puddle-100%-');
+    expect(calls[0]!.PUDDLE_TASK_NAME).toBeUndefined();
+
+    const detachedHome = mkdtempSync(join(tmpdir(), 'puddle-100%-'));
+    const { runner: refused } = powershell(() => ({ code: -1, pid: 0, error: 'Access denied' }));
+    const { spawnDetached, spawned } = spawner(() => void supervisor(detachedHome));
+    expect(
+      await startWindowsSupervisor(detachedHome, {
+        task: false,
+        powershell: refused,
+        spawnDetached,
+        waitMs: 3000,
+      }),
+    ).toBe('detached');
+    expect(spawned[0]!.args.at(-1)).toContain('puddle-100%-');
+  });
+
   it('uses a start made with the registration instead of starting the task again', async () => {
     const home = freshHome();
     const { runner, calls } = powershell(() => {

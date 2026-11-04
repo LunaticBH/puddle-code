@@ -6,7 +6,7 @@ import { privateDirectory } from '@puddle/shared/node';
 import {
   connectorSupervisedMarker,
   superviseWindowsConnector,
-  unsupervisableHome,
+  unschedulableHome,
   type StartSupervisorOptions,
 } from '@puddle/shared/node/platform';
 
@@ -50,7 +50,7 @@ export async function installConnectorSupervisor(
   if (kind === 'task_scheduler') {
     // The counterpart of an installed unit: the supervisor runs the
     // connector while this marker exists (until the daemon is removed).
-    const problem = unsupervisableHome(home);
+    const problem = unschedulableHome(home);
     if (problem !== undefined) throw new Error(problem);
     const marker = connectorSupervisedMarker(home);
     privateDirectory(dirname(marker));

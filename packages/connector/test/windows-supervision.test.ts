@@ -89,7 +89,7 @@ describe('connector supervision on Windows hosts', () => {
     // Task Scheduler would expand `%…%` in the supervisor's command line.
     const percent = home('task', 'puddle-100%-');
     await expect(installConnectorSupervisor(percent, 'win32')).rejects.toThrow(
-      /cannot be supervised/,
+      /Task Scheduler cannot start Puddle/,
     );
     expect(existsSync(join(percent, 'remote', 'supervised'))).toBe(false);
   });

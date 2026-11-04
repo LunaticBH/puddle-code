@@ -16,7 +16,7 @@ import {
   supervisorCommandLine,
   supervisorTaskDefinition,
   supervisorTaskName,
-  unsupervisableHome,
+  unschedulableHome,
 } from '../src/node/windows-supervision.js';
 
 /** Task Scheduler and WMI through a recorded fake PowerShell; any OS, no real task. */
@@ -103,11 +103,11 @@ describe('Windows scheduled task definitions', () => {
   });
 
   it('refuses homes whose task command Task Scheduler would expand or split', () => {
-    expect(unsupervisableHome('C:\\Users\\a\\.puddle')).toBeUndefined();
-    expect(unsupervisableHome('C:\\100%\\.puddle')).toMatch(/cannot be supervised/);
-    expect(unsupervisableHome('C:\\a"b')).toMatch(/cannot be supervised/);
-    expect(unsupervisableHome('C:\\a\tb')).toMatch(/cannot be supervised/);
-    expect(unsupervisableHome('C:\\a\u007fb')).toMatch(/cannot be supervised/);
+    expect(unschedulableHome('C:\\Users\\a\\.puddle')).toBeUndefined();
+    expect(unschedulableHome('C:\\100%\\.puddle')).toMatch(/Task Scheduler cannot start Puddle/);
+    expect(unschedulableHome('C:\\a"b')).toMatch(/Task Scheduler cannot start Puddle/);
+    expect(unschedulableHome('C:\\a\tb')).toMatch(/Task Scheduler cannot start Puddle/);
+    expect(unschedulableHome('C:\\a\u007fb')).toMatch(/Task Scheduler cannot start Puddle/);
   });
 });
 

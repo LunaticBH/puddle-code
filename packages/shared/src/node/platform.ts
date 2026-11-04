@@ -76,7 +76,7 @@ export {
   supervisorPaths,
   supervisorTaskDefinition,
   supervisorTaskName,
-  unsupervisableHome,
+  unschedulableHome,
   waitForSupervisor,
   WINDOWLESS_LAUNCHER,
   type StartSupervisorOptions,
