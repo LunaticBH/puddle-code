@@ -42,7 +42,9 @@ export type CopyEntryRequest = z.infer<typeof copyEntryRequestSchema>;
  * filetree into the URL-addressed destination tree. `source.root` has the same
  * meaning as the routes' `?root=` override; absent means the source session's
  * worktree. One entry per request keeps partial multi-selection failures
- * explicit at the client.
+ * explicit at the client. A Windows daemon whose move to another drive copied
+ * everything but could not remove the whole source answers 409
+ * `source_not_removed`.
  */
 export const transferEntryRequestSchema = z.object({
   operation: z.enum(['copy', 'move']),

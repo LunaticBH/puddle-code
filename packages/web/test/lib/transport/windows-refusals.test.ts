@@ -77,6 +77,20 @@ describe('windowsRefusalMessage', () => {
     );
   });
 
+  it('says a move to another drive copied everything but left part of the original', () => {
+    expect(
+      windowsRefusalMessage(
+        refusal(
+          409,
+          'source_not_removed',
+          'project was copied, but its original could not be removed completely: something in it is open in another program (a terminal, editor or dev server), or you do not have permission to delete it',
+        ),
+      ),
+    ).toBe(
+      "'project' was copied, but Windows couldn't remove all of the original: something in it is open in another program (a terminal, editor or dev server), or you don't have permission to delete it. Close it, then delete what is left of the original.",
+    );
+  });
+
   it('explains a worktree held open on Windows, but not the running-sessions refusal', () => {
     expect(
       windowsRefusalMessage(

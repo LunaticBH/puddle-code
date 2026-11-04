@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import {
   cpSync,
   existsSync,
@@ -10,6 +11,7 @@ import {
 } from 'node:fs';
 import { dirname, isAbsolute, relative, sep } from 'node:path';
 import { Hono } from 'hono';
+import { renameWithRetrySync } from '@puddle/shared/node/platform';
 import { newFileContent } from '../../../notebooks/empty.js';
 import {
   copyEntryRequestSchema,
@@ -142,21 +144,58 @@ export function unlessInUse<T>(
  * Move across roots. rename is atomic when both roots share a filesystem; an
  * EXDEV crossing copies first and deletes only after the copy fully succeeds.
  * A failed copy cleans its partial destination and always keeps the source.
+ *
+ * Windows cannot delete what another program holds open, and finding that out
+ * only after the copy left a complete copy beside a half-deleted source, with
+ * a `path_busy` that no retry could clear. So the source is first proved
+ * movable with a same-volume rename, which fails for exactly those handles
+ * (the probe worktree removal uses), before anything is copied. A removal that
+ * still fails afterwards answers 409 `source_not_removed`: the copy is
+ * complete, so the move must not read as one to retry.
  */
-function moveAcrossRoots(from: string, to: string): void {
+export function moveAcrossRoots(
+  from: string,
+  to: string,
+  rel: string,
+  platform: NodeJS.Platform = process.platform,
+): void {
   try {
     renameSync(from, to);
     return;
   } catch (error) {
     if (!isErrno(error, 'EXDEV')) throw error;
   }
+  if (platform === 'win32') assertMovable(from);
   try {
     cpSync(from, to, { recursive: true, errorOnExist: true, force: false });
   } catch (error) {
-    removeTree(to);
+    removeTree(to, platform);
     throw error;
   }
-  removeTree(from);
+  try {
+    removeTree(from, platform);
+  } catch (error) {
+    if (platform !== 'win32') throw error;
+    console.warn(
+      `moved ${rel || '.'} but could not remove its source: ${(error as Error).message}`,
+    );
+    throw ApiError.conflict(
+      'source_not_removed',
+      `${rel || '.'} was copied, but its original could not be removed completely: something in it is open in another program (a terminal, editor or dev server), or you do not have permission to delete it`,
+      { cause: (error as NodeJS.ErrnoException).code ?? '' },
+    );
+  }
+}
+
+/**
+ * Renames `path` to an unused sibling and straight back. Throws the rename's
+ * own error (EPERM or EBUSY while anything in it is open) with nothing moved.
+ */
+function assertMovable(path: string): void {
+  const probe = `${path}.puddle-move-${process.pid}-${randomBytes(4).toString('hex')}`;
+  renameSync(path, probe);
+  // Nothing knows the probe name, but a scanner may glance at it: retry briefly.
+  renameWithRetrySync(probe, path, 'win32');
 }
 
 /**
@@ -249,7 +288,7 @@ export function worktreeFsOpsRoutes(deps: WorktreeDeps): Hono {
 
       mkdirSync(dirname(to), { recursive: true });
       if (body.operation === 'copy') cpSync(from, to, { recursive: true });
-      else unlessInUse(body.from, () => moveAcrossRoots(from, to));
+      else unlessInUse(body.from, () => moveAcrossRoots(from, to, body.from));
       return c.json<FsOpResponse>(
         { ok: true, path: wireRelative(relative(destinationRoot, to)) },
         body.operation === 'copy' ? 201 : 200,

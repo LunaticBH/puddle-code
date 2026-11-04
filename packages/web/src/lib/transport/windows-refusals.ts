@@ -15,6 +15,8 @@ import { ApiError } from './api';
  *   move or delete it. Windows reports a handle held inside a folder as
  *   access denied, just as it reports a permission it refuses, so that shape
  *   names both causes.
+ * - 409 `source_not_removed`: a move to another drive copied everything but
+ *   could not remove the whole original.
  * - 409 `worktree_busy` with the open-handle cause. Its other cause, running
  *   sessions, comes from every host and is left alone.
  * - 400 `unsafe_repository`: git's safe.directory refusal, with git's advice.
@@ -26,6 +28,8 @@ export function windowsRefusalMessage(error: unknown): string | null {
       return invalidName(error.message);
     case 'path_busy':
       return pathBusy(error.message);
+    case 'source_not_removed':
+      return sourceNotRemoved(error.message);
     case 'worktree_busy':
       return worktreeHeldOpen(error.message);
     case 'unsafe_repository':
@@ -68,6 +72,16 @@ function pathBusy(message: string): string {
   }
   const path = /^(.+?) is in use by another program\b/s.exec(message)?.[1];
   return `${subjectOf(path)} is ${HELD_OPEN}, so Windows can't move or delete it. Close it there and try again.`;
+}
+
+/** Daemon: `<path> was copied, but its original could not be removed completely: …`. */
+function sourceNotRemoved(message: string): string {
+  const path = /^(.+?) was copied, but\b/s.exec(message)?.[1];
+  return (
+    `${subjectOf(path)} was copied, but Windows couldn't remove all of the original: something ` +
+    `in it is ${HELD_OPEN}, or you don't have permission to delete it. Close it, then delete ` +
+    'what is left of the original.'
+  );
 }
 
 /** Daemon: `files in <path> are open in another program (…) — close them and try again`. */
