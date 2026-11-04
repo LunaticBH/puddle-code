@@ -30,7 +30,7 @@ import {
 } from '../http/routes/worktrees/worktree-shared.js';
 import { codeSearchDirectories, findCodeExecutable } from './discovery.js';
 import {
-  CODE_RECIPES,
+  hostRecipes,
   managedBinaryName,
   recipeCommand,
   recipeExecutables,
@@ -334,6 +334,10 @@ function assertSpawnable(
   }
 }
 
-export function createCodeProviders(deps: CodeProviderDeps): CodeProvider[] {
-  return CODE_RECIPES.map((recipe) => new CodeProvider(recipe, deps));
+/** One provider per recipe this host offers (`hostRecipes`). */
+export function createCodeProviders(
+  deps: CodeProviderDeps,
+  platform: NodeJS.Platform = process.platform,
+): CodeProvider[] {
+  return hostRecipes(platform).map((recipe) => new CodeProvider(recipe, deps));
 }

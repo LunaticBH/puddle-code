@@ -334,26 +334,24 @@ describe('EnvOscFilter', () => {
     expect(deltas).toEqual([{ op: 'cwd', path: '/worktree/nested' }]);
   });
 
-  it('accepts Windows drive, UNC and MSYS drive directories on win32 only', () => {
+  it('accepts Windows drive and UNC directories on win32 only', () => {
     const f = new EnvOscFilter('win32');
     const reports = [
-      'c:\\Users\\a\\wt', // PowerShell
-      'C:/Users/a/wt/sub', // Git Bash `pwd -W`
-      '/d/src/repo', // Git Bash $PWD
-      '/e',
+      'c:\\Users\\a\\wt', // PowerShell's ProviderPath
+      'C:/Users/a/wt/sub',
       '\\\\server\\share\\dir',
+      // `/`-rooted forms are no Windows path PowerShell reports.
+      '/d/src/repo',
+      '/e',
       '//server/share/dir',
+      '/tmp/nested',
       '\\rootless', // relative to the current drive: never absolute
-      '/tmp/nested', // an MSYS mount only Git Bash can resolve
       'relative\\path',
     ];
     const { deltas } = pushAll(f, [reports.map((path) => seq('cwd', path)).join('')]);
     expect(deltas.map((delta) => (delta.op === 'cwd' ? delta.path : delta.op))).toEqual([
       'C:\\Users\\a\\wt',
       'C:\\Users\\a\\wt\\sub',
-      'D:\\src\\repo',
-      'E:\\',
-      '\\\\server\\share\\dir',
       '\\\\server\\share\\dir',
     ]);
   });

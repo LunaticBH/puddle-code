@@ -1,8 +1,7 @@
-import { existsSync } from 'node:fs';
-import { join, win32 } from 'node:path';
+import { win32 } from 'node:path';
 import { execPath } from 'node:process';
-import { findExecutable, getEnv, type Environment } from '@puddle/shared/node/platform';
-import { gitBashPathLiteral, powershellLiteral } from '../shell-quote.js';
+import { system32Path, type Environment } from '@puddle/shared/node/platform';
+import { powershellLiteral } from '../shell-quote.js';
 
 /**
  * How Claude Code runs Puddle's helpers: the daemon's own Node on a script
@@ -12,17 +11,18 @@ import { gitBashPathLiteral, powershellLiteral } from '../shell-quote.js';
  * POSIX: shell form, `"<node>" "<helper>" <args>` for `sh -c`.
  *
  * Windows, checked against the bundled source of Claude Code 2.1.248 on
- * Windows 11 and the hooks and status-line documentation (2026-11):
- * - A shell-form hook runs through Git Bash when Claude finds one, else
- *   through PowerShell, and the two need incompatible quoting (PowerShell
- *   prints a command that starts with a quoted string instead of running
- *   it). Hooks therefore use exec form, `command` plus `args`, which Claude
- *   spawns directly with no shell (added in Claude Code 2.1.139).
- * - The status line has only a shell form, so it is quoted for the shell
- *   Claude will pick; see {@link claudeFindsGitBash}.
+ * Windows 11 and the hooks and status-line documentation (2026-11): a
+ * shell-form command runs through Git Bash when Claude finds one, else
+ * through PowerShell. Puddle cannot see which (Claude also reads
+ * `CLAUDE_CODE_GIT_BASH_PATH` from its own settings), and the two need
+ * incompatible quoting, so:
+ * - hooks use exec form, `command` plus `args`, which Claude spawns directly
+ *   with no shell (added in Claude Code 2.1.139);
+ * - the status line, which has only a shell form, is one command that both
+ *   shells, and cmd.exe, run alike; see {@link claudeStatusLineCommand}.
  * A logged-out 2.1.248 run with a scratch config dir fired a SessionStart
- * hook in each of the three forms, with spaces and an apostrophe in both
- * paths and the payload intact on stdin.
+ * hook in each form, with spaces and an apostrophe in both paths and the
+ * payload intact on stdin.
  */
 export interface ClaudeCommandHook {
   type: 'command';
@@ -52,42 +52,55 @@ export function runsHelper(entry: unknown, file: string): boolean {
   );
 }
 
-/** The shell Claude Code runs a status-line command through. */
-export type StatusLineShell = 'posix' | 'git-bash' | 'powershell';
+/**
+ * A drive path that no shell Claude may use treats specially: bash, PowerShell
+ * and cmd.exe all run `C:/…/node.exe C:/…/helper.mjs` written bare.
+ */
+const PLAIN_WINDOWS_PATH = /^[A-Za-z]:(?:\/[A-Za-z0-9._-]+)+$/;
 
-export function claudeStatusLineShell(
+/**
+ * The status-line command running `node script`.
+ *
+ * POSIX: `"<node>" "<script>"` for `sh -c`.
+ *
+ * Windows: both paths bare with `/` separators when they hold only
+ * characters no shell interprets. Otherwise Windows PowerShell runs
+ * `& '<node>' '<script>'` from `-EncodedCommand` (base64 of UTF-16LE), text
+ * that Git Bash, PowerShell and cmd.exe all pass through untouched; the
+ * nested PowerShell costs about 200 ms per refresh. Both forms were run
+ * through Git Bash (`bash -c`) and Claude's PowerShell invocation
+ * (`-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command`) with
+ * `O'Neil $x` in the path and the payload intact on stdin.
+ */
+export function claudeStatusLineCommand(
+  script: string,
   platform: NodeJS.Platform = process.platform,
+  node: string = execPath,
   env: Environment = process.env,
-): StatusLineShell {
-  if (platform !== 'win32') return 'posix';
-  return claudeFindsGitBash(env) ? 'git-bash' : 'powershell';
-}
-
-export function claudeStatusLineCommand(script: string, shell: StatusLineShell): string {
-  if (shell === 'posix') return `${JSON.stringify(execPath)} ${JSON.stringify(script)}`;
-  if (shell === 'git-bash') return `${gitBashPathLiteral(execPath)} ${gitBashPathLiteral(script)}`;
-  return `& ${powershellLiteral(execPath)} ${powershellLiteral(script)}`;
+): string {
+  if (platform !== 'win32') return `${JSON.stringify(node)} ${JSON.stringify(script)}`;
+  const plain = [node, script].map((path) => path.replaceAll('\\', '/'));
+  if (plain.every((path) => PLAIN_WINDOWS_PATH.test(path))) return plain.join(' ');
+  const powershell = system32Path(
+    win32.join('WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    env,
+  ).replaceAll('\\', '/');
+  const program = PLAIN_WINDOWS_PATH.test(powershell) ? powershell : 'powershell.exe';
+  const encoded = Buffer.from(
+    `& ${powershellLiteral(node)} ${powershellLiteral(script)}`,
+    'utf16le',
+  ).toString('base64');
+  return `${program} -NoLogo -NoProfile -NonInteractive -EncodedCommand ${encoded}`;
 }
 
 /**
- * Claude Code 2.1.248's Git Bash discovery, in its order: a
- * `CLAUDE_CODE_GIT_BASH_PATH` naming an existing bash or sh, a Git install
- * under either Program Files, then `..\..\bin\bash.exe` beside `git` on PATH.
+ * Whether a status-line entry runs the helper `file`: in plain view, or
+ * inside the `-EncodedCommand` payload {@link claudeStatusLineCommand} writes.
  */
-export function claudeFindsGitBash(env: Environment = process.env): boolean {
-  const configured = getEnv(env, 'CLAUDE_CODE_GIT_BASH_PATH', 'win32');
-  if (
-    configured &&
-    ['bash.exe', 'sh.exe', 'bash', 'sh'].includes(win32.basename(configured).toLowerCase()) &&
-    existsSync(configured)
-  ) {
-    return true;
-  }
-  const installs = [
-    'C:\\Program Files\\Git\\bin\\bash.exe',
-    'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
-  ];
-  if (installs.some((path) => existsSync(path))) return true;
-  const git = findExecutable('git', { platform: 'win32', env });
-  return git !== null && existsSync(join(git, '..', '..', 'bin', 'bash.exe'));
+export function runsStatusLineHelper(entry: unknown, file: string): boolean {
+  if (runsHelper(entry, file)) return true;
+  const command = (entry as { command?: unknown } | null)?.command;
+  if (typeof command !== 'string') return false;
+  const encoded = /\s-EncodedCommand\s+([A-Za-z0-9+/]+={0,2})$/.exec(command)?.[1];
+  return encoded !== undefined && Buffer.from(encoded, 'base64').toString('utf16le').includes(file);
 }

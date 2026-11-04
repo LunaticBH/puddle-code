@@ -1,7 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Environment } from '@puddle/shared/node/platform';
-import { claudeStatusLineCommand, claudeStatusLineShell, runsHelper } from './hook-command.js';
+import { claudeStatusLineCommand, runsStatusLineHelper } from './hook-command.js';
 
 /**
  * Live per-session usage capture for claude-code, via the documented
@@ -64,13 +63,12 @@ export interface ClaudeLiveUsage {
 /**
  * Installs the helper and points settings.json at it — but never clobbers a
  * status line the user (or an imported account) already configured. On
- * Windows Puddle's own line is rewritten on every install: its quoting
- * follows whether Claude will find Git Bash, which can change between boots.
+ * Windows Puddle's own line is rewritten on every install: it names the
+ * versioned node.exe, and lines written by earlier builds are replaced.
  */
 export function installStatusLine(
   configDir: string,
   platform: NodeJS.Platform = process.platform,
-  env: Environment = process.env,
 ): void {
   writeFileSync(join(configDir, HELPER_FILE), HELPER_SOURCE, { mode: 0o700 });
   const settingsFile = join(configDir, 'settings.json');
@@ -83,14 +81,11 @@ export function installStatusLine(
     }
   }
   const existing = settings['statusLine'];
-  const ours = platform === 'win32' && runsHelper(existing, HELPER_FILE);
+  const ours = platform === 'win32' && runsStatusLineHelper(existing, HELPER_FILE);
   if (existing !== undefined && !ours) return; // respect an existing one
   settings['statusLine'] = {
     type: 'command',
-    command: claudeStatusLineCommand(
-      join(configDir, HELPER_FILE),
-      claudeStatusLineShell(platform, env),
-    ),
+    command: claudeStatusLineCommand(join(configDir, HELPER_FILE), platform),
   };
   writeFileSync(settingsFile, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
 }

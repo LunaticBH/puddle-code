@@ -5,15 +5,13 @@ import { describe, expect, it } from 'vitest';
 import { stripAnsi } from '../../src/pty/ansi.js';
 import { fixture, waitFor, type Fixture } from '../helpers/daemon-fixtures.js';
 
-// The fake terminal is a real shell: cmd.exe on Windows, where `cd` prints the
-// directory (SHELL must name an existing executable there), else $SHELL.
+// The fake terminal is a real shell: PowerShell on Windows, else $SHELL.
 const windows = process.platform === 'win32';
-if (windows) process.env.SHELL = process.env.ComSpec;
 
 /** Ask the shell where it is; the answer lands in the terminal log. */
 function askDirectory(f: Fixture, id: string): void {
   f.ptys.resize(id, 'agent', 400, 40); // wide enough that a deep temp path never wraps
-  f.ptys.write(id, 'agent', windows ? 'cd\r' : 'pwd\n');
+  f.ptys.write(id, 'agent', windows ? '$PWD.ProviderPath\r' : 'pwd\n');
 }
 
 /** Whether the terminal printed a directory ending in `relative` (`/`-separated). */

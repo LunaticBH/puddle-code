@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { compilationRunResponseSchema } from '@puddle/shared';
-import { system32Path } from '@puddle/shared/node/platform';
+import { findCodeExecutable } from '../../src/code/discovery.js';
 import { CodeProvider, createCodeProviders } from '../../src/code/provider.js';
 import { createCodeTerminalLauncher } from '../../src/code/terminal.js';
 import { CODE_RECIPES } from '../../src/code/recipes.js';
@@ -24,10 +24,12 @@ const windows = process.platform === 'win32';
 
 /**
  * Shell input that prints `<first>-<second>` without its own echo containing
- * that text. On Windows the session shell is cmd.exe, which drops the `^`.
+ * that text. On Windows the session shell is PowerShell.
  */
 function shellPrint(first: string, second: string): string {
-  return windows ? `echo ${first}-^${second}\r` : `printf '${first}-%s\\n' ${second}\r`;
+  return windows
+    ? `Write-Output ('${first}-' + '${second}')\r`
+    : `printf '${first}-%s\\n' ${second}\r`;
 }
 
 /**
@@ -57,7 +59,7 @@ afterEach(async () => {
 function setup() {
   const f = fixture();
   fixtures.push(f);
-  vi.stubEnv('SHELL', windows ? system32Path('cmd.exe') : '/bin/bash');
+  if (!windows) vi.stubEnv('SHELL', '/bin/bash');
   vi.stubEnv('HOME', f.paths.home);
   if (windows) {
     const binary = join(f.paths.home, 'binary.cjs');
@@ -190,6 +192,32 @@ describe('programme terminals', () => {
       expect(failedOutput()).toContain('BUILD_FAILED');
       expect(failedOutput()).not.toContain('BINARY_READY');
       expect(second.terminal!.id).not.toBe(id);
+    },
+  );
+
+  it.runIf(windows)(
+    'runs a PowerShell script by its literal name and returns its exit status',
+    async () => {
+      const { f, deps, options } = setup();
+      const path = "main ' $(x) [y] 100%.ps1";
+      writeFileSync(join(f.repoPath, path), "Write-Output ('PS_' + 'READY')\r\nexit 3\r\n");
+      const provider = new CodeProvider(
+        CODE_RECIPES.find((r) => r.id === 'powershell')!,
+        {
+          ...deps,
+          discover: (names) => findCodeExecutable(names),
+        },
+      );
+      const result = await provider.run({ session: NO_SESSION, root: f.repoPath, path }, options);
+      const id = result.terminal!.id;
+      const output = () => stripVTControlCharacters(f.logs.readTail(id, 'agent'));
+      await waitFor(() => output().includes('[Process exited with status 3]'));
+      expect(output().indexOf('PS_READY')).toBeGreaterThan(-1);
+      expect(output().indexOf('PS_READY')).toBeLessThan(
+        output().indexOf('[Process exited with status 3]'),
+      );
+      f.ptys.write(id, 'agent', shellPrint('AFTER', 'SCRIPT'));
+      await waitFor(() => output().includes('AFTER-SCRIPT'));
     },
   );
 

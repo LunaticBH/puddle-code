@@ -1,20 +1,16 @@
 import { accessSync, constants, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { delimiter, isAbsolute, join, sep } from 'node:path';
-import { DEFAULT_PATHEXT, findExecutable, getEnv } from '@puddle/shared/node/platform';
+import { delimiter, isAbsolute, join, sep, win32 } from 'node:path';
+import {
+  DEFAULT_PATHEXT,
+  findExecutable,
+  getEnv,
+  system32Path,
+} from '@puddle/shared/node/platform';
 
 const cache = new Map<string, { at: number; path: string | null }>();
 const listings = new Map<string, { at: number; names: string[] }>();
 const CACHE_TTL_MS = 30_000;
-
-/**
- * System32's bash.exe (and a WindowsApps alias of it) is the WSL launcher: it
- * would run a `.sh` file inside a Linux distribution that cannot open its
- * Windows path, so the Shell recipe only accepts other installations such as
- * Git for Windows.
- */
-const WSL_LAUNCHERS = new Set(['bash']);
-const WSL_LAUNCHER_DIRECTORY = /[\\/](?:System32|WindowsApps)[\\/]*$/i;
 
 /** PATH first, then bounded conventional user/package-manager installations. */
 export function codeSearchDirectories(
@@ -84,10 +80,7 @@ function findPosixExecutable(name: string, directories: readonly string[]): stri
  * so the Microsoft Store's python.exe redirector stubs are never chosen.
  */
 function findWindowsExecutable(name: string, directories: readonly string[]): string | null {
-  const searched = WSL_LAUNCHERS.has(name.toLowerCase())
-    ? directories.filter((directory) => !WSL_LAUNCHER_DIRECTORY.test(directory))
-    : directories;
-  for (const directory of searched) {
+  for (const directory of directories) {
     const found = findExecutable(name, {
       path: directory,
       pathext: DEFAULT_PATHEXT,
@@ -103,7 +96,8 @@ function findWindowsExecutable(name: string, directories: readonly string[]): st
  * dropped, so nothing resolves against the daemon's working directory), the
  * active venv's `Scripts`, then the default locations of common installers
  * that only this user or an administrator can create: the user profile and
- * `%ProgramFiles%`. Folders any local account may create, the system drive's
+ * `%ProgramFiles%`, and last Windows PowerShell's folder under System32
+ * (`.ps1` runs). Folders any local account may create, the system drive's
  * root and `%ProgramData%`, are never searched: another user could plant
  * `C:\Python399\python.exe` or `C:\msys64\ucrt64\bin\gcc.exe` before the
  * real installer runs. MSYS2, Strawberry Perl, RubyInstaller and Chocolatey
@@ -135,8 +129,9 @@ function windowsSearchDirectories(env: NodeJS.ProcessEnv, home: string): string[
         ...under(programFiles, 'nodejs'),
         ...under(programFiles, 'Go', 'bin'),
         ...under(programFiles, 'LLVM', 'bin'),
-        ...under(programFiles, 'Git', 'bin'),
         ...under(programFiles, 'R').flatMap((root) => versioned(root, /^R-/i, ['bin'])),
+        // Windows PowerShell for `.ps1` runs when Path has lost it.
+        system32Path(win32.join('WindowsPowerShell', 'v1.0'), env),
       ].filter(isSearchableDirectory),
     ),
   ];

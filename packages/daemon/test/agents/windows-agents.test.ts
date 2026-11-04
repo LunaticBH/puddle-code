@@ -13,7 +13,7 @@ import { installGeminiLifecycleHooks } from '../../src/agents/gemini-cli/hooks.j
 import { lifecycleVersionAtLeast } from '../../src/agents/lifecycle-version.js';
 import { sameNativeCwd } from '../../src/agents/native-cwd.js';
 import { matchesAgentProcess, windowsArgv } from '../../src/agents/process-match.js';
-import { gitBashPathLiteral, powershellLiteral } from '../../src/agents/shell-quote.js';
+import { powershellLiteral } from '../../src/agents/shell-quote.js';
 import { waitFor } from '../helpers/daemon-fixtures.js';
 
 afterEach(() => vi.useRealTimers());
@@ -91,9 +91,8 @@ describe('Windows process recognition', () => {
 });
 
 describe('Windows hook quoting', () => {
-  it('quotes literals for PowerShell and Git Bash', () => {
+  it('quotes PowerShell literals', () => {
     expect(powershellLiteral("C:\\O'Neil $x\\‘q’")).toBe("'C:\\O''Neil $x\\‘‘q’’'");
-    expect(gitBashPathLiteral("C:\\O'Neil $x")).toBe("'C:/O'\\''Neil $x'");
   });
 
   it('keeps the POSIX Gemini command and uses the call operator on Windows', () => {

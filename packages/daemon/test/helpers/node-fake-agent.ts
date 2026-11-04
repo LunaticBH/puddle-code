@@ -12,9 +12,8 @@ export function fakeStoreKey(worktreePath: string): string {
 
 /**
  * The fake agent's bash scripts as one Node script, so the fixture's agent
- * runs wherever Node does, Windows included, with no shell: there,
- * `bash` is either missing or System32's WSL launcher, which neither
- * node-pty nor WSLENV-less variables survive. It prints the same
+ * runs wherever Node does, Windows included, with no shell: Windows has no
+ * bash Puddle relies on. It prints the same
  * LAUNCH/RESUME/PROMPT/ENVPROBE/CFG/READY lines.
  *
  * Input is read raw and echoed once. Ctrl-D ends the agent (a Windows console

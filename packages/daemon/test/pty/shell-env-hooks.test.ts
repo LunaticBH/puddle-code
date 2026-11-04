@@ -1,9 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { findExecutable } from '@puddle/shared/node/platform';
 import { LogStore } from '../../src/logs/log-store.js';
 import { PtyManager, type PtyCwdEvent, type PtyEnvDeltaEvent } from '../../src/pty/pty-manager.js';
 import { defaultShell } from '../../src/pty/shell.js';
@@ -18,26 +17,13 @@ import { resolvePaths } from '../../src/paths.js';
 const windows = process.platform === 'win32';
 
 function which(bin: string): string | null {
-  // Windows: only Git Bash, the one bash these hooks support there.
-  if (windows) return bin === 'bash' ? gitBash() : null;
+  // PowerShell is the only session shell Puddle hooks on Windows.
+  if (windows) return null;
   try {
     return execFileSync('sh', ['-c', `command -v ${bin}`], { encoding: 'utf8' }).trim() || null;
   } catch {
     return null;
   }
-}
-
-/**
- * Git for Windows' `bin\bash.exe` launcher, found from the git.exe on PATH
- * (`cmd\git.exe`, or `mingw64\bin\git.exe` inside Git Bash).
- */
-function gitBash(): string | null {
-  const gitExe = findExecutable('git');
-  for (let dir = gitExe && dirname(gitExe); dir && dir !== dirname(dir); dir = dirname(dir)) {
-    const candidate = join(dir, 'bin', 'bash.exe');
-    if (existsSync(candidate)) return candidate;
-  }
-  return null;
 }
 
 const zshPath = which('zsh');
@@ -125,11 +111,12 @@ describe('installShellHooks', () => {
     expect(statSync(join(paths.shellHooksDir, 'bash', 'bashrc.bash')).mode & 0o777).toBe(0o600);
   });
 
-  it('writes the PowerShell and Git Bash hooks only for a Windows daemon, idempotently', () => {
+  it('writes only the PowerShell hook for a Windows daemon, idempotently', () => {
     const posix = resolvePaths(mkdtempSync(join(tmpdir(), 'puddle-hook-')));
     installShellHooks(posix, 'linux');
     expect(existsSync(join(posix.shellHooksDir, 'powershell'))).toBe(false);
-    expect(existsSync(join(posix.shellHooksDir, 'bash', 'git-bash.bash'))).toBe(false);
+    expect(existsSync(join(posix.shellHooksDir, 'bash', 'bashrc.bash'))).toBe(true);
+    expect(existsSync(join(posix.shellHooksDir, 'zsh', '.zshrc'))).toBe(true);
 
     const paths = resolvePaths(mkdtempSync(join(tmpdir(), 'puddle-hook-')));
     installShellHooks(paths, 'win32');
@@ -138,13 +125,11 @@ describe('installShellHooks', () => {
     expect(hook).toContain('Set-PSReadLineOption -HistorySavePath');
     expect(hook).toContain("'USERPROFILE'");
     expect(hook).toContain("'WT_*'");
-    const gitBashRc = readFileSync(join(paths.shellHooksDir, 'bash', 'git-bash.bash'), 'utf8');
-    expect(gitBashRc).toContain(join(paths.shellHooksDir, 'bash', 'bashrc.bash'));
-    expect(gitBashRc).toContain('pwd -W');
-    // The POSIX hook bytes are the same either way.
-    expect(readFileSync(join(paths.shellHooksDir, 'bash', 'bashrc.bash'), 'utf8')).toBe(
-      readFileSync(join(posix.shellHooksDir, 'bash', 'bashrc.bash'), 'utf8'),
-    );
+    // Nor does the hook itself carry MSYS names: no MSYS shell runs a session.
+    expect(hook).not.toMatch(/MSYS|MINGW|ORIGINAL_|EXEPATH|PLINK_PROTOCOL|HOSTNAME/);
+    // zsh and bash are never session shells there.
+    expect(existsSync(join(paths.shellHooksDir, 'bash'))).toBe(false);
+    expect(existsSync(join(paths.shellHooksDir, 'zsh'))).toBe(false);
   });
 
   it('spawnConfig dispatches by shell basename', () => {
@@ -171,7 +156,7 @@ describe('installShellHooks', () => {
     });
   });
 
-  it('spawnConfig on Windows hooks PowerShell and Git Bash, not cmd.exe or WSL', () => {
+  it('spawnConfig on Windows hooks only PowerShell', () => {
     const paths = resolvePaths(mkdtempSync(join(tmpdir(), 'puddle-hook-')));
     const hooks = installShellHooks(paths, 'win32');
     const historyFile = 'C:\\Users\\a\\.puddle\\logs\\s\\shell-history';
@@ -197,23 +182,19 @@ describe('installShellHooks', () => {
     expect(
       hooks.spawnConfig('C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\PowerShell.EXE', session),
     ).toEqual(powershell);
-    // MSYS paths in PATH/TEMP would break native spawns: no capture in Git Bash.
-    expect(hooks.spawnConfig('C:\\Program Files\\Git\\bin\\bash.exe', session)).toEqual({
-      args: ['--rcfile', join(paths.shellHooksDir, 'bash', 'git-bash.bash')],
-      env: { ...controls, PUDDLE_CAPTURE_ENV: '0' },
-    });
-    expect(hooks.spawnConfig('C:\\Windows\\System32\\bash.exe', session)).toEqual({
-      args: [],
-      env: {},
-    });
-    expect(hooks.spawnConfig('C:\\WINDOWS\\system32\\cmd.exe', session)).toEqual({
-      args: [],
-      env: {},
-    });
-    expect(hooks.spawnConfig('C:\\tools\\nu.exe', session)).toEqual({
-      args: [],
-      env: { HISTFILE: historyFile },
-    });
+    // Anything else is a programme run in the terminal, unhooked.
+    for (const other of [
+      'C:\\Program Files\\Git\\bin\\bash.exe',
+      'C:\\Windows\\System32\\bash.exe',
+      'C:\\WINDOWS\\system32\\cmd.exe',
+      'C:\\tools\\nu.exe',
+    ]) {
+      expect(hooks.spawnConfig(other, session), other).toEqual({
+        args: [],
+        env: { HISTFILE: historyFile },
+      });
+      expect(hooks.spawnConfig(other), other).toEqual({ args: [], env: {} });
+    }
   });
 
   it('escapes a quote in the PowerShell hook path', () => {
@@ -244,7 +225,7 @@ describe('installShellHooks', () => {
     expect(ENV_CAPTURE_DENYLIST.has('PATH')).toBe(false); // deliberately capturable
   });
 
-  it('denies Windows identity, terminal, PowerShell and MSYS names case-insensitively on win32', () => {
+  it('denies Windows identity, terminal and PowerShell names case-insensitively on win32', () => {
     for (const name of [
       'puddle_x',
       'Home',
@@ -257,14 +238,28 @@ describe('installShellHooks', () => {
       'PSModulePath',
       'PSExecutionPolicyPreference',
       'POWERSHELL_DISTRIBUTION_CHANNEL',
-      'MSYSTEM',
-      'MINGW_PREFIX',
-      'ORIGINAL_PATH',
       'PWD',
     ]) {
       expect(isDeniedEnvName(name, 'win32'), name).toBe(true);
     }
     for (const name of ['Path', 'PATHEXT', 'MY_TOKEN', 'NODE_OPTIONS', 'TEMP']) {
+      expect(isDeniedEnvName(name, 'win32'), name).toBe(false);
+    }
+    // No MSYS shell runs a session, so its variables are ordinary user names
+    // a PowerShell session may export and capture like any other.
+    for (const name of [
+      'MSYSTEM',
+      'MSYS',
+      'MSYSTEM_PREFIX',
+      'MINGW_PREFIX',
+      'MSYS2_PATH_TYPE',
+      'ORIGINAL_PATH',
+      'ORIGINAL_TEMP',
+      'ORIGINAL_TMP',
+      'EXEPATH',
+      'PLINK_PROTOCOL',
+      'HOSTNAME',
+    ]) {
       expect(isDeniedEnvName(name, 'win32'), name).toBe(false);
     }
   });
@@ -411,8 +406,7 @@ add-zsh-hook precmd foreign_history_context
   });
 });
 
-// Git Bash (the Windows bash) deliberately runs without environment capture.
-describe.skipIf(!bashPath || bashMajor < 4 || windows)('bash capture hook (bash ≥ 4)', () => {
+describe.skipIf(!bashPath || bashMajor < 4)('bash capture hook (bash ≥ 4)', () => {
   it('captures exports and unsets; user bashrc chains; baseline is silent', async () => {
     const h = harness({ '.bashrc': 'export BRC_MARKER=bash-rc\n' });
     h.spawn(bashPath!);
@@ -491,23 +485,6 @@ activate_env
     await waitFor(
       () => h.output().includes('prompt-array-first') && h.output().includes('prompt-array-second'),
     );
-    h.kill();
-  });
-});
-
-describe.skipIf(!windows || !bashPath)('Git Bash on Windows', () => {
-  it('reports native Windows directories and no environment deltas', async () => {
-    const h = harness({ '.bashrc': '' });
-    h.spawn(bashPath!);
-    await waitFor(() => h.cwds.some((e) => e.cwd === h.home));
-    h.write('mkdir git-bash-nested && cd git-bash-nested\n');
-    await waitFor(() => h.cwds.some((e) => e.cwd === join(h.home, 'git-bash-nested')));
-    h.write('export CAP_GIT_BASH=1; echo git-bash-probe\n');
-    await waitFor(() => h.output().includes('git-bash-probe'));
-    h.write('echo git-bash-second-prompt\n');
-    await waitFor(() => h.output().includes('git-bash-second-prompt'));
-    expect(h.deltas).toEqual([]);
-    expect(h.output()).not.toContain('7733');
     h.kill();
   });
 });

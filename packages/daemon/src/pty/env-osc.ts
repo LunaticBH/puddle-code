@@ -161,16 +161,13 @@ function parsePayload(payload: string, platform: NodeJS.Platform): ShellReport |
 
 /**
  * A reported directory as an absolute host path, or null. POSIX accepts
- * `/`-rooted paths only. Windows accepts drive-absolute (`C:\x`, `C:/x`) and
- * UNC (`\\server\share`, `//server/share`) paths, never a rootless `\x`, and
- * translates the MSYS drive form Git Bash reports when `pwd -W` is missing
- * (`/c/x` is `C:\x`); other MSYS paths (`/tmp`, `/usr`) are unknowable here.
+ * `/`-rooted paths only. Windows accepts the drive-absolute (`C:\x`, `C:/x`)
+ * and UNC (`\\server\share`) paths PowerShell's ProviderPath reports, never a
+ * rootless `\x` or a `/`-rooted one.
  */
 function hostCwd(path: string, platform: NodeJS.Platform): string | null {
   if (platform !== 'win32') return path.startsWith('/') ? path : null;
-  const msys = /^\/([A-Za-z])(\/.*)?$/.exec(path);
-  const native = msys ? `${msys[1]}:${msys[2] ?? '\\'}` : path.replace(/^\/\/(?=[^/])/, '\\\\');
-  return /^(?:[A-Za-z]:[\\/]|\\\\[^\\/])/.test(native) ? normaliseHostPath(native) : null;
+  return /^(?:[A-Za-z]:[\\/]|\\\\[^\\/])/.test(path) ? normaliseHostPath(path) : null;
 }
 
 function validName(name: string): boolean {

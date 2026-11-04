@@ -12,6 +12,8 @@ export interface CodeRecipe {
   /** A compiler produces {{binary}}, which is run only after a successful build. */
   compiled?: boolean;
   notebook?: boolean;
+  /** The hosts offering the recipe; every host when absent. */
+  hosts?: 'posix' | 'win32';
 }
 
 /** Single-file recipes; project builds remain explicit per-file command overrides. */
@@ -74,14 +76,35 @@ export const CODE_RECIPES: readonly CodeRecipe[] = [
   { id: 'ruby', name: 'Ruby', extensions: ['rb'], executables: ['ruby'], args: ['{{source}}'] },
   { id: 'perl', name: 'Perl', extensions: ['pl'], executables: ['perl'], args: ['{{source}}'] },
   { id: 'r', name: 'R', extensions: ['r'], executables: ['Rscript'], args: ['{{source}}'] },
+  // Windows has no POSIX shell Puddle runs (docs/windows.md, decision 14):
+  // there scripts are PowerShell.
   {
     id: 'shell',
     name: 'Shell',
     extensions: ['sh', 'bash'],
     executables: ['bash'],
     args: ['{{source}}'],
+    hosts: 'posix',
   },
-  { id: 'zsh', name: 'Zsh', extensions: ['zsh'], executables: ['zsh'], args: ['{{source}}'] },
+  {
+    id: 'zsh',
+    name: 'Zsh',
+    extensions: ['zsh'],
+    executables: ['zsh'],
+    args: ['{{source}}'],
+    hosts: 'posix',
+  },
+  {
+    // -File runs the script by its literal path, quotes, `$()`, `[]` and `%`
+    // included, and returns its `exit` status. Bypass applies to this process
+    // only; a Group Policy execution policy still wins.
+    id: 'powershell',
+    name: 'PowerShell',
+    extensions: ['ps1'],
+    executables: ['pwsh', 'powershell'],
+    args: ['-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', '{{source}}'],
+    hosts: 'win32',
+  },
   {
     id: 'notebook',
     name: 'Jupyter notebook',
@@ -101,6 +124,12 @@ export const CODE_RECIPES: readonly CodeRecipe[] = [
     notebook: true,
   },
 ];
+
+/** The recipes a `platform` host offers, in `CODE_RECIPES` order. */
+export function hostRecipes(platform: NodeJS.Platform = process.platform): readonly CodeRecipe[] {
+  const host = platform === 'win32' ? 'win32' : 'posix';
+  return CODE_RECIPES.filter((recipe) => recipe.hosts === undefined || recipe.hosts === host);
+}
 
 /** The executable names a recipe looks for on `platform`, in order of preference. */
 export function recipeExecutables(

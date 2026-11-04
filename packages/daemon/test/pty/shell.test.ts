@@ -17,37 +17,46 @@ describe('defaultShell', () => {
   const windowsEnv = { SystemRoot: 'C:\\Windows', ComSpec: 'C:\\Windows\\system32\\cmd.exe' };
   const powershell = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
 
-  it('honours SHELL on Windows only as an existing absolute executable', () => {
-    const exists = (path: string) => path === 'D:\\tools\\nu.exe' || path === powershell;
+  it('honours SHELL on Windows only as an existing absolute PowerShell', () => {
+    const existing = new Set([
+      'D:\\pwsh-preview\\pwsh.exe',
+      'D:\\tools\\nu.exe',
+      'C:\\Program Files\\Git\\bin\\bash.exe',
+      'C:\\Windows\\system32\\cmd.exe',
+      powershell,
+    ]);
     const shell = (SHELL: string) =>
-      defaultShell({ platform: 'win32', env: { ...windowsEnv, SHELL }, isFile: exists });
-    expect(shell('D:\\tools\\nu.exe')).toBe('D:\\tools\\nu.exe');
-    // Git Bash's MSYS spelling, a bare name, a missing file, a script: ignored.
-    expect(shell('/usr/bin/bash')).toBe(powershell);
-    expect(shell('bash')).toBe(powershell);
-    expect(shell('D:\\tools\\missing.exe')).toBe(powershell);
-    expect(shell('D:\\tools\\nu.cmd')).toBe(powershell);
+      defaultShell({
+        platform: 'win32',
+        env: { ...windowsEnv, SHELL },
+        isFile: (path) => existing.has(path),
+      });
+    expect(shell('D:\\pwsh-preview\\pwsh.exe')).toBe('D:\\pwsh-preview\\pwsh.exe');
+    expect(shell(powershell)).toBe(powershell);
+    // Other shells, an MSYS spelling, a bare name, a missing file, a script: ignored.
+    for (const ignored of [
+      'D:\\tools\\nu.exe',
+      'C:\\Program Files\\Git\\bin\\bash.exe',
+      'C:\\Windows\\system32\\cmd.exe',
+      '/usr/bin/bash',
+      'pwsh.exe',
+      'D:\\missing\\pwsh.exe',
+      'D:\\pwsh-preview\\pwsh.cmd',
+    ]) {
+      expect(shell(ignored), ignored).toBe(powershell);
+    }
   });
 
-  it('prefers pwsh on Path, then Windows PowerShell, then ComSpec, then cmd.exe', () => {
+  it('prefers pwsh on Path, then Windows PowerShell, never cmd.exe', () => {
     const bin = mkdtempSync(join(tmpdir(), 'puddle-shell-'));
     writeFileSync(join(bin, 'pwsh.exe'), '');
     expect(
       defaultShell({ platform: 'win32', env: { ...windowsEnv, PATH: bin }, isFile: none }),
     ).toBe(join(bin, 'pwsh.exe'));
+    expect(defaultShell({ platform: 'win32', env: windowsEnv, isFile: none })).toBe(powershell);
     expect(
-      defaultShell({ platform: 'win32', env: windowsEnv, isFile: (p) => p === powershell }),
-    ).toBe(powershell);
-    expect(
-      defaultShell({
-        platform: 'win32',
-        env: windowsEnv,
-        isFile: (p) => p === windowsEnv.ComSpec,
-      }),
-    ).toBe(windowsEnv.ComSpec);
-    expect(defaultShell({ platform: 'win32', env: windowsEnv, isFile: none })).toBe(
-      'C:\\Windows\\System32\\cmd.exe',
-    );
+      defaultShell({ platform: 'win32', env: { SystemRoot: 'D:\\WINNT' }, isFile: none }),
+    ).toBe('D:\\WINNT\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
   });
 });
 
@@ -59,17 +68,20 @@ describe('shellKind', () => {
     expect(shellKind('/bin/Bash', 'linux')).toBe('other');
   });
 
-  it('ignores case and .exe on Windows, and tells WSL bash from Git Bash', () => {
+  it('recognises only PowerShell on Windows, ignoring case and .exe', () => {
     expect(shellKind('C:\\Program Files\\PowerShell\\7\\pwsh.exe', 'win32')).toBe('powershell');
     expect(
       shellKind('C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\PowerShell.EXE', 'win32'),
     ).toBe('powershell');
-    expect(shellKind('C:\\WINDOWS\\system32\\cmd.exe', 'win32')).toBe('cmd');
-    expect(shellKind('C:\\Program Files\\Git\\bin\\bash.exe', 'win32')).toBe('bash');
-    expect(shellKind('C:\\Program Files\\Git\\usr\\bin\\bash.exe', 'win32')).toBe('bash');
-    expect(shellKind('C:\\Windows\\System32\\bash.exe', 'win32')).toBe('wsl');
-    expect(shellKind('C:\\Windows\\Sysnative\\bash.exe', 'win32')).toBe('wsl');
-    expect(shellKind('C:\\Program Files\\WSL\\wsl.exe', 'win32')).toBe('wsl');
-    expect(shellKind('C:\\msys64\\usr\\bin\\zsh.exe', 'win32')).toBe('other');
+    for (const other of [
+      'C:\\WINDOWS\\system32\\cmd.exe',
+      'C:\\Program Files\\Git\\bin\\bash.exe',
+      'C:\\Windows\\System32\\bash.exe',
+      'C:\\Windows\\Sysnative\\bash.exe',
+      'C:\\Program Files\\WSL\\wsl.exe',
+      'C:\\msys64\\usr\\bin\\zsh.exe',
+    ]) {
+      expect(shellKind(other, 'win32'), other).toBe('other');
+    }
   });
 });

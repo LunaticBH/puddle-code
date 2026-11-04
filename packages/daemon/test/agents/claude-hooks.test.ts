@@ -87,7 +87,7 @@ describe('installStatusHooks', () => {
     });
   });
 
-  it('uses exec form on Windows, so neither Git Bash nor PowerShell parses the paths', () => {
+  it('uses exec form on Windows, so no shell parses the paths', () => {
     const configDir = dir();
     installStatusHooks(configDir, 'win32');
     const hook = readSettings(configDir).hooks!['Stop']![0]!.hooks[0]!;
