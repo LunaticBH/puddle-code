@@ -121,7 +121,16 @@ export function git(args: string[], opts: GitOptions = {}): Promise<string> {
         resolve(stdout.trim());
       },
     );
-    if (opts.input !== undefined) child.stdin?.end(opts.input);
+    if (opts.input !== undefined && child.stdin) {
+      // Git can exit before it reads stdin: index.lock held by another git,
+      // or a pre-commit hook failing before `commit -F -` reads the message.
+      // With more than a pipe buffer (~64 KiB) still unwritten, the write
+      // then fails with EPIPE/EOF, and an unhandled stream 'error' would end
+      // the daemon. Git's own exit status and stderr still reach the callback
+      // above as a GitError, so the stream error itself is ignored.
+      child.stdin.on('error', () => {});
+      child.stdin.end(opts.input);
+    }
   });
 }
 

@@ -61,6 +61,24 @@ describe('git argv', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('rejects with git’s own failure when git exits before reading a large stdin', async () => {
+    // Windows stages pathspecs through stdin; a held index.lock makes git
+    // exit before reading them, so most of a >64 KiB input never drains.
+    const dir = directory();
+    await git(['init', '-q'], { cwd: dir });
+    writeFileSync(join(dir, '.git', 'index.lock'), '');
+    const paths = Array.from({ length: 4000 }, (_, i) => `src/a/deep/directory/file-${i}.ts`);
+    const error = await git(
+      ['--literal-pathspecs', 'add', '-A', '--pathspec-from-file=-', '--pathspec-file-nul'],
+      { cwd: dir, input: paths.join('\0') },
+    ).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(GitError);
+    expect((error as GitError).exitCode).toBe(128);
+    expect((error as GitError).stderr).toMatch(/index\.lock/);
+    // A stdin write failure surfacing later would be an unhandled 'error' event.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  });
 });
 
 describe('git executable', () => {
