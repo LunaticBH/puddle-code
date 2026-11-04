@@ -486,6 +486,16 @@ describe.runIf(process.platform === 'win32')('Windows standalone CLI installer',
       release,
       launcher: join(realpathSync(f.bin), 'puddle.cmd'),
     });
+    // The launcher starts node.exe through the `current` junction, and
+    // process.execPath keeps that unresolved spelling (Node resolves only the
+    // entry script), so the junction must resolve to the same release.
+    expect(
+      standaloneInstallation(
+        join(release, 'cli', 'index.js'),
+        join(prefix, 'current', 'bin', 'node.exe'),
+        'win32',
+      ),
+    ).toEqual(installation);
     await removeStandaloneCli(installation!, 'win32');
     expect(existsSync(f.launcher)).toBe(false);
     expect(existsSync(f.prefix)).toBe(false);
