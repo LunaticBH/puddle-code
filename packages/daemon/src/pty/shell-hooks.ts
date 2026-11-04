@@ -426,10 +426,10 @@ export function installShellHooks(
   paths: PuddlePaths,
   platform: NodeJS.Platform = process.platform,
 ): ShellHooks {
+  const write = (file: string, content: string) => writeFileSync(file, content, { mode: 0o600 });
+  if (platform === 'win32') return installWindowsShellHooks(paths, write);
   const zshDir = join(paths.shellHooksDir, 'zsh');
   const bashDir = join(paths.shellHooksDir, 'bash');
-  const write = (file: string, content: string) => writeFileSync(file, content, { mode: 0o600 });
-  if (platform === 'win32') return installWindowsShellHooks(paths, zshDir, bashDir, write);
   mkdirSync(zshDir, { recursive: true, mode: 0o700 });
   mkdirSync(bashDir, { recursive: true, mode: 0o700 });
   write(join(zshDir, '.zshenv'), zshZshenv(zshDir));
@@ -445,8 +445,6 @@ export function installShellHooks(
 /** The PowerShell hook alone: zsh and bash are never session shells on Windows. */
 function installWindowsShellHooks(
   paths: PuddlePaths,
-  zshDir: string,
-  bashDir: string,
   write: (file: string, content: string) => void,
 ): ShellHooks {
   const powershellDir = join(paths.shellHooksDir, 'powershell');
@@ -460,5 +458,7 @@ function installWindowsShellHooks(
       maxValueChars: MAX_VALUE_CHARS,
     }),
   );
-  return new ShellHooks(zshDir, join(bashDir, 'bashrc.bash'), windows, 'win32');
+  // No zsh directory or bash rcfile exists here, and spawnConfig never reads
+  // them on win32 (it returns the Windows config first), so none is named.
+  return new ShellHooks('', '', windows, 'win32');
 }
