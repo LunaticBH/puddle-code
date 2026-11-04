@@ -19,6 +19,8 @@ vi.mock('../../src/lib/installation/bootstrap.js', () => ({
 import { acquireAuthority } from '../../src/lib/auth/connection-authority.js';
 import { ensureDaemon } from '../../src/lib/connection/cockpit.js';
 import { LocalTransport } from '../../src/lib/transport/local.js';
+import { CliError } from '../../src/lib/types.js';
+import { pinnedDaemonVersion } from '../../src/lib/version.js';
 
 /**
  * The local Windows start path (docs/windows.md, decision 6), driven through
@@ -53,11 +55,42 @@ async function serve(reply: (challenge: string | undefined) => object) {
 const proven = (challenge: string | undefined) =>
   challenge === undefined ? {} : { proof: ipcProof(home, 'host', challenge) };
 
-it('starts a daemon when none holds the control pipe, leaving one started meanwhile alone', async () => {
+it('starts the installed daemon when none holds the control pipe, leaving one started meanwhile alone', async () => {
   const transport = new LocalTransport({ platform: 'win32' });
   await expect(ensureDaemon(transport, {})).rejects.toThrow('installation reached');
   expect(install).toHaveBeenCalledOnce();
-  expect(install.mock.calls[0]![1]).toMatchObject({ replaceRunning: false });
+  // After a reboot the installed `current` starts, not this launcher's own release.
+  expect(install.mock.calls[0]![1]).toMatchObject({ replaceRunning: false, version: '0.3.14' });
+});
+
+it('installs this launcher’s release when the installed one cannot start', async () => {
+  install.mockImplementationOnce(async () => {
+    throw new CliError('not_installed', 'download failed (HTTP 404)');
+  });
+  const transport = new LocalTransport({ platform: 'win32' });
+  await expect(ensureDaemon(transport, {})).rejects.toThrow('installation reached');
+  expect(install).toHaveBeenCalledTimes(2);
+  expect(install.mock.calls[1]![1]).toMatchObject({ replaceRunning: false });
+  expect(install.mock.calls[1]![1]).not.toHaveProperty('version');
+});
+
+it('hands an installed daemon with another protocol to the handshake, on this launcher’s release', async () => {
+  install.mockImplementationOnce(async () => {
+    throw new CliError('protocol_mismatch', 'Host protocol 24 does not match client protocol 25');
+  });
+  const transport = new LocalTransport({ platform: 'win32' });
+  await expect(ensureDaemon(transport, {})).rejects.toThrow('installation reached');
+  expect(install).toHaveBeenCalledTimes(2);
+  expect(install.mock.calls[1]![1]).toMatchObject({ version: pinnedDaemonVersion() });
+});
+
+it('installs exactly the archive a caller names', async () => {
+  const transport = new LocalTransport({ platform: 'win32' });
+  await expect(ensureDaemon(transport, { tarball: 'C:\\dl\\x.zip' })).rejects.toThrow(
+    'installation reached',
+  );
+  expect(install).toHaveBeenCalledOnce();
+  expect(install.mock.calls[0]![1]).not.toHaveProperty('version');
 });
 
 it('waits for a daemon that holds the pipe but is not ready, and never replaces it', async () => {
