@@ -9,7 +9,6 @@ import type {
 } from '@puddle/shared';
 import { tabKey, tabKind, type EditorTab, type EditorView } from '../../editor/tabs/editor-tabs';
 import { previewKind } from '../../editor/previews/preview-kind';
-import { sameFileIdentity } from '../../../lib/host-path';
 
 /**
  * Pure, React/Monaco-free reducer for the tiling layout tree (SPEC §8) — the
@@ -545,7 +544,8 @@ function sharesBuffer(tab: EditorTab, source: EditorTab): boolean {
     kind !== 'commit' &&
     kind !== 'untitled' &&
     tab.session === source.session &&
-    sameFileIdentity(tab, source)
+    tab.path === source.path &&
+    tab.root === source.root
   );
 }
 
@@ -639,7 +639,14 @@ export function retargetFollowingTabs(tree: LayoutNode, ref: TabRef): LayoutNode
     const tabs = node.tabs.map((t): TabRef => {
       if (t.type !== 'editor' || !isFollowing(t)) return t;
       const cur = t.tab as EditorTab;
-      if (sameFollowingTarget(cur, target)) return t;
+      if (
+        cur.session === target.session &&
+        cur.path === target.path &&
+        (cur.root ?? '') === (target.root ?? '') &&
+        tabKind(cur) === tabKind(target)
+      ) {
+        return t;
+      }
       touched = true;
       return {
         type: 'editor',
@@ -665,14 +672,11 @@ export interface SourceTabLocation {
   ref: TabRef & { type: 'editor' };
 }
 
-/** Whether a following slot already shows `target`: one file, of the same kind. */
-export function sameFollowingTarget(tab: EditorTab, target: EditorTab): boolean {
+function sameFollowingTarget(tab: EditorTab, target: EditorTab): boolean {
   return (
     tab.session === target.session &&
-    sameFileIdentity(
-      { path: tab.path, root: tab.root ?? '' },
-      { path: target.path, root: target.root ?? '' },
-    ) &&
+    tab.path === target.path &&
+    (tab.root ?? '') === (target.root ?? '') &&
     tabKind(tab) === tabKind(target)
   );
 }

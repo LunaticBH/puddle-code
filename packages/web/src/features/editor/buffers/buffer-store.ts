@@ -11,7 +11,6 @@
  * unit-testable without monaco, which cannot initialise under vitest.
  */
 import { monaco } from '../monaco/monaco-setup';
-import { fileIdentity } from '../../../lib/host-path';
 import {
   RefCounter,
   SavedStateMap,
@@ -27,13 +26,11 @@ export { applyDraft, editorTabLabel, type OpenTab };
  * `root` is the absolute browse root of an `external` tab (SPEC §8): a rooted
  * file and a worktree file may share the same relative path, so the root must
  * be part of the identity or they would silently share one buffer. Absent
- * root keeps the historical two-part key (drafts in IndexedDB reuse it). A
- * Windows root compares names as Windows does (`fileIdentity`).
+ * root keeps the historical two-part key (drafts in IndexedDB reuse it).
  */
 export function bufferKey(session: string, path: string, root?: string): string {
-  const id = fileIdentity(path, root);
-  const base = `${encodeURIComponent(session)}:${encodeURIComponent(id.path)}`;
-  return id.root === undefined ? base : `${base}:${encodeURIComponent(id.root)}`;
+  const base = `${encodeURIComponent(session)}:${encodeURIComponent(path)}`;
+  return root === undefined ? base : `${base}:${encodeURIComponent(root)}`;
 }
 
 /** `puddle://<session>/<path>[?root=…]`, with every path segment percent-encoded. */

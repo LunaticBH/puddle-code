@@ -23,7 +23,6 @@
  * `void`). A draft-store outage must never interrupt editing.
  */
 import { debounce, type Debounced } from '../debounce';
-import { fileIdentity } from '../host-path';
 
 const DB_NAME = 'puddle-drafts';
 const DB_VERSION = 1;
@@ -66,9 +65,8 @@ export function draftDisposition(
  * sessions/paths that share a delimiter.
  */
 export function draftKey(session: string, path: string, root?: string): string {
-  const id = fileIdentity(path, root);
-  const base = `${encodeURIComponent(session)}:${encodeURIComponent(id.path)}`;
-  return id.root === undefined ? base : `${base}:${encodeURIComponent(id.root)}`;
+  const base = `${encodeURIComponent(session)}:${encodeURIComponent(path)}`;
+  return root === undefined ? base : `${base}:${encodeURIComponent(root)}`;
 }
 
 function openDb(): Promise<IDBDatabase> {

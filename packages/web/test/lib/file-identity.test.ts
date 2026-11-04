@@ -7,66 +7,67 @@ import {
   makeLeaf,
   renameBufferTabs,
   retargetFollowingTabs,
-  sameFollowingTarget,
 } from '../../src/features/workspace/layout/layout-tree';
-import { fileIdentity, sameFileIdentity } from '../../src/lib/host-path';
 import { draftKey } from '../../src/lib/persistence/drafts';
 
 /**
- * One file reached by two spellings under a Windows root is one tab and one
- * buffer (F26); every other identity stays exact, so POSIX keys are unchanged.
+ * Tab, buffer, draft and save identity is the exact spelling under every root,
+ * Windows ones included. A Windows host answers every path in the case it is
+ * stored in (F26), so one file already has one spelling; folding case here
+ * would merge two files that a case-sensitive directory (WSL's DrvFs) holds
+ * side by side, and turn a case-only rename into no move at all, so the
+ * rename's draft swap would delete the dirty buffer's only draft.
  * `bufferKey` (monaco-bound) and the cross-window `peerKey` share this formula.
  */
 
 const external = (path: string, root: string, kind: 'external' | 'commit' = 'external') =>
   ({ kind, session: 's1', path, root }) satisfies EditorTab;
 
-describe('fileIdentity', () => {
-  it('folds case and separators under a Windows root', () => {
-    expect(fileIdentity('Src\\App.tsx', 'C:\\Users\\A\\Repo\\')).toEqual({
-      path: 'src/app.tsx',
-      root: 'c:\\users\\a\\repo',
-    });
-    expect(fileIdentity('src/app.tsx', 'c:/users/a/repo')).toEqual(
-      fileIdentity('SRC/App.tsx', 'C:\\Users\\a\\Repo'),
-    );
-    expect(fileIdentity('a.txt', '\\\\Files\\Team')).toEqual({
-      path: 'a.txt',
-      root: '\\\\files\\team\\',
-    });
+const ref = (tab: EditorTab): TabRef => ({ type: 'editor', tab });
+
+const paths = (tree: ReturnType<typeof makeLeaf>) =>
+  flattenTabs(tree).map((t) => (t.type === 'editor' ? t.tab.path : ''));
+
+describe('identity under a Windows root', () => {
+  const root = 'C:\\wsl\\repo';
+
+  it('keeps two files whose names differ only in case apart', () => {
+    const upper = external('README.md', root);
+    const mixed = external('Readme.md', root);
+    expect(tabKey(upper)).not.toBe(tabKey(mixed));
+    expect(sameTab(upper, mixed)).toBe(false);
+    expect(draftKey('s1', 'README.md', root)).not.toBe(draftKey('s1', 'Readme.md', root));
+    expect(saverKey('s1', 'README.md', root)).not.toBe(saverKey('s1', 'Readme.md', root));
   });
 
-  it('keeps POSIX roots and worktree files exactly as given', () => {
-    expect(fileIdentity('Src/App.tsx', '/Users/A/Repo/')).toEqual({
-      path: 'Src/App.tsx',
-      root: '/Users/A/Repo/',
-    });
-    expect(fileIdentity('Src\\App.tsx')).toEqual({ path: 'Src\\App.tsx' });
-    expect(sameFileIdentity({ path: 'a.md' }, { path: 'A.md' })).toBe(false);
-    expect(sameFileIdentity({ path: 'a.md', root: '/r' }, { path: 'A.md', root: '/r' })).toBe(
-      false,
-    );
-    expect(sameFileIdentity({ path: 'a.md', root: '/r' }, { path: 'a.md', root: '/R' })).toBe(
-      false,
-    );
-    expect(sameFileIdentity({ path: 'a.md' }, { path: 'a.md', root: '' })).toBe(false);
+  it('moves a draft on a case-only rename instead of deleting it in place', () => {
+    // renameFileTab saves the dirty text under the new key, then deletes the
+    // old one: the two must differ or the delete removes the only draft.
+    expect(draftKey('s1', 'notes.md', root)).not.toBe(draftKey('s1', 'Notes.md', root));
+    expect(draftKey('s1', 'x.JS', root)).not.toBe(draftKey('s1', 'x.js', root));
+  });
+
+  it('renames only the file that was renamed, and follows the other spelling', () => {
+    const tree = makeLeaf([ref(external('README.md', root)), ref(external('Readme.md', root))]);
+    expect(paths(renameBufferTabs(tree, external('Readme.md', root), 'readme.md'))).toEqual([
+      'README.md',
+      'readme.md',
+    ]);
+
+    const slot = { ...external('README.md', root), view: 'linked' as const };
+    const following = makeLeaf([ref(slot)]);
+    expect(retargetFollowingTabs(following, ref(external('README.md', root)))).toBe(following);
+    expect(paths(retargetFollowingTabs(following, ref(external('Readme.md', root))))).toEqual([
+      'Readme.md',
+    ]);
   });
 });
 
-describe('tab and buffer keys', () => {
-  it('give one key to two spellings of a file under a Windows root', () => {
-    const a = external('docs/Notes.md', 'C:\\Users\\a\\repo');
-    const b = external('DOCS\\notes.md', 'c:/users/A/Repo/');
-    expect(tabKey(a)).toBe(tabKey(b));
-    expect(sameTab(a, b)).toBe(true);
-    expect(draftKey(a.session, a.path, a.root)).toBe(draftKey(b.session, b.path, b.root));
-    expect(saverKey(a.session, a.path, a.root)).toBe(saverKey(b.session, b.path, b.root));
-    expect(tabKey(external('a.md', 'C:\\repo')) === tabKey(external('a.md', 'C:\\repo2'))).toBe(
-      false,
+describe('key strings', () => {
+  it('stay byte for byte what they were, on every host', () => {
+    expect(tabKey(external('Readme.md', 'C:\\wsl\\repo'))).toBe(
+      'external:s1::C:\\wsl\\repo:Readme.md',
     );
-  });
-
-  it("keep a commit's git path exact, and every POSIX key byte for byte", () => {
     expect(tabKey(external('A.md', 'C:\\repo', 'commit'))).toBe('commit:s1::C:\\repo:A.md');
     expect(tabKey(external('Docs/A.md', '/home/a/repo'))).toBe(
       'external:s1::/home/a/repo:Docs/A.md',
@@ -74,39 +75,7 @@ describe('tab and buffer keys', () => {
     expect(tabKey({ session: 's1', path: 'Src/App.tsx' })).toBe('file:s1:::Src/App.tsx');
     expect(draftKey('s1', 'Src/App.tsx')).toBe('s1:Src%2FApp.tsx');
     expect(draftKey('s1', 'A.md', '/r')).toBe('s1:A.md:%2Fr');
+    expect(draftKey('s1', 'A.md', 'C:\\r')).toBe('s1:A.md:C%3A%5Cr');
     expect(saverKey('s1', 'A.md', '/r')).toBe('s1:A.md:%2Fr');
-  });
-});
-
-describe('layout identity', () => {
-  const ref = (tab: EditorTab): TabRef => ({ type: 'editor', tab });
-
-  it('retargets every view of a file renamed under another spelling of its root', () => {
-    const open = external('docs/notes.md', 'C:\\Users\\a\\repo');
-    const tree = makeLeaf([ref(open), ref({ ...open, kind: 'external', view: 'linked' })]);
-    const next = renameBufferTabs(
-      tree,
-      external('Docs/Notes.md', 'c:\\users\\a\\repo'),
-      'docs/renamed.md',
-    );
-    expect(flattenTabs(next).map((t) => (t.type === 'editor' ? t.tab.path : ''))).toEqual([
-      'docs/renamed.md',
-      'docs/renamed.md',
-    ]);
-  });
-
-  it('leaves a following slot alone when it already shows the file in another spelling', () => {
-    const slot = { ...external('README.md', 'C:\\repo'), view: 'linked' as const };
-    const tree = makeLeaf([ref(slot)]);
-    expect(sameFollowingTarget(slot, external('readme.md', 'c:/REPO'))).toBe(true);
-    expect(retargetFollowingTabs(tree, ref(external('readme.md', 'c:/REPO')))).toBe(tree);
-    // A different file under the same root still retargets.
-    expect(retargetFollowingTabs(tree, ref(external('other.md', 'C:\\repo')))).not.toBe(tree);
-    expect(
-      sameFollowingTarget(
-        { session: 's1', path: 'README.md', view: 'linked' },
-        { session: 's1', path: 'readme.md' },
-      ),
-    ).toBe(false);
   });
 });
