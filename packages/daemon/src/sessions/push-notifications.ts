@@ -4,7 +4,7 @@ import {
   projectNotificationTitle,
   type AgentNotification,
 } from '@puddle/shared';
-import { ipcPath, privatePath } from '@puddle/shared/node';
+import { checkIpcEndpoint, ipcPath } from '@puddle/shared/node';
 import type { SessionService, SessionServiceDeps } from './service.js';
 
 /** Send bounded attention previews to the profile's same-user connector for encryption. */
@@ -25,7 +25,9 @@ export function subscribePushNotifications(
       if (!prefs.success || !prefs.data.desktop || prefs.data.muted_projects.includes(project.id))
         return;
       const path = ipcPath(home, `remote-${project.profile_id}`);
-      privatePath(path);
+      // A Unix socket must be private; a Windows pipe is never stat'd, which
+      // would open it as a client.
+      checkIpcEndpoint(path);
       const socket = connect(path);
       sockets.add(socket);
       socket.setTimeout(1500, () => socket.destroy());
