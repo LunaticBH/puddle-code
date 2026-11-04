@@ -125,64 +125,71 @@ describe('removing the daemon from this Windows machine', () => {
     expect(lines).toContain(`puddled remove: deleted ${home}`);
   });
 
-  it('disables remote access, removes the logon task, then stops the supervisor', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'puddle-windows-remove-'));
-    const order = join(home, 'order.log');
-    // An installed release whose connector records `--disable-all`.
-    const current = join(home, 'bin', 'current');
-    mkdirSync(join(current, 'bin'), { recursive: true });
-    mkdirSync(join(current, 'daemon'), { recursive: true });
-    try {
-      linkSync(process.execPath, join(current, 'bin', 'node.exe'));
-    } catch {
-      copyFileSync(process.execPath, join(current, 'bin', 'node.exe'));
-    }
-    writeFileSync(
-      join(current, 'daemon', 'connector.mjs'),
-      `import { appendFileSync } from 'node:fs';\n` +
-        `appendFileSync(${JSON.stringify(order)}, process.argv.slice(2).join(' ') + '\\n');\n`,
-    );
-    writeFileSync(join(current, 'CONNECTOR_PROTOCOL'), '4\n');
-    mkdirSync(join(home, 'remote'));
-    writeFileSync(join(home, 'remote', 'supervised'), '');
-    const tasks = absentTask((env) =>
-      appendFileSync(order, `unregister ${env.PUDDLE_TASK_NAME}\n`),
-    );
-    const sockets = new Set<Socket>();
-    const supervisor = await listenPrivate(ipcPath(home, 'supervisor'), (socket) => {
-      sockets.add(socket);
-      socket.on('error', () => {});
-      socket.once('data', (request: Buffer) => {
-        const { t, challenge } = JSON.parse(request.toString()) as { t: string; challenge: string };
-        if (t === 'shutdown') {
-          appendFileSync(order, 'supervisor shutdown\n');
-          setTimeout(() => {
-            for (const each of sockets) each.destroy();
-            supervisor.close();
-          }, 100);
-        }
-        socket.end(
-          JSON.stringify({
-            t: 'supervisor',
-            proof: ipcProof(home, 'supervisor', challenge),
-            pid: 999_999_999,
-            daemon: null,
-            connector: null,
-            stopping: true,
-          }) + '\n',
-        );
+  // Windows only: it runs a copy of this node.exe, which elsewhere may be a wrapper script.
+  it.runIf(process.platform === 'win32')(
+    'disables remote access, removes the logon task, then stops the supervisor',
+    async () => {
+      const home = mkdtempSync(join(tmpdir(), 'puddle-windows-remove-'));
+      const order = join(home, 'order.log');
+      // An installed release whose connector records `--disable-all`.
+      const current = join(home, 'bin', 'current');
+      mkdirSync(join(current, 'bin'), { recursive: true });
+      mkdirSync(join(current, 'daemon'), { recursive: true });
+      try {
+        linkSync(process.execPath, join(current, 'bin', 'node.exe'));
+      } catch {
+        copyFileSync(process.execPath, join(current, 'bin', 'node.exe'));
+      }
+      writeFileSync(
+        join(current, 'daemon', 'connector.mjs'),
+        `import { appendFileSync } from 'node:fs';\n` +
+          `appendFileSync(${JSON.stringify(order)}, process.argv.slice(2).join(' ') + '\\n');\n`,
+      );
+      writeFileSync(join(current, 'CONNECTOR_PROTOCOL'), '4\n');
+      mkdirSync(join(home, 'remote'));
+      writeFileSync(join(home, 'remote', 'supervised'), '');
+      const tasks = absentTask((env) =>
+        appendFileSync(order, `unregister ${env.PUDDLE_TASK_NAME}\n`),
+      );
+      const sockets = new Set<Socket>();
+      const supervisor = await listenPrivate(ipcPath(home, 'supervisor'), (socket) => {
+        sockets.add(socket);
+        socket.on('error', () => {});
+        socket.once('data', (request: Buffer) => {
+          const { t, challenge } = JSON.parse(request.toString()) as {
+            t: string;
+            challenge: string;
+          };
+          if (t === 'shutdown') {
+            appendFileSync(order, 'supervisor shutdown\n');
+            setTimeout(() => {
+              for (const each of sockets) each.destroy();
+              supervisor.close();
+            }, 100);
+          }
+          socket.end(
+            JSON.stringify({
+              t: 'supervisor',
+              proof: ipcProof(home, 'supervisor', challenge),
+              pid: 999_999_999,
+              daemon: null,
+              connector: null,
+              stopping: true,
+            }) + '\n',
+          );
+        });
       });
-    });
-    await removeWindowsDaemon(home, { purge: false, powershell: tasks.runner });
-    expect(readFileSync(order, 'utf8').trim().split('\n')).toEqual([
-      '--disable-all',
-      `unregister ${supervisorTaskName(home)}`,
-      'supervisor shutdown',
-    ]);
-    expect(existsSync(join(home, 'remote', 'supervised'))).toBe(false);
-    expect(existsSync(join(home, 'remote'))).toBe(true);
-    expect(existsSync(join(home, 'bin'))).toBe(false);
-  });
+      await removeWindowsDaemon(home, { purge: false, powershell: tasks.runner });
+      expect(readFileSync(order, 'utf8').trim().split('\n')).toEqual([
+        '--disable-all',
+        `unregister ${supervisorTaskName(home)}`,
+        'supervisor shutdown',
+      ]);
+      expect(existsSync(join(home, 'remote', 'supervised'))).toBe(false);
+      expect(existsSync(join(home, 'remote'))).toBe(true);
+      expect(existsSync(join(home, 'bin'))).toBe(false);
+    },
+  );
 
   it('keeps removing when the logon task cannot be removed, and says where it is', async () => {
     const home = mkdtempSync(join(tmpdir(), 'puddle-windows-remove-'));

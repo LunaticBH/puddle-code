@@ -45,35 +45,44 @@ describe('the connector on this Windows machine', () => {
     });
   });
 
-  it('passes values on stdin only and reports the connector’s own status', async () => {
-    const home = homeWithConnector(
-      [
-        "let input = '';",
-        "process.stdin.on('data', (chunk) => (input += chunk));",
-        "process.stdin.on('end', () => {",
-        '  process.stdout.write(JSON.stringify({ args: process.argv.slice(2), input, home: process.env.PUDDLE_HOME }));',
-        '  process.exitCode = 3;',
-        '});',
-      ].join('\n'),
-    );
-    expect(windowsConnectorInstalled(home)).toBe(true);
-    const result = await runWindowsConnector(home, ['--admin'], {
-      stdin: '{"profile":"x"}\n',
-      timeoutMs: 30_000,
-    });
-    expect(result.code).toBe(3);
-    expect(JSON.parse(result.stdout)).toEqual({
-      args: ['--admin'],
-      input: '{"profile":"x"}\n',
-      home: resolve(home),
-    });
-  }, 60_000);
+  // Windows only: they run a copy of this node.exe, which elsewhere may be a wrapper script.
+  it.runIf(process.platform === 'win32')(
+    'passes values on stdin only and reports the connector’s own status',
+    async () => {
+      const home = homeWithConnector(
+        [
+          "let input = '';",
+          "process.stdin.on('data', (chunk) => (input += chunk));",
+          "process.stdin.on('end', () => {",
+          '  process.stdout.write(JSON.stringify({ args: process.argv.slice(2), input, home: process.env.PUDDLE_HOME }));',
+          '  process.exitCode = 3;',
+          '});',
+        ].join('\n'),
+      );
+      expect(windowsConnectorInstalled(home)).toBe(true);
+      const result = await runWindowsConnector(home, ['--admin'], {
+        stdin: '{"profile":"x"}\n',
+        timeoutMs: 30_000,
+      });
+      expect(result.code).toBe(3);
+      expect(JSON.parse(result.stdout)).toEqual({
+        args: ['--admin'],
+        input: '{"profile":"x"}\n',
+        home: resolve(home),
+      });
+    },
+    60_000,
+  );
 
-  it('gives up on a connector that does not answer in time', async () => {
-    const home = homeWithConnector('setInterval(() => {}, 1000);\n');
-    const result = await runWindowsConnector(home, ['--inspect'], { timeoutMs: 1000 });
-    expect(result.code).toBe(124);
-  }, 60_000);
+  it.runIf(process.platform === 'win32')(
+    'gives up on a connector that does not answer in time',
+    async () => {
+      const home = homeWithConnector('setInterval(() => {}, 1000);\n');
+      const result = await runWindowsConnector(home, ['--inspect'], { timeoutMs: 1000 });
+      expect(result.code).toBe(124);
+    },
+    60_000,
+  );
 });
 
 describe.runIf(process.platform === 'win32')('puddle remote on this Windows machine', () => {
