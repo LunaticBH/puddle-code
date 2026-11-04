@@ -12,6 +12,7 @@ import {
   installShellHooks,
   isDeniedEnvName,
 } from '../../src/pty/shell-hooks.js';
+import { powershellHookCommand } from '../../src/pty/windows-shell-hooks.js';
 import { resolvePaths } from '../../src/paths.js';
 
 const windows = process.platform === 'win32';
@@ -54,12 +55,12 @@ async function waitFor(cond: () => boolean, ms = 8000): Promise<void> {
 }
 
 /** A PTY harness with the hooks armed and a fake $HOME containing known rc files. */
-function harness(rcFiles: Record<string, string>) {
+function harness(rcFiles: Record<string, string>, puddleHomePrefix = 'puddle-hook-') {
   const home = mkdtempSync(join(tmpdir(), 'puddle-hook-home-'));
   for (const [name, content] of Object.entries(rcFiles)) {
     writeFileSync(join(home, name), content);
   }
-  const paths = resolvePaths(mkdtempSync(join(tmpdir(), 'puddle-hook-')));
+  const paths = resolvePaths(mkdtempSync(join(tmpdir(), puddleHomePrefix)));
   const hooks = installShellHooks(paths);
   const logsDir = mkdtempSync(join(tmpdir(), 'puddle-hook-logs-'));
   const logs = new LogStore(logsDir, 64 * 1024);
@@ -221,6 +222,13 @@ describe('installShellHooks', () => {
     const command = hooks.spawnConfig('pwsh.exe').args[3]!;
     expect(command).toContain(
       join(paths.shellHooksDir, 'powershell', 'hook.ps1').replaceAll("'", "''"),
+    );
+  });
+
+  it('doubles the typographic quotes that also close a PowerShell literal', () => {
+    // C:\Users\O’Brien: PowerShell ends a '…' string on U+2018 to U+201B too.
+    expect(powershellHookCommand('C:\\Users\\O\u2019Brien\\\u2018a\u201a\u201b\\hook.ps1')).toBe(
+      ". ([ScriptBlock]::Create([IO.File]::ReadAllText('C:\\Users\\O\u2019\u2019Brien\\\u2018\u2018a\u201a\u201a\u201b\u201b\\hook.ps1')))",
     );
   });
 
@@ -543,6 +551,14 @@ describe.skipIf(!windows)('PowerShell session hook', () => {
     expect(names.some((name) => name.startsWith('PUDDLE_'))).toBe(false);
     expect(h.output()).not.toContain('7733');
     expect(h.log()).not.toContain('7733');
+    h.kill();
+  });
+
+  it('runs the hook from a Puddle home whose path holds a typographic apostrophe', async () => {
+    const h = harness({}, 'puddle-o’hook-');
+    h.spawn(powershell);
+    await waitFor(() => h.cwds.some((e) => e.cwd === h.home), 20_000);
+    expect(h.output()).not.toContain('missing the terminator');
     h.kill();
   });
 

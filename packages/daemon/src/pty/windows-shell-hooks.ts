@@ -16,10 +16,9 @@
  * directories only it knows: `pwd -W` gives the native path.
  */
 
-/** A PowerShell single-quoted literal: no expansion; `'` is doubled. */
-export function powershellLiteral(value: string): string {
-  return `'${value.replaceAll("'", "''")}'`;
-}
+// The agent hooks' quoting: a home path may hold a typographic quote
+// (C:\Users\O’Brien), which also closes a PowerShell literal.
+import { powershellLiteral } from '../agents/shell-quote.js';
 
 /** A POSIX shell single-quoted word. */
 function shellWord(value: string): string {
