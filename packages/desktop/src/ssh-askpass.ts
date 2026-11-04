@@ -2,6 +2,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
+import { initialisePrivateHome } from '@puddle/shared/node';
 import { renameWithRetrySync } from '@puddle/shared/node/platform';
 
 export interface SshAskpassRequest {
@@ -32,6 +33,8 @@ export async function startSshAskpass(opts: {
   prompt(request: SshAskpassRequest, signal: AbortSignal): Promise<string | null>;
 }): Promise<RunningSshAskpass> {
   const platform = opts.platform ?? process.platform;
+  // The descriptor below holds the bridge's token: never in a home others can open.
+  if (platform === 'win32') initialisePrivateHome(opts.home);
   const token = randomBytes(32).toString('hex');
   const lifetime = new AbortController();
   const server = createServer((request, response) => {

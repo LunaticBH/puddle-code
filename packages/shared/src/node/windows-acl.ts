@@ -102,27 +102,92 @@ export function windowsAclProblem(
   return acl.nullDacl || foreignPrincipals(acl, user).length > 0 ? 'shared' : null;
 }
 
-/** The owner and DACL of `path`, through Windows PowerShell's Get-Acl. */
-export function readWindowsAcl(path: string): WindowsAcl {
-  const sddl = execFileSync(
+/** The owners an entry of the home may have: the user, SYSTEM and Administrators. */
+export function trustedOwners(user: string): string[] {
+  return [user, ...TRUSTED];
+}
+
+export interface WindowsDirectoryInspection {
+  acl: WindowsAcl;
+  /**
+   * With `owners`: the first entry inside that a principal outside them may
+   * have put there. `owner`: another account owns it, or its owner cannot be
+   * read. `link`: a junction or symbolic link, which could lead to a folder
+   * other accounts can write and is never followed.
+   */
+  untrusted?: { kind: 'owner' | 'link'; path: string };
+}
+
+/** Entries an inspection checks at most: a young home holds a few dozen. */
+export const INSPECTION_LIMIT = 50_000;
+
+/**
+ * Get-Acl's SDDL of the directory, then (with PUDDLE_ACL_OWNERS) a walk
+ * that stops at the first untrusted entry. UTF-8 output keeps a path's
+ * characters whatever the console code page (only the message needs them).
+ */
+const INSPECT = [
+  "$ErrorActionPreference = 'Stop'",
+  'try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}',
+  '(Get-Acl -LiteralPath $env:PUDDLE_ACL_PATH).Sddl',
+  'if ($env:PUDDLE_ACL_OWNERS) {',
+  "  $owners = $env:PUDDLE_ACL_OWNERS -split ';'",
+  '  $sid = [Security.Principal.SecurityIdentifier]',
+  '  $link = [IO.FileAttributes]::ReparsePoint',
+  '  $left = [int]$env:PUDDLE_ACL_LIMIT',
+  '  $pending = New-Object Collections.Stack',
+  '  $pending.Push([IO.DirectoryInfo]$env:PUDDLE_ACL_PATH)',
+  '  while ($pending.Count -gt 0) {',
+  '    foreach ($entry in $pending.Pop().EnumerateFileSystemInfos()) {',
+  "      if (--$left -lt 0) { 'limit'; exit }",
+  '      if ($entry.Attributes -band $link) { "link`t$($entry.FullName)"; exit }',
+  "      try { $owner = $entry.GetAccessControl('Owner').GetOwner($sid).Value } catch { $owner = '' }",
+  '      if ($owners -notcontains $owner) { "owner`t$($entry.FullName)"; exit }',
+  '      if ($entry -is [IO.DirectoryInfo]) { $pending.Push($entry) }',
+  '    }',
+  '  }',
+  '}',
+].join('\n');
+
+/**
+ * The owner and DACL of `path`, through Windows PowerShell's Get-Acl; with
+ * `owners`, also the first entry inside that they do not account for.
+ */
+export function inspectWindowsDirectory(
+  path: string,
+  owners?: readonly string[],
+): WindowsDirectoryInspection {
+  const output = execFileSync(
     system32Path(win32.join('WindowsPowerShell', 'v1.0', 'powershell.exe')),
-    [
-      '-NoLogo',
-      '-NoProfile',
-      '-NonInteractive',
-      '-Command',
-      '(Get-Acl -LiteralPath $env:PUDDLE_ACL_PATH).Sddl',
-    ],
+    ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', INSPECT],
     {
       // The path travels in the environment, so PowerShell never parses it.
-      env: { ...process.env, PUDDLE_ACL_PATH: path },
+      env: {
+        ...process.env,
+        PUDDLE_ACL_PATH: path,
+        PUDDLE_ACL_OWNERS: owners?.join(';') ?? '',
+        PUDDLE_ACL_LIMIT: String(INSPECTION_LIMIT),
+      },
       windowsHide: true,
-      timeout: 30_000,
+      timeout: 120_000,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     },
   );
-  return parseSddl(sddl.trim());
+  return parseInspection(output);
+}
+
+/** `<sddl>` and, after a walk that found something, `limit` or `<kind>\t<path>`. */
+export function parseInspection(output: string): WindowsDirectoryInspection {
+  const [sddl = '', finding] = output.split(/\r?\n/).filter((line) => line.trim() !== '');
+  const acl = parseSddl(sddl.trim());
+  if (finding === undefined) return { acl };
+  if (finding.trim() === 'limit') {
+    throw new Error(`it holds more than ${INSPECTION_LIMIT} entries to check`);
+  }
+  const match = /^(owner|link)\t(.+)$/.exec(finding);
+  if (match === null) throw new Error('PowerShell reported an unexpected result');
+  return { acl, untrusted: { kind: match[1] as 'owner' | 'link', path: match[2]! } };
 }
 
 /**

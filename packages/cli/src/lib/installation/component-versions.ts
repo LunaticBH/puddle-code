@@ -3,7 +3,7 @@ import { dirname, join, resolve } from 'node:path';
 import { PROTOCOL_VERSION } from '@puddle/shared';
 import { readCurrentVersion } from './current-link.js';
 import { findInstalledDesktopApp } from './desktop-update.js';
-import { clientHome } from '../paths.js';
+import { clientHome, prepareClientHome } from '../paths.js';
 import { cliVersion } from '../version.js';
 
 export interface SpeakingProtocol {
@@ -197,6 +197,8 @@ export function recordDesktopInstallation(
   file = desktopRecordFile(clientHome()),
 ): void {
   try {
+    // The desktop's first write to a new home, on every start.
+    prepareClientHome(dirname(file));
     mkdirSync(dirname(file), { recursive: true });
     const temp = `${file}.${process.pid}.tmp`;
     writeFileSync(temp, `${JSON.stringify(installation, null, 2)}\n`);

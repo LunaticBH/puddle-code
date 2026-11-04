@@ -3,12 +3,14 @@ import {
   chmodSync,
   closeSync,
   constants,
+  existsSync,
   fchmodSync,
   fstatSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -24,8 +26,9 @@ import { renameWithRetrySync } from './rename.js';
 import {
   currentWindowsUserSid,
   foreignPrincipals,
-  readWindowsAcl,
+  inspectWindowsDirectory,
   restrictWindowsDirectory,
+  trustedOwners,
   windowsAclProblem,
 } from './windows-acl.js';
 
@@ -93,13 +96,10 @@ export function initialisePrivateHome(home: string): void {
  * DACL for the owner, SYSTEM and Administrators (docs/windows.md, decision
  * 2; best effort, warned on failure). Inside the user's profile, whose
  * inherited ACL is owner-only, no other account can have created or opened
- * an existing home. Anywhere else (a `PUDDLE_HOME` such as `D:\puddle`) an
- * existing home is checked once per process, as the POSIX branch checks
- * one: another account's is refused, and one shared with other principals,
- * typically through a drive root's inherited ACL, receives the protected
- * DACL or is refused when it cannot. Reparse points are refused as the
- * POSIX symlink rule refuses symlinks; Node reports junctions as symbolic
- * links.
+ * an existing home. Anywhere else (a `PUDDLE_HOME` such as `D:\puddle`) the
+ * home is checked once per process, as the POSIX branch checks one: see
+ * assertPrivateWindowsHome. Reparse points are refused as the POSIX symlink
+ * rule refuses symlinks; Node reports junctions as symbolic links.
  */
 function initialiseWindowsHome(path: string): void {
   let existing: Stats | null = null;
@@ -117,7 +117,7 @@ function initialiseWindowsHome(path: string): void {
   // ipcPath runs this for every pipe name: PowerShell runs once per home.
   const identity = realpathSync.native(path).toLowerCase();
   if (verifiedWindowsHomes.has(identity)) return;
-  if (!insideWindowsProfile(identity)) assertPrivateWindowsHome(path);
+  if (!insideWindowsProfile(identity)) assertPrivateWindowsHome(path, existing === null);
   verifiedWindowsHomes.add(identity);
 }
 
@@ -153,17 +153,55 @@ function insideWindowsProfile(home: string): boolean {
   return relative !== '' && !relative.startsWith('..') && !win32.isAbsolute(relative);
 }
 
-/** Never adopt a home another account owns or can open. */
-function assertPrivateWindowsHome(path: string): void {
-  const refusal = `Puddle home must be owned by the current user and not shared with other users: ${path}`;
+/**
+ * Never adopt a home another account owns, can open, or could have put
+ * anything in. Another account's home is refused. One shared with other
+ * principals, typically through a drive root's inherited ACL, receives the
+ * protected DACL, or is refused when it cannot.
+ *
+ * That DACL does not reach entries others own, so a home this call created
+ * or repaired is adopted only once every entry in it is the user's (or
+ * SYSTEM's or Administrators') and none is a link: anything else may have
+ * been planted while it was open, an `ipc-key` an impostor chose or a
+ * runtime under `bin\versions` among them. `<home>\unverified` keeps that
+ * check, and the refusal, for every later process until it passes. The IPC
+ * key and nonce of a repaired home were readable meanwhile, so they are
+ * then replaced; while one of its pipes is served that would orphan the
+ * daemon, so such a home is refused until that daemon stops. PowerShell
+ * must be able to run.
+ */
+function assertPrivateWindowsHome(path: string, created: boolean): void {
+  const refuse = (reason: string) => new Error(`${reason}: ${path}`);
+  const marker = join(path, UNVERIFIED);
+  let inspection: ReturnType<typeof inspectWindowsDirectory>;
   let problem: ReturnType<typeof windowsAclProblem>;
+  let rekey: boolean;
+  let served = false;
   try {
     windowsUserSid ??= currentWindowsUserSid();
-    const acl = readWindowsAcl(path);
-    problem = windowsAclProblem(acl, windowsUserSid);
+    const owners = trustedOwners(windowsUserSid);
+    let pending = existsSync(marker);
+    rekey = pending && readFileSync(marker, 'utf8') === 'shared';
+    if (created) {
+      writeFileSync(marker, 'new');
+      pending = true;
+    }
+    inspection = inspectWindowsDirectory(path, pending ? owners : undefined);
+    problem = windowsAclProblem(inspection.acl, windowsUserSid);
     if (problem === 'shared') {
-      restrictWindowsDirectory(path, windowsUserSid, foreignPrincipals(acl, windowsUserSid));
-      problem = windowsAclProblem(readWindowsAcl(path), windowsUserSid);
+      served = windowsHomePipesServed(path);
+      if (!served) {
+        const foreign = foreignPrincipals(inspection.acl, windowsUserSid);
+        restrictWindowsDirectory(path, windowsUserSid, foreign);
+        // Rewritten once the DACL keeps others out, so they cannot remove it.
+        writeFileSync(marker, 'shared');
+        rekey = true;
+        inspection = inspectWindowsDirectory(path, owners);
+        problem = windowsAclProblem(inspection.acl, windowsUserSid);
+      }
+    }
+    if (rekey && !served && problem === null && inspection.untrusted === undefined) {
+      served = windowsHomePipesServed(path);
     }
   } catch (err) {
     throw new Error(
@@ -172,8 +210,35 @@ function assertPrivateWindowsHome(path: string): void {
       { cause: err },
     );
   }
-  if (problem !== null) throw new Error(refusal);
+  if (served) {
+    throw refuse(
+      'Puddle is running from this home, whose keys other users could read and must be replaced: ' +
+        'end node.exe running its puddled.mjs in Task Manager, then run Puddle again',
+    );
+  }
+  if (problem !== null) {
+    throw refuse('Puddle home must be owned by the current user and not shared with other users');
+  }
+  const planted = inspection.untrusted;
+  if (planted !== undefined) {
+    const what = planted.kind === 'link' ? 'is a link' : 'another account owns';
+    throw refuse(
+      `Puddle home holds ${planted.path}, which ${what} and other users could have put there ` +
+        'while they could open the home: move the home aside and let Puddle create it again',
+    );
+  }
+  if (!existsSync(marker)) return;
+  if (rekey) {
+    for (const [name, bytes] of IPC_SECRETS) {
+      const file = join(path, name);
+      if (existsSync(file)) replaceHomeSecret(file, bytes);
+    }
+  }
+  rmSync(marker, { force: true });
 }
+
+/** Present while a home outside the profile awaits its entry-by-entry check. */
+const UNVERIFIED = 'unverified';
 
 export function atomicPrivateJson(path: string, value: unknown): void {
   privateDirectory(dirname(path));
@@ -238,6 +303,32 @@ function windowsPipeName(home: string, scope: string, key: string, nonce: string
 const ipcKey = (home: string) => homeSecret(join(home, 'ipc-key'), 32, 'IPC key');
 /** `<home>\ipc-nonce`: 32 random hex characters, replaced to rename every pipe. */
 const ipcNonce = (home: string) => homeSecret(join(home, 'ipc-nonce'), 16, 'IPC nonce');
+/** Both, by file name and size in bytes. */
+const IPC_SECRETS = [
+  ['ipc-key', 32],
+  ['ipc-nonce', 16],
+] as const;
+
+/**
+ * Whether the daemon's or the installer's pipe of a home is served now,
+ * from the pipe namespace: nothing connects, and neither secret is created.
+ */
+function windowsHomePipesServed(home: string): boolean {
+  const [key, nonce] = IPC_SECRETS.map(([name, bytes]) => {
+    try {
+      const value = readFileSync(join(home, name), 'utf8');
+      return new RegExp(`^[0-9a-f]{${bytes * 2}}$`).test(value) ? value : undefined;
+    } catch {
+      return undefined;
+    }
+  });
+  // Without both, the home has never named a pipe.
+  if (key === undefined || nonce === undefined) return false;
+  const served = new Set(readdirSync(PIPES).map((name) => name.toLowerCase()));
+  return ['host', 'install'].some((scope) =>
+    served.has(windowsPipeName(home, scope, key, nonce).toLowerCase()),
+  );
+}
 
 /**
  * Give every Windows pipe of the home a new name. Only for a name that a
@@ -245,11 +336,15 @@ const ipcNonce = (home: string) => homeSecret(join(home, 'ipc-nonce'), 16, 'IPC 
  * lock, before it starts a daemon, so the squatted name is never used again.
  */
 export function rotateIpcNonce(home: string): void {
-  const path = join(home, 'ipc-nonce');
+  replaceHomeSecret(join(home, 'ipc-nonce'), 16);
+}
+
+/** Write a new random value over a home secret, atomically. */
+function replaceHomeSecret(path: string, bytes: number): void {
   const tmp = `${path}.${secret()}.tmp`;
   const fd = openSync(tmp, 'wx', 0o600);
   try {
-    writeFileSync(fd, randomBytes(16).toString('hex'));
+    writeFileSync(fd, randomBytes(bytes).toString('hex'));
     fsyncSync(fd);
   } finally {
     closeSync(fd);

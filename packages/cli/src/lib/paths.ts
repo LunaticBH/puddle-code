@@ -1,5 +1,6 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { initialisePrivateHome } from '@puddle/shared/node';
 
 /**
  * The CLIENT machine's ~/.puddle — SSH control sockets and the tarball cache
@@ -9,6 +10,19 @@ import { join } from 'node:path';
  */
 export function clientHome(env: Record<string, string | undefined> = process.env): string {
   return env.PUDDLE_HOME ?? join(homedir(), '.puddle');
+}
+
+/**
+ * Call before writing the first file into the client home. On Windows a
+ * plain recursive mkdir would give a home outside the profile its drive
+ * root's inherited ACL, open to every local account until the first check,
+ * and whatever they put in it meanwhile would outlive that check
+ * (docs/windows.md, decision 2): `initialisePrivateHome` creates the home
+ * restricted instead, or checks an existing one. Elsewhere callers keep
+ * their own mkdir.
+ */
+export function prepareClientHome(home = clientHome(), platform = process.platform): void {
+  if (platform === 'win32') initialisePrivateHome(home);
 }
 
 /**

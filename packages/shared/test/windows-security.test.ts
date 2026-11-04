@@ -11,7 +11,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   atomicPrivateJson,
   initialisePrivateHome,
@@ -97,6 +97,75 @@ describe.skipIf(process.platform !== 'win32')('Windows Puddle home', () => {
       expect(acl.match(/\(OI\)\(CI\)\(F\)/g)).toHaveLength(3);
       expect(acl).not.toMatch(/\((M|R)\)/);
       expect(icacls(join(home, 'logs', 'cockpit.log')).match(/\(I\)\(F\)/g)).toHaveLength(3);
+    });
+
+    it('checks a home it creates entry by entry, and leaves no marker once it passes', () => {
+      const { home } = fixture();
+      initialisePrivateHome(home);
+      expect(icacls(home)).not.toContain('(I)');
+      expect(existsSync(join(home, 'unverified'))).toBe(false);
+    });
+
+    it('keeps refusing a shared home holding a link another user could have planted', () => {
+      // A junction to a folder another account controls, made while the home was open.
+      const { parent, home } = fixture();
+      grant(parent, '*S-1-5-11:(OI)(CI)M');
+      const theirs = join(parent, 'theirs');
+      mkdirSync(theirs);
+      writeFileSync(join(theirs, 'node.exe'), '');
+      mkdirSync(join(home, 'bin', 'versions'), { recursive: true });
+      symlinkSync(theirs, join(home, 'bin', 'versions', '1.2.3'), 'junction');
+      expect(() => initialisePrivateHome(home)).toThrow(/versions\\1\.2\.3, which is a link/);
+      // Repaired meanwhile, so nothing else gets in; still refused by every later process.
+      expect(icacls(home)).not.toMatch(/\(M\)/);
+      expect(() => initialisePrivateHome(home)).toThrow('which is a link');
+      expect(() => ipcPath(home, 'host')).toThrow('which is a link');
+      expect(existsSync(join(home, 'ipc-key'))).toBe(false);
+      rmSync(join(home, 'bin', 'versions', '1.2.3'));
+      initialisePrivateHome(home);
+      expect(existsSync(join(home, 'unverified'))).toBe(false);
+    });
+
+    it('replaces the IPC key and nonce of a home others could read', () => {
+      const { parent, home } = fixture();
+      grant(parent, '*S-1-5-11:(OI)(CI)M');
+      mkdirSync(home);
+      writeFileSync(join(home, 'ipc-key'), 'a'.repeat(64));
+      writeFileSync(join(home, 'ipc-nonce'), 'b'.repeat(32));
+      initialisePrivateHome(home);
+      const key = readFileSync(join(home, 'ipc-key'), 'utf8');
+      const nonce = readFileSync(join(home, 'ipc-nonce'), 'utf8');
+      expect(key).toMatch(/^[0-9a-f]{64}$/);
+      expect(key).not.toBe('a'.repeat(64));
+      expect(nonce).toMatch(/^[0-9a-f]{32}$/);
+      expect(nonce).not.toBe('b'.repeat(32));
+      expect(existsSync(join(home, 'unverified'))).toBe(false);
+    });
+
+    it('leaves a shared home whose daemon is running until it stops, then rekeys it', async () => {
+      // Each process checks a home once: fresh module instances play later processes.
+      const fresh = async () => {
+        vi.resetModules();
+        return import('../src/node/security.js');
+      };
+      const { home } = fixture();
+      const first = await fresh();
+      const served = first.ipcPath(home, 'host');
+      const daemon = await first.listenPrivate(served, (socket) => socket.end());
+      grant(home, '*S-1-5-11:(OI)(CI)M');
+      try {
+        const second = await fresh();
+        expect(() => second.initialisePrivateHome(home)).toThrow(
+          'Puddle is running from this home',
+        );
+        // Renaming its pipes now would orphan the daemon: the home is left as it was.
+        expect(icacls(home)).toMatch(/\(M\)/);
+      } finally {
+        await new Promise<void>((resolve) => daemon.close(() => resolve()));
+      }
+      const third = await fresh();
+      expect(third.ipcPath(home, 'host')).not.toBe(served);
+      expect(icacls(home)).not.toMatch(/\(M\)/);
     });
   });
 
