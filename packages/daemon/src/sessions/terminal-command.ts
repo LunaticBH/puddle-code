@@ -84,13 +84,17 @@ export interface RunWrapperPlan {
  * `[Process exited with status N]` line as POSIX; then runs the session shell
  * with inherited stdio and exits with its status. A programme ended by Ctrl+C
  * (STATUS_CONTROL_C_EXIT) reports 130, as a shell reports SIGINT; one that
- * cannot start reports 127 or 126 with the error, like env(1). Each status
- * line waits for its write, since console writes are asynchronous on Windows.
+ * cannot start reports 127 or 126 with the error, like env(1). A file that is
+ * not an absolute path (a name the daemon did not find on PATH) is never
+ * spawned: libuv would look for it in the working directory, the worktree,
+ * before PATH, so it reports 127 at once. Each status line waits for its
+ * write, since console writes are asynchronous on Windows.
  */
 export const RUN_WRAPPER = `
 'use strict';
 const { spawn } = require('node:child_process');
 const { constants } = require('node:os');
+const { win32 } = require('node:path');
 const NL = String.fromCharCode(10);
 const plan = JSON.parse(Buffer.from(process.argv[1], 'base64').toString('utf8'));
 for (const signal of ['SIGINT', 'SIGBREAK']) process.on(signal, () => {});
@@ -110,6 +114,10 @@ const run = (step) => new Promise((resolve) => {
     process.stderr.write(step.file + ': ' + error.message + NL);
     settle(error.code === 'ENOENT' ? 127 : 126);
   };
+  if (!win32.isAbsolute(step.file)) {
+    fail(Object.assign(new Error('spawn ' + step.file + ' ENOENT'), { code: 'ENOENT' }));
+    return;
+  }
   try {
     const child = spawn(step.file, step.args, { stdio: 'inherit', env: overlay(env, step.env || {}), windowsVerbatimArguments: step.verbatim === true });
     child.once('error', fail);
@@ -139,7 +147,8 @@ const run = (step) => new Promise((resolve) => {
  * environment with the command's variables applied: npm shims become
  * `node <script>` and other batch files run through cmd.exe with strict
  * quoting, which throws `UnsafeCmdArgumentError` for an argument cmd.exe
- * cannot carry.
+ * cannot carry. A name that is not on PATH stays bare, and the wrapper
+ * refuses to spawn it.
  */
 function windowsRunWrapperSpawn(
   command: TerminalCommand,

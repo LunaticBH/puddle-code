@@ -1,9 +1,9 @@
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { delimiter, dirname, join } from 'node:path';
+import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { hostname, tmpdir } from 'node:os';
+import { delimiter, dirname, isAbsolute, join, relative } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { UnsafeCmdArgumentError } from '@puddle/shared/node/platform';
+import { deleteEnv, system32Path, UnsafeCmdArgumentError } from '@puddle/shared/node/platform';
 import {
   RUN_WRAPPER,
   terminalCommandArgs,
@@ -33,9 +33,15 @@ function runWrapper(
   file: string,
   args: string[],
   env: NodeJS.ProcessEnv = process.env,
+  cwd?: string,
 ): Promise<{ status: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(file, args, { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    const child = spawn(file, args, {
+      cwd,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString('utf8')));
@@ -158,6 +164,50 @@ describe('one-shot terminal commands', () => {
     expect(result.stderr).toContain('missing.exe');
     expect(result.status).toBe(0);
   });
+
+  it('never spawns a file that is not an absolute path, reporting it as env(1) would', async () => {
+    const cwd = directory();
+    // Spawned, this would run node relative to the working directory.
+    const relativeNode = relative(cwd, process.execPath);
+    expect(isAbsolute(relativeNode)).toBe(false);
+    const plan: RunWrapperPlan = {
+      banner: 'relative',
+      env: {},
+      commands: [{ file: relativeNode, args: ['-e', 'console.log("PLANTED")'] }],
+      shell: node('process.exit(0)'),
+    };
+    const result = await runWrapper(
+      process.execPath,
+      ['-e', RUN_WRAPPER, Buffer.from(JSON.stringify(plan)).toString('base64')],
+      process.env,
+      cwd,
+    );
+    expect(result.stdout).not.toContain('PLANTED');
+    expect(result.stdout).toContain('[Process exited with status 127]');
+    expect(result.stderr).toContain(`spawn ${relativeNode} ENOENT`);
+    expect(result.status).toBe(0);
+  });
+
+  it.runIf(process.platform === 'win32')(
+    'never runs a programme planted in the working directory on Windows',
+    async () => {
+      const cwd = directory();
+      // Any executable will do; hostname.exe prints this machine's name.
+      copyFileSync(system32Path('hostname.exe'), join(cwd, 'puddle-planted.exe'));
+      const spawned = terminalCommandSpawn(
+        { cwd, commands: [{ file: 'puddle-planted', args: [] }] },
+        process.execPath,
+        ['-e', 'process.exit(0)'],
+      );
+      // A plain user environment: Claude Code's own shells set this, hiding the lookup.
+      const env = { ...process.env };
+      deleteEnv(env, 'NoDefaultCurrentDirectoryInExePath', 'win32');
+      const result = await runWrapper(spawned.file, spawned.args, env, cwd);
+      expect(result.stdout.toLowerCase()).not.toContain(hostname().toLowerCase());
+      expect(result.stdout).toContain('[Process exited with status 127]');
+      expect(result.stderr).toContain('spawn puddle-planted ENOENT');
+    },
+  );
 
   it.runIf(process.platform === 'win32')(
     'runs an npm-installed command by name end to end on Windows',

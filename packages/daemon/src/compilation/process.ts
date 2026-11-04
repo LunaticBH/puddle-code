@@ -4,6 +4,7 @@ import {
   type StdioNull,
   type StdioPipe,
 } from 'node:child_process';
+import { win32 } from 'node:path';
 import { killProcessTree, resolveSpawn } from '@puddle/shared/node/platform';
 import { withEnvironment } from './environment.js';
 
@@ -64,7 +65,9 @@ export function disposeCompilationCommands(): void {
  * cancellation stops the tree with taskkill. npm-style `.cmd` shims and other
  * batch files are resolved first, since Node will not start them directly.
  * Throws `UnsafeCmdArgumentError` for a batch file whose arguments cmd.exe
- * cannot carry.
+ * cannot carry, and ENOENT for a name not found on PATH: spawned bare, libuv
+ * would look for it in the command's working directory first, inside the
+ * repository.
  */
 export function compilationSpawn(
   command: CompilationCommand,
@@ -82,6 +85,13 @@ export function compilationSpawn(
     platform,
     env: command.env ?? process.env,
   });
+  if (!win32.isAbsolute(resolved.file)) {
+    throw Object.assign(new Error(`spawn ${command.file} ENOENT`), {
+      code: 'ENOENT',
+      syscall: 'spawn',
+      path: command.file,
+    });
+  }
   return {
     file: resolved.file,
     args: resolved.args,

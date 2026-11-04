@@ -1,5 +1,6 @@
 import {
   chmodSync,
+  copyFileSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -11,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { compilationCapabilitiesResponseSchema, type Session } from '@puddle/shared';
-import { isPidAlive } from '@puddle/shared/node/platform';
+import { isPidAlive, system32Path } from '@puddle/shared/node/platform';
 import { CodeProvider, createCodeProviders } from '../../src/code/provider.js';
 import { codeSearchDirectories, findCodeExecutable } from '../../src/code/discovery.js';
 import { CODE_RECIPES, managedBinaryName, recipeExecutables } from '../../src/code/recipes.js';
@@ -334,6 +335,33 @@ describe('code tool discovery and process bounds', () => {
     });
     expect(windows.options.detached).toBeUndefined();
   });
+
+  it('refuses a Windows command missing from PATH instead of searching its working directory', () => {
+    const cwd = directory();
+    writeFileSync(join(cwd, 'planted.exe'), '');
+    const command = { file: 'planted', args: [], cwd, env: { PATH: directory() } };
+    expect(() => compilationSpawn(command, 'win32')).toThrow(/spawn planted ENOENT/);
+    // POSIX execvp never looks in the working directory: the name stays as given.
+    expect(compilationSpawn(command, 'linux').file).toBe('planted');
+  });
+
+  it.runIf(process.platform === 'win32')(
+    'never runs an executable planted in the command’s working directory',
+    async () => {
+      const cwd = directory();
+      copyFileSync(system32Path('hostname.exe'), join(cwd, 'puddle-planted.exe'));
+      // A plain user environment: Claude Code's own shells set this, hiding the lookup.
+      const saved = process.env.NoDefaultCurrentDirectoryInExePath;
+      delete process.env.NoDefaultCurrentDirectoryInExePath;
+      try {
+        await expect(
+          runCompilationCommand({ file: 'puddle-planted', args: [], cwd, env: process.env }),
+        ).rejects.toThrow(/Could not start Compilation command: spawn puddle-planted ENOENT/);
+      } finally {
+        if (saved !== undefined) process.env.NoDefaultCurrentDirectoryInExePath = saved;
+      }
+    },
+  );
 
   it('stops the whole process tree when a command times out', async () => {
     const cwd = directory();
