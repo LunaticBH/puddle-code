@@ -23,6 +23,7 @@ import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import { initialisePrivateHome, ipcPath, listenPrivate } from '@puddle/shared/node';
 import { renameWithRetry, system32Path } from '@puddle/shared/node/platform';
 import { parseSums } from './desktop-update.js';
+import { releaseArchiveName, releaseAssetUrl } from './releases.js';
 import {
   controlPipePresent,
   startWindowsDaemon,
@@ -63,17 +64,6 @@ export interface WindowsInstallOptions {
   replaceRunning?: boolean;
   logger?: Logger;
   fetchFn?: typeof fetch;
-}
-
-/**
- * The asset this machine needs. Windows arm64 runs the x64 runtime under
- * emulation in v1, so every Windows host takes the x64 archive.
- */
-export function windowsAssetName(version: string, arch: string = process.arch): string {
-  if (arch !== 'x64' && arch !== 'arm64') {
-    throw new CliError('unsupported_platform', `puddled has no Windows ${arch} build`);
-  }
-  return `puddled-v${version}-win32-x64.zip`;
 }
 
 /** The version a Windows release archive's file name carries. */
@@ -203,12 +193,13 @@ async function download(
       'pass --tarball <path> (a puddled-v<version>-win32-x64.zip) or set PUDDLE_REPO=owner/repo',
     );
   }
-  const file = windowsAssetName(version);
-  const base = `https://github.com/${slug}/releases/download/v${version}`;
+  // Every Windows host takes the x64 archive: arm64 runs it under emulation in v1.
+  const file = releaseArchiveName('puddled', version, 'win32');
+  const url = releaseAssetUrl(slug, version, file);
   const archive = join(home, 'cache', file);
-  logger.info(`fetching ${base}/${file}`);
+  logger.info(`fetching ${url}`);
   await withEnvironmentProxy(async () => {
-    const response = await fetchFn(`${base}/${file}`, { headers: { 'user-agent': 'puddle-cli' } });
+    const response = await fetchFn(url, { headers: { 'user-agent': 'puddle-cli' } });
     if (!response.ok || response.body === null) {
       throw new CliError('not_installed', `download failed (HTTP ${response.status})`);
     }
@@ -218,7 +209,9 @@ async function download(
       createWriteStream(partial),
     );
     await renameWithRetry(partial, archive);
-    const sums = await fetchFn(`${base}/SHA256SUMS`, { headers: { 'user-agent': 'puddle-cli' } });
+    const sums = await fetchFn(releaseAssetUrl(slug, version, 'SHA256SUMS'), {
+      headers: { 'user-agent': 'puddle-cli' },
+    });
     if (!sums.ok) {
       throw new CliError('not_installed', `checksums download failed (HTTP ${sums.status})`);
     }
