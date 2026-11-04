@@ -35,6 +35,7 @@ import {
   resolveWorktree,
   type WorktreeDeps,
 } from './worktree-shared.js';
+import { onDiskRelative } from './windows-paths.js';
 
 /** Editor read cap: generous for source files, hostile to accidentally opening a media dump. */
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
@@ -226,7 +227,14 @@ export function worktreeFileRoutes(deps: WorktreeDeps): Hono {
         'utf8',
       );
       const st = statSync(target);
-      return c.json<PutFileResponse>({ path: rel, mtime_ms: st.mtimeMs, size: st.size });
+      // Windows answers the case the file is stored in, so a save typed as
+      // `Docs/notes.md` into an existing `docs/` names the tree's own row.
+      const onDisk = await onDiskRelative(root, target);
+      return c.json<PutFileResponse>({
+        path: onDisk === null ? rel : wireRelative(onDisk),
+        mtime_ms: st.mtimeMs,
+        size: st.size,
+      });
     })
 
     .post('/:sid/upload', async (c) => {

@@ -250,6 +250,43 @@ describe('GET /api/worktrees/:sid/resolve', () => {
   );
 
   it.runIf(process.platform === 'win32')(
+    'answers paths in the case Windows stores them, however they were typed',
+    async () => {
+      mkdirSync(join(worktree, 'src', 'Mixed'), { recursive: true });
+      writeFileSync(join(worktree, 'src', 'Mixed', 'App.tsx'), 'export {};\n');
+      const outside = mkdtempSync(join(tmpdir(), 'puddle-resolve-case-'));
+      writeFileSync(join(outside, 'Notes.ts'), 'x');
+      const answer = async (path: string) =>
+        resolvePathResponseSchema.parse(
+          await (await resolvePath(resolveSessionId, `?path=${encodeURIComponent(path)}`)).json(),
+        );
+
+      expect(await answer('SRC/mixed/app.tsx')).toEqual({
+        path: 'src/Mixed/App.tsx',
+        line: null,
+        kind: 'file',
+      });
+      expect(await answer(join(worktree, 'SRC', 'MIXED', 'APP.TSX').toLowerCase())).toEqual({
+        path: 'src/Mixed/App.tsx',
+        line: null,
+        kind: 'file',
+      });
+      expect(await answer('src\\MIXED')).toEqual({
+        path: join(worktree, 'src', 'Mixed'),
+        line: null,
+        kind: 'dir',
+        relative_path: 'src/Mixed',
+      });
+      expect(await answer(join(outside, 'NOTES.TS'))).toEqual({
+        path: 'Notes.ts',
+        root: outside,
+        line: null,
+        kind: 'file',
+      });
+    },
+  );
+
+  it.runIf(process.platform === 'win32')(
     'refuses device-namespace and network spellings of a path outside the worktree on Windows',
     async () => {
       const outside = mkdtempSync(join(tmpdir(), 'puddle-resolve-device-'));

@@ -342,6 +342,23 @@ describe('PUT /api/worktrees/:sid/file', () => {
     expect(res.status).toBe(400);
     expect(errorCode(await res.json())).toBe('not_a_directory');
   });
+
+  it('answers the path it wrote', async () => {
+    const res = await putFile(sessionId, 'answered.txt', { content: 'x\n' });
+    expect(putFileResponseSchema.parse(await res.json()).path).toBe('answered.txt');
+  });
+
+  it.runIf(process.platform === 'win32')(
+    'answers the case Windows stores, so a save typed in another case names the tree row',
+    async () => {
+      mkdirSync(join(worktree, 'docs'), { recursive: true });
+      const created = await putFile(sessionId, 'DOCS\\Notes.md', { content: '# notes\n' });
+      expect(putFileResponseSchema.parse(await created.json()).path).toBe('docs/Notes.md');
+      const rewritten = await putFile(sessionId, 'Docs/NOTES.MD', { content: '# again\n' });
+      expect(putFileResponseSchema.parse(await rewritten.json()).path).toBe('docs/Notes.md');
+      expect(readFileSync(join(worktree, 'docs', 'Notes.md'), 'utf8')).toBe('# again\n');
+    },
+  );
 });
 
 describe('POST /api/worktrees/:sid/upload', () => {

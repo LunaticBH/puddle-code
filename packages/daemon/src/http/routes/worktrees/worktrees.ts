@@ -18,7 +18,7 @@ import { worktreeFileRoutes } from './worktree-files.js';
 import { worktreeFsOpsRoutes } from './worktree-fs-ops.js';
 import { worktreeGitRoutes } from './worktree-git.js';
 import { resolveWorktree, type WorktreeDeps } from './worktree-shared.js';
-import { refusesForeignNetworkPath } from './windows-paths.js';
+import { onDiskRelative, refusesForeignNetworkPath } from './windows-paths.js';
 
 /** Decoded-size cap for pasted images; generous for screenshots, hostile to abuse. */
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
@@ -119,7 +119,8 @@ export function worktreeRoutes(deps: WorktreeDeps): Hono {
     // the external pinned-browse path, and additionally identify one contained
     // by the current resolution root so Files can reveal it in place (16.1).
     // Absolute answers are canonical and relative ones `/`-separated on every
-    // host (decision 11); both are identities on POSIX.
+    // host (decision 11), in the case Windows stores; both are identities on
+    // POSIX.
     if (stats.isDirectory()) {
       for (const base of [root, safeRealpath(root)]) {
         const rel = relative(base, abs);
@@ -128,7 +129,7 @@ export function worktreeRoutes(deps: WorktreeDeps): Hono {
             path: canonicalHostPath(abs),
             line: null,
             kind: 'dir',
-            relative_path: wireRelative(rel),
+            relative_path: wireRelative((await onDiskRelative(base, abs)) ?? rel),
           });
         }
       }
@@ -148,11 +149,15 @@ export function worktreeRoutes(deps: WorktreeDeps): Hono {
     for (const base of [root, safeRealpath(root)]) {
       const rel = relative(base, abs);
       if (rel !== '' && !rel.startsWith('..') && !isAbsolute(rel)) {
-        return c.json<ResolvePathResponse>({ path: wireRelative(rel), line, kind: 'file' });
+        return c.json<ResolvePathResponse>({
+          path: wireRelative((await onDiskRelative(base, abs)) ?? rel),
+          line,
+          kind: 'file',
+        });
       }
     }
     return c.json<ResolvePathResponse>({
-      path: basename(abs),
+      path: (await onDiskRelative(dirname(abs), abs)) ?? basename(abs),
       root: canonicalHostPath(dirname(abs)),
       line,
       kind: 'file',
