@@ -109,10 +109,16 @@ jobs:
     # with WIN_CSC_KEY_PASSWORD) selects a certificate; otherwise the
     # repository variables AZURE_CLIENT_ID, AZURE_TENANT_ID,
     # AZURE_SUBSCRIPTION_ID (an OIDC federated credential for azure/login) and
-    # AZURE_SIGNING_ENDPOINT, AZURE_SIGNING_ACCOUNT, AZURE_SIGNING_PROFILE
-    # select Azure Trusted Signing; with neither, nothing is signed and the
-    # archives are built exactly as before. scripts/lib/windows-sign.mjs signs
-    # before the smoke tests and the checksums.
+    # AZURE_SIGNING_ENDPOINT, AZURE_SIGNING_ACCOUNT, AZURE_SIGNING_PROFILE and
+    # AZURE_SIGNING_PUBLISHER (the certificate subject's CN, which
+    # electron-builder requires in desktop-windows) select Azure Trusted
+    # Signing; AZURE_CLIENT_ID with AZURE_SIGNING_ENDPOINT selects it, and a
+    # missing variable of the set then fails the job rather than shipping
+    # unsigned. Both Windows jobs apply the same rule, so the archives and the
+    # installers are never signed differently. With neither, nothing is signed
+    # and the archives are built exactly as before.
+    # scripts/lib/windows-sign.mjs signs before the smoke tests and the
+    # checksums.
     strategy:
       fail-fast: false
       matrix:
@@ -130,14 +136,22 @@ jobs:
       AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
       AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
       AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
+      AZURE_SIGNING_PUBLISHER: ${{ vars.AZURE_SIGNING_PUBLISHER }}
     steps:
       - name: select Authenticode signing
         env:
           # Only whether the secret exists: it reaches the signing steps alone.
           HAS_CERTIFICATE: ${{ secrets.WIN_CSC_LINK != '' }}
           AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
         run: |
           $mode = if ($env:HAS_CERTIFICATE -eq 'true') { 'certificate' } elseif ($env:AZURE_CLIENT_ID -and $env:AZURE_SIGNING_ENDPOINT) { 'azure' } else { 'none' }
+          if ($mode -eq 'azure') {
+            $missing = @('AZURE_TENANT_ID', 'AZURE_SUBSCRIPTION_ID', 'AZURE_SIGNING_ACCOUNT', 'AZURE_SIGNING_PROFILE', 'AZURE_SIGNING_PUBLISHER' |
+              Where-Object { -not [Environment]::GetEnvironmentVariable($_) })
+            if ($missing.Count -gt 0) { throw "Azure Trusted Signing also needs the repository variables $($missing -join ', ')" }
+          }
           Add-Content -LiteralPath $env:GITHUB_ENV -Value "PUDDLE_WINDOWS_SIGNING=$mode"
           Write-Output "Authenticode signing: $mode"
       - uses: azure/login@v2
@@ -289,10 +303,12 @@ jobs:
     # electron-builder run (both in one run would make a single installer
     # with no architecture in its name). Signing follows tarball-windows: a
     # certificate reaches electron-builder as WIN_CSC_LINK/WIN_CSC_KEY_PASSWORD,
-    # Azure Trusted Signing as -c.win.azureSignOptions.*, and either adds
-    # -c.forceCodeSigning=true, so a signing failure fails the release. The
-    # Apple certificate (CSC_LINK) is never exported here: electron-builder
-    # would offer it to Authenticode.
+    # Azure Trusted Signing as -c.win.azureSignOptions.* (the endpoint,
+    # account and certificate profile, and the publisherName that
+    # electron-builder's schema requires: AZURE_SIGNING_PUBLISHER, the
+    # certificate subject's CN), and either adds -c.forceCodeSigning=true, so
+    # a signing failure fails the release. The Apple certificate (CSC_LINK) is
+    # never exported here: electron-builder would offer it to Authenticode.
     strategy:
       fail-fast: false
       matrix:
@@ -315,13 +331,21 @@ jobs:
       AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
       AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
       AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
+      AZURE_SIGNING_PUBLISHER: ${{ vars.AZURE_SIGNING_PUBLISHER }}
     steps:
       - name: select Authenticode signing
         env:
           HAS_CERTIFICATE: ${{ secrets.WIN_CSC_LINK != '' }}
           AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
         run: |
           $mode = if ($env:HAS_CERTIFICATE -eq 'true') { 'certificate' } elseif ($env:AZURE_CLIENT_ID -and $env:AZURE_SIGNING_ENDPOINT) { 'azure' } else { 'none' }
+          if ($mode -eq 'azure') {
+            $missing = @('AZURE_TENANT_ID', 'AZURE_SUBSCRIPTION_ID', 'AZURE_SIGNING_ACCOUNT', 'AZURE_SIGNING_PROFILE', 'AZURE_SIGNING_PUBLISHER' |
+              Where-Object { -not [Environment]::GetEnvironmentVariable($_) })
+            if ($missing.Count -gt 0) { throw "Azure Trusted Signing also needs the repository variables $($missing -join ', ')" }
+          }
           Add-Content -LiteralPath $env:GITHUB_ENV -Value "PUDDLE_WINDOWS_SIGNING=$mode"
           Write-Output "Authenticode signing: $mode"
       - uses: azure/login@v2
@@ -360,6 +384,7 @@ jobs:
               "-c.win.azureSignOptions.endpoint=$env:AZURE_SIGNING_ENDPOINT"
               "-c.win.azureSignOptions.codeSigningAccountName=$env:AZURE_SIGNING_ACCOUNT"
               "-c.win.azureSignOptions.certificateProfileName=$env:AZURE_SIGNING_PROFILE"
+              "-c.win.azureSignOptions.publisherName=$env:AZURE_SIGNING_PUBLISHER"
               '-c.forceCodeSigning=true'
             }
             'certificate' { '-c.forceCodeSigning=true' }
