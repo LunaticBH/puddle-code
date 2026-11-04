@@ -90,8 +90,14 @@ describe('planPtySpawn', () => {
 
   it('gives terminals the user’s working-directory program search, not the daemon’s', () => {
     const plan = (base: Record<string, string>, platform: NodeJS.Platform = 'win32') =>
-      planPtySpawn('C:\\Windows\\System32\\cmd.exe', [], undefined, { platform, base }).env;
-    // disableCurrentDirectorySearch's value: `gradlew` in a cmd.exe terminal must still run.
+      planPtySpawn(
+        'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+        [],
+        undefined,
+        { platform, base },
+      ).env;
+    // disableCurrentDirectorySearch's value: a batch file run from the terminal
+    // must still find `gradlew` or `build.bat` in the current directory.
     expect(plan({ Path: 'C:\\Windows', NODEFAULTCURRENTDIRECTORYINEXEPATH: 'puddle' })).toEqual({
       Path: 'C:\\Windows',
       TERM: 'xterm-256color',

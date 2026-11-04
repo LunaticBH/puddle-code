@@ -125,6 +125,8 @@ describe('installShellHooks', () => {
     expect(hook).toContain('Set-PSReadLineOption -HistorySavePath');
     expect(hook).toContain("'USERPROFILE'");
     expect(hook).toContain("'WT_*'");
+    // Nor does the hook itself carry MSYS names: no MSYS shell runs a session.
+    expect(hook).not.toMatch(/MSYS|MINGW|ORIGINAL_|EXEPATH|PLINK_PROTOCOL|HOSTNAME/);
     // zsh and bash are never session shells there.
     expect(existsSync(join(paths.shellHooksDir, 'bash'))).toBe(false);
     expect(existsSync(join(paths.shellHooksDir, 'zsh'))).toBe(false);
@@ -241,6 +243,23 @@ describe('installShellHooks', () => {
       expect(isDeniedEnvName(name, 'win32'), name).toBe(true);
     }
     for (const name of ['Path', 'PATHEXT', 'MY_TOKEN', 'NODE_OPTIONS', 'TEMP']) {
+      expect(isDeniedEnvName(name, 'win32'), name).toBe(false);
+    }
+    // No MSYS shell runs a session, so its variables are ordinary user names
+    // a PowerShell session may export and capture like any other.
+    for (const name of [
+      'MSYSTEM',
+      'MSYS',
+      'MSYSTEM_PREFIX',
+      'MINGW_PREFIX',
+      'MSYS2_PATH_TYPE',
+      'ORIGINAL_PATH',
+      'ORIGINAL_TEMP',
+      'ORIGINAL_TMP',
+      'EXEPATH',
+      'PLINK_PROTOCOL',
+      'HOSTNAME',
+    ]) {
       expect(isDeniedEnvName(name, 'win32'), name).toBe(false);
     }
   });

@@ -89,7 +89,7 @@ describe('one-shot terminal commands', () => {
         env: { PATH: 'C:\\tools' },
         commands: [{ file: 'C:\\tools\\gcc.exe', args: ['C:\\repo\\main file.c', 'say "hi"'] }],
       },
-      'C:\\Windows\\System32\\cmd.exe',
+      'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
       [],
       'win32',
     );
@@ -100,7 +100,7 @@ describe('one-shot terminal commands', () => {
       banner: 'C:\\tools\\gcc.exe "C:\\repo\\main file.c" "say \\"hi\\""',
       env: { PATH: 'C:\\tools' },
       commands: [{ file: 'C:\\tools\\gcc.exe', args: ['C:\\repo\\main file.c', 'say "hi"'] }],
-      shell: { file: 'C:\\Windows\\System32\\cmd.exe', args: [] },
+      shell: { file: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', args: [] },
     });
   });
 
@@ -112,8 +112,9 @@ describe('one-shot terminal commands', () => {
       '@"%~dp0\\node.exe"  "%~dp0\\node_modules\\tsx\\dist\\cli.mjs" %*\r\n',
     );
     writeFileSync(join(bin, 'build.bat'), '@echo off\r\n');
+    const shell = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
     const run = (file: string, args: string[]) =>
-      terminalCommandSpawn({ cwd: bin, commands: [{ file, args }] }, 'cmd.exe', [], 'win32');
+      terminalCommandSpawn({ cwd: bin, commands: [{ file, args }] }, shell, [], 'win32');
     expect(planOf(run(join(bin, 'tsx.cmd'), ['100%']).args).commands).toEqual([
       {
         file: join(bin, 'node.exe'),

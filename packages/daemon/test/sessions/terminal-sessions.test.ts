@@ -7,7 +7,8 @@ import { sh } from '../helpers/git-fixtures.js';
 // A terminal session spawns the real `$SHELL`. The interactive login shell on a
 // dev box (often zsh with a heavy rc) is slow to start and, spawned repeatedly
 // across the parallel suite, can starve sibling tests — so pin this file's fork
-// to a lightweight bash. Windows always runs PowerShell, which ignores SHELL.
+// to a lightweight bash. Windows always runs PowerShell (SHELL counts there
+// only when it names an absolute pwsh.exe or powershell.exe), so stays as is.
 // Vitest's default `forks` pool isolates this env change to this file's own
 // child process.
 const windows = process.platform === 'win32';
