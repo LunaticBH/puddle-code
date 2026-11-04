@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import {
   createAccountRequestSchema,
   patchAccountRequestSchema,
+  windowsNameProblem,
   type AccountUsage,
   type LoginResponse,
 } from '@puddle/shared';
@@ -34,6 +35,50 @@ export interface AccountRouteDeps {
   projects: ProjectStore;
   ptys: PtyManager;
   paths: PuddlePaths;
+}
+
+/**
+ * Windows: a label names its account's config directory, and NTFS folds
+ * case and drops trailing dots, so two labels the database tells apart can
+ * name one directory, and one login. Refuse a label Windows cannot store
+ * (`work.` would be `work` to every agent CLI), a case variant of another
+ * label for the same agent in the profile, and, when creating, a directory
+ * that already exists (an old label renamed away still owns its directory).
+ * POSIX keeps byte-exact labels.
+ */
+export function assertAccountLabelFits(
+  label: string,
+  siblings: () => readonly string[],
+  configDir: string | null,
+  platform: NodeJS.Platform = process.platform,
+): void {
+  if (platform !== 'win32') return;
+  const problem = windowsNameProblem(label);
+  if (problem) {
+    throw ApiError.badRequest('invalid_name', `'${label}' cannot name an account: ${problem}`);
+  }
+  // Labels are ASCII (fsSafeName), where NTFS's case folding is exactly this.
+  const folded = label.toLowerCase();
+  const taken = siblings().some((other) => other.toLowerCase() === folded);
+  if (taken || (configDir !== null && existsSync(configDir))) {
+    throw ApiError.conflict(
+      'account_exists',
+      `an account named '${label}' already exists for this agent in this profile`,
+    );
+  }
+}
+
+/** The other labels of `agentType`'s accounts in the profile. */
+function siblingLabels(
+  accounts: AccountStore,
+  profileId: string,
+  agentType: string,
+  except?: number,
+): string[] {
+  return accounts
+    .list(profileId)
+    .filter((a) => a.agent_type === agentType && a.id !== except)
+    .map((a) => a.label);
 }
 
 export function accountRoutes(deps: AccountRouteDeps): Hono {
@@ -73,6 +118,11 @@ export function accountRoutes(deps: AccountRouteDeps): Hono {
       // Always a fresh, puddle-owned directory — never a foreign dir in
       // place. Importing COPIES a pre-existing dir into it (SPEC §2).
       const configDir = deps.paths.accountConfigDir(profile.id, body.agent_type, body.label);
+      assertAccountLabelFits(
+        body.label,
+        () => siblingLabels(deps.accounts, profile.id, body.agent_type),
+        configDir,
+      );
       if (body.import_dir !== undefined) {
         if (!adapter.importConfigDir) {
           throw ApiError.badRequest(
@@ -134,7 +184,17 @@ export function accountRoutes(deps: AccountRouteDeps): Hono {
       const id = idParam(c);
       const body = await parseBody(c, patchAccountRequestSchema);
       // A rename touches only the label; the config dir stays put (keychain).
-      if (body.label !== undefined) deps.accounts.setLabel(id, body.label);
+      if (body.label !== undefined) {
+        assertAccountLabelFits(
+          body.label,
+          () => {
+            const account = deps.accounts.get(id);
+            return siblingLabels(deps.accounts, account.profile_id, account.agent_type, id);
+          },
+          null,
+        );
+        deps.accounts.setLabel(id, body.label);
+      }
       if (body.skip_permissions_default !== undefined) {
         deps.accounts.setSkipPermissionsDefault(id, body.skip_permissions_default);
         // Opting an account in is the user's per-account confirmation (SPEC §11)
