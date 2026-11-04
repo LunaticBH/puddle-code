@@ -22,7 +22,11 @@ if (process.platform === 'win32') {
   await testWindowsCliArchive(
     root,
     version,
-    resolve(process.argv[2] ?? join(root, `dist-release/puddle-cli-v${version}-win32-x64.zip`)),
+    // install.ps1 takes the OS architecture, which a native Node shares.
+    resolve(
+      process.argv[2] ??
+        join(root, `dist-release/puddle-cli-v${version}-win32-${process.arch}.zip`),
+    ),
   );
   process.exit(0);
 }

@@ -19,7 +19,8 @@ import {
 import { tmpdir } from 'node:os';
 import { join, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { windowsHostArch } from '@puddle/shared/node/platform';
 import { installDaemon, readInstallScript } from '../../src/lib/installation/bootstrap.js';
 import type { Transport } from '../../src/lib/transport/transport.js';
 import {
@@ -383,8 +384,17 @@ describe('Windows standalone launchers (any OS)', () => {
 // Every run passes -NoPathUpdate: the default edits the real HKCU PATH, which
 // scripts/test-cli-tarball.mjs exercises on disposable CI runners only.
 describe.runIf(process.platform === 'win32')('Windows standalone CLI installer', () => {
+  // install.ps1 takes the operating system's architecture, and the fixture's
+  // node.exe is this process's: tests need a native Node (not x64 on Arm).
+  let hostArch = 'x64';
+  let otherArch = 'arm64';
+  beforeAll(async () => {
+    hostArch = await windowsHostArch();
+    otherArch = hostArch === 'x64' ? 'arm64' : 'x64';
+  });
+
   /** `profile` names the user's home folder; the archive sits beside it. */
-  function windowsFixture(profile = 'home') {
+  function windowsFixture(profile = 'home', name = `puddle-cli-v1.2.3-win32-${hostArch}.zip`) {
     const temp = mkdtempSync(join(tmpdir(), 'puddle-ps-installer-'));
     temps.push(temp);
     const home = join(temp, profile);
@@ -393,8 +403,8 @@ describe.runIf(process.platform === 'win32')('Windows standalone CLI installer',
     const bin = join(localAppData, 'puddle', 'bin');
     const launcher = join(bin, 'puddle.cmd');
     const stage = join(temp, 'stage', 'puddle-cli-v1.2.3');
-    const packed = join(temp, `puddle-cli-v1.2.3-win32-x64.zip`);
-    const archive = profile === 'home' ? packed : join(home, `puddle-cli-v1.2.3-win32-x64.zip`);
+    const packed = join(temp, name);
+    const archive = profile === 'home' ? packed : join(home, name);
     mkdirSync(localAppData, { recursive: true });
     mkdirSync(join(stage, 'cli', 'public'), { recursive: true });
     mkdirSync(join(stage, 'bin'));
@@ -431,12 +441,12 @@ describe.runIf(process.platform === 'win32')('Windows standalone CLI installer',
       ]);
       if (archive !== packed) copyFileSync(packed, archive);
       const hash = createHash('sha256').update(readFileSync(archive)).digest('hex');
-      writeFileSync(`${archive}.sha256`, `${hash}  puddle-cli-v1.2.3-win32-x64.zip\n`);
+      writeFileSync(`${archive}.sha256`, `${hash}  ${name}\n`);
     };
     pack();
-    const install = (args: string[] = []) =>
+    const install = (args: string[] = [], powershell = windowsPowerShell) =>
       execFileSync(
-        windowsPowerShell,
+        powershell,
         [
           '-NoProfile',
           '-NonInteractive',
@@ -556,7 +566,10 @@ describe.runIf(process.platform === 'win32')('Windows standalone CLI installer',
     const f = windowsFixture();
     f.install();
     const previous = f.current();
-    writeFileSync(`${f.archive}.sha256`, `${'0'.repeat(64)}  puddle-cli-v1.2.3-win32-x64.zip\n`);
+    writeFileSync(
+      `${f.archive}.sha256`,
+      `${'0'.repeat(64)}  puddle-cli-v1.2.3-win32-${hostArch}.zip\n`,
+    );
     expect(() => f.install()).toThrow('checksum mismatch');
     writeFileSync(`${f.archive}.sha256`, '');
     expect(() => f.install()).toThrow('missing or ambiguous checksum');
@@ -569,6 +582,47 @@ describe.runIf(process.platform === 'win32')('Windows standalone CLI installer',
     expect(f.current()).toBe(previous);
     expect(existsSync(join(f.prefix, '.install-lock'))).toBe(false);
     expect(readdirSync(join(f.prefix, 'versions'))).toHaveLength(1);
+  });
+
+  it('refuses an archive named for another architecture', () => {
+    const f = windowsFixture('home', `puddle-cli-v1.2.3-win32-${otherArch}.zip`);
+    expect(() => f.install()).toThrow(
+      `this archive is the win32-${otherArch} build; this machine needs win32-${hostArch}`,
+    );
+    expect(() => f.install(['-Version', '1.2.3'])).toThrow(`this machine needs win32-${hostArch}`);
+    expect(existsSync(join(f.prefix, 'current'))).toBe(false);
+  });
+
+  it('refuses an archive whose node.exe is another architecture', () => {
+    const f = windowsFixture();
+    const node = join(f.stage, 'bin', 'node.exe');
+    // Unlink first: the fixture's node.exe is a hard link to the running one.
+    rmSync(node);
+    const image = Buffer.alloc(0x200);
+    image.write('MZ', 0, 'latin1');
+    image.writeUInt32LE(0x80, 0x3c);
+    image.write('PE\0\0', 0x80, 'latin1');
+    image.writeUInt16LE(otherArch === 'arm64' ? 0xaa64 : 0x8664, 0x84);
+    writeFileSync(node, image);
+    f.pack();
+    expect(() => f.install()).toThrow(
+      `archive is not the win32-${hostArch} build (its node.exe is ${otherArch})`,
+    );
+    writeFileSync(node, 'not a PE image');
+    f.pack();
+    expect(() => f.install()).toThrow(`(its node.exe is not a PE image)`);
+    expect(existsSync(join(f.prefix, 'current'))).toBe(false);
+    expect(readdirSync(join(f.prefix, 'versions'))).toEqual([]);
+  });
+
+  it('takes the operating system architecture from a 32-bit Windows PowerShell', () => {
+    // WOW64 gives this process PROCESSOR_ARCHITECTURE=x86; the registry still
+    // names the machine. The emulation-proof check that x64 runners can make.
+    const wow64 = join(systemRoot, 'SysWOW64', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    if (!existsSync(wow64)) return;
+    const f = windowsFixture();
+    f.install([], wow64);
+    expect(runLauncher(f.launcher, ['--help'])).toContain('fixture CLI help');
   });
 
   it('refuses an unrelated launcher without overwriting it', () => {
