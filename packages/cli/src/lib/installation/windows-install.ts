@@ -20,12 +20,12 @@ import { basename, join, resolve, win32 } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
-import { initialisePrivateHome, ipcPath, listenPrivate } from '@puddle/shared/node';
+import { initialisePrivateHome, ipcPath, listenPrivate, rotateIpcNonce } from '@puddle/shared/node';
 import { renameWithRetry, system32Path } from '@puddle/shared/node/platform';
 import { parseSums } from './desktop-update.js';
 import { releaseArchiveName, releaseAssetUrl } from './releases.js';
 import {
-  controlPipePresent,
+  controlPipeState,
   startWindowsDaemon,
   stopWindowsDaemon,
   windowsRuntime,
@@ -97,7 +97,7 @@ export async function installWindowsDaemon(opts: WindowsInstallOptions = {}): Pr
     throw new CliError('not_installed', `tarball not found: ${local}`);
   }
 
-  const lock = await acquireInstallLock(home, logger);
+  let lock = await acquireInstallLock(home, logger);
   try {
     const runtime = windowsRuntime(home, version);
     if (existsSync(runtime.dir) && smokeTest(runtime, version, home)) {
@@ -122,7 +122,16 @@ export async function installWindowsDaemon(opts: WindowsInstallOptions = {}): Pr
         );
       }
     }
-    const running = await controlPipePresent(home);
+    let pipe = await controlPipeState(home);
+    if (pipe === 'foreign') {
+      // Another account serves a name an earlier run used. Renamed under the
+      // lock, the home's pipes leave it behind; the lock moves with them.
+      logger.warn('a process that is not this home’s daemon holds its control pipe — renaming it');
+      rotateIpcNonce(home);
+      lock = await relock(home, lock, logger);
+      pipe = await controlPipeState(home);
+    }
+    const running = pipe === 'daemon' || pipe === 'unknown';
     if (running && opts.replaceRunning === false) {
       logger.info('puddled was started meanwhile — leaving it running');
     } else if (running || existsSync(join(home, 'puddled.pid'))) {
@@ -137,6 +146,13 @@ export async function installWindowsDaemon(opts: WindowsInstallOptions = {}): Pr
   } finally {
     await new Promise<void>((resolve) => lock.close(() => resolve()));
   }
+}
+
+/** After rotateIpcNonce: hold the lock's new name before releasing the old one. */
+async function relock(home: string, held: Server, logger: Logger): Promise<Server> {
+  const renamed = await acquireInstallLock(home, logger);
+  await new Promise<void>((resolve) => held.close(() => resolve()));
+  return renamed;
 }
 
 /** A pipe server as a mutex: it vanishes with its process, so no lock is ever stale. */

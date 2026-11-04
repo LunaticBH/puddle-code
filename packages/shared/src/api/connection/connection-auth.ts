@@ -22,8 +22,29 @@ export const authErrorCodeSchema = z.enum([
   'protocol_mismatch',
 ]);
 export type AuthErrorCode = z.infer<typeof authErrorCodeSchema>;
+/**
+ * A Windows client cannot tell who serves a named pipe, and any local user
+ * can create one whose name was seen while it was free (protocol 25.7). It
+ * sends a fresh `challenge` with `open` or `shutdown` and believes only an
+ * answer whose `proof` shows that the server can read the home's private
+ * IPC key. POSIX clients send neither: the socket directory's ownership is
+ * their check, so their exchanges are unchanged.
+ */
+export const ipcChallengeSchema = z.string().regex(/^[a-f0-9]{64}$/);
+const ipcProofField = {
+  proof: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional(),
+};
 export const controlRequestSchema = z.discriminatedUnion('t', [
-  z.object({ t: z.literal('open'), profile: profileId.optional() }).strict(),
+  z
+    .object({
+      t: z.literal('open'),
+      profile: profileId.optional(),
+      challenge: ipcChallengeSchema.optional(),
+    })
+    .strict(),
   z.object({ t: z.literal('renew'), resources: z.array(resourceIdSchema).max(2048) }).strict(),
   z.object({ t: z.literal('close') }).strict(),
   /**
@@ -31,7 +52,7 @@ export const controlRequestSchema = z.discriminatedUnion('t', [
    * used by Windows supervision, which has no service manager to signal.
    * Older daemons answer `invalid_control`.
    */
-  z.object({ t: z.literal('shutdown') }).strict(),
+  z.object({ t: z.literal('shutdown'), challenge: ipcChallengeSchema.optional() }).strict(),
 ]);
 export const hostInspectionSchema = z.object({
   t: z.literal('inspection'),
@@ -48,13 +69,18 @@ export const controlResponseSchema = z.discriminatedUnion('t', [
       validForMs: z.number().int().positive().max(45_000),
       port: z.number().int().min(1).max(65535),
       version: versionResponseSchema,
+      ...ipcProofField,
     })
     .strict(),
   hostInspectionSchema,
   /** Acknowledges `shutdown`: the daemon stops once its state is closed (25.7). */
-  z.object({ t: z.literal('shutting_down') }).strict(),
+  z.object({ t: z.literal('shutting_down'), ...ipcProofField }).strict(),
   z
-    .object({ t: z.literal('error'), code: z.enum(['unavailable', 'rejected', 'invalid_control']) })
+    .object({
+      t: z.literal('error'),
+      code: z.enum(['unavailable', 'rejected', 'invalid_control']),
+      ...ipcProofField,
+    })
     .strict(),
 ]);
 export type ControlRequest = z.infer<typeof controlRequestSchema>;

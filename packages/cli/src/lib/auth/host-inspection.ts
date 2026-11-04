@@ -1,5 +1,11 @@
 import { connect } from 'node:net';
-import { checkIpcEndpoint, ipcPath, jsonLines } from '@puddle/shared/node';
+import {
+  checkIpcEndpoint,
+  checkIpcProof,
+  ipcChallenge,
+  ipcPath,
+  jsonLines,
+} from '@puddle/shared/node';
 import { readFile } from 'node:fs/promises';
 import { CliError } from '../types.js';
 import { join } from 'node:path';
@@ -68,13 +74,15 @@ export async function inspectLegacyHost(home: string): Promise<HostInspection | 
 /**
  * Modern inspection also stays on the host; only validated summary data leaves it.
  * A Windows home has no pipe to stat and no pre-pipe daemons, so a missing
- * pipe there simply means no daemon.
+ * pipe there simply means no daemon, and its server is believed only once it
+ * proves that it can read the home.
  */
 export async function inspectHostLocally(
   home: string,
   platform: NodeJS.Platform = process.platform,
 ): Promise<HostInspection | null> {
   const path = ipcPath(home, 'host');
+  const challenge = platform === 'win32' ? ipcChallenge() : undefined;
   try {
     checkIpcEndpoint(path, platform);
   } catch (err) {
@@ -95,11 +103,13 @@ export async function inspectHostLocally(
           const message = controlResponseSchema.parse(value);
           if (message.t !== 'authority' || !message.token)
             throw new Error('Host authority unavailable');
+          if (challenge !== undefined && !checkIpcProof(home, 'host', challenge, message.proof))
+            throw new Error('The host control pipe is not served by this home’s daemon');
           resolve(message);
         },
         () => socket.destroy(new Error('Invalid host control response')),
       );
-      socket.write(JSON.stringify({ t: 'open' }) + '\n');
+      socket.write(JSON.stringify({ t: 'open', ...(challenge ? { challenge } : {}) }) + '\n');
     });
     const response = await fetch(`http://127.0.0.1:${grant.port}/api/sessions`, {
       headers: { authorization: `Bearer ${grant.token}` },

@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import {
   chmodSync,
   closeSync,
@@ -201,8 +201,9 @@ export function readPrivateJson(path: string): unknown {
 /**
  * Short paths also fit macOS's 104-byte sockaddr_un limit. Named pipes live
  * in one machine-wide namespace, so on Windows the name also carries the
- * home's private nonce: other users, who cannot read the home, can neither
- * connect to the pipe nor create it first.
+ * home's private nonce, and any local user can list it. A name seen while it
+ * was served can be created by another user once it is not, so Windows
+ * clients also check that the server can read the home (`ipcProof`).
  *
  * Every spelling of a Windows home names the same pipes: the key hashes the
  * home's on-disk path (`realpath.native`, upper-case drive letter, decision
@@ -222,12 +223,66 @@ export function ipcPath(home: string, scope: string): string {
   return join(dir, 'control.sock');
 }
 
-const IPC_NONCE = /^[0-9a-f]{32}$/;
-
-/** `<home>\ipc-nonce`: 32 random hex characters, created exclusively by whichever process needs it first. */
+/** `<home>\ipc-nonce`: 32 random hex characters, in every Windows pipe name. */
 function ipcNonce(home: string): string {
+  return homeSecret(join(home, 'ipc-nonce'), 16, 'IPC nonce');
+}
+
+/**
+ * Give every Windows pipe of the home a new name. Only for a name that a
+ * server which cannot read the home holds: the installer does this under its
+ * lock, before it starts a daemon, so the squatted name is never used again.
+ */
+export function rotateIpcNonce(home: string): void {
   const path = join(home, 'ipc-nonce');
-  const created = randomBytes(16).toString('hex');
+  const tmp = `${path}.${secret()}.tmp`;
+  const fd = openSync(tmp, 'wx', 0o600);
+  try {
+    writeFileSync(fd, randomBytes(16).toString('hex'));
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  try {
+    renameWithRetrySync(tmp, path);
+  } finally {
+    rmSync(tmp, { force: true });
+  }
+}
+
+/** A fresh challenge for a pipe server to answer with `ipcProof`. */
+export function ipcChallenge(): string {
+  return randomBytes(32).toString('hex');
+}
+
+/**
+ * The answer to `challenge` from a server of `scope`, keyed by the home's
+ * `ipc-key`. Unlike the nonce that key never appears in a name, so only a
+ * process that can read the home can answer: a Windows client accepts no
+ * reply from a pipe server until it has checked one.
+ */
+export function ipcProof(home: string, scope: string, challenge: string): string {
+  return createHmac('sha256', homeSecret(join(home, 'ipc-key'), 32, 'IPC key'))
+    .update(`puddle-ipc-proof\0${scope}\0${challenge}`)
+    .digest('hex');
+}
+
+export function checkIpcProof(
+  home: string,
+  scope: string,
+  challenge: string,
+  proof: string | undefined,
+): boolean {
+  if (proof === undefined || !/^[0-9a-f]{64}$/.test(proof)) return false;
+  return timingSafeEqual(
+    Buffer.from(proof, 'hex'),
+    Buffer.from(ipcProof(home, scope, challenge), 'hex'),
+  );
+}
+
+/** Random hex in the home, created exclusively by whichever process needs it first. */
+function homeSecret(path: string, bytes: number, name: string): string {
+  const created = randomBytes(bytes).toString('hex');
   try {
     const fd = openSync(path, 'wx', 0o600);
     try {
@@ -240,15 +295,16 @@ function ipcNonce(home: string): string {
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
   }
+  const pattern = new RegExp(`^[0-9a-f]{${bytes * 2}}$`);
   for (let attempt = 0; ; attempt++) {
     const st = lstatSync(path);
     if (st.isSymbolicLink() || !st.isFile()) {
-      throw new Error(`Puddle IPC nonce must be a regular file: ${path}`);
+      throw new Error(`Puddle ${name} must be a regular file: ${path}`);
     }
     const value = readFileSync(path, 'utf8');
-    if (IPC_NONCE.test(value)) return value;
+    if (pattern.test(value)) return value;
     // A concurrent creator may not have written it yet.
-    if (value !== '' || attempt >= 50) throw new Error(`Puddle IPC nonce is malformed: ${path}`);
+    if (value !== '' || attempt >= 50) throw new Error(`Puddle ${name} is malformed: ${path}`);
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
   }
 }

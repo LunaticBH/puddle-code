@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { ipcPath, listenPrivate } from '@puddle/shared/node';
 import { system32Path } from '@puddle/shared/node/platform';
 import { waitForStartedDaemon } from '../../src/lib/connection/cockpit.js';
 import { readCurrentVersion } from '../../src/lib/installation/current-link.js';
@@ -238,6 +239,31 @@ describe.runIf(process.platform === 'win32' && existsSync(daemonDist))(
       started.authority.close();
       await stopWindowsDaemon(at);
       expect(existsSync(join(at, 'puddled.pid'))).toBe(false);
+    }, 180_000);
+
+    it('renames the home’s pipes when another program squats the control pipe', async () => {
+      const at = freshHome();
+      const squatted = ipcPath(at, 'host');
+      // A server on a name it saw earlier, unable to prove it reads the home.
+      const squatter = await listenPrivate(squatted, (socket) => {
+        socket.on('error', () => {});
+        socket.on('data', () =>
+          socket.end(JSON.stringify({ t: 'error', code: 'unavailable' }) + '\n'),
+        );
+      });
+      try {
+        const { lines, ...log } = logger();
+        await installWindowsDaemon({ home: at, tarball: zip, logger: log });
+        expect(lines.join('\n')).toMatch(/not this home’s daemon/);
+        expect(ipcPath(at, 'host')).not.toBe(squatted);
+        const started = await waitForStartedDaemon(new LocalTransport(), 60_000);
+        expect(started.authority.version?.version).toBe('1.2.3');
+        started.authority.close();
+        expect(squatter.listening).toBe(true);
+        await stopWindowsDaemon(at);
+      } finally {
+        await new Promise<void>((resolve) => squatter.close(() => resolve()));
+      }
     }, 180_000);
   },
 );

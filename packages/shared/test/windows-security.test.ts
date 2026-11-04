@@ -18,6 +18,7 @@ import {
   ipcPath,
   listenPrivate,
   readPrivateJson,
+  rotateIpcNonce,
 } from '../src/node/security.js';
 
 const temporary: string[] = [];
@@ -107,6 +108,17 @@ describe.skipIf(process.platform !== 'win32')('Windows Puddle home', () => {
     expect(ipcPath(home.toUpperCase(), 'host')).toBe(host);
     expect(ipcPath(home.replaceAll('\\', '/'), 'host')).toBe(host);
     expect(ipcPath(`${home}\\`, 'host')).toBe(host);
+  });
+
+  it('renames every pipe of the home once its nonce is rotated', () => {
+    const { home } = fixture();
+    const host = ipcPath(home, 'host');
+    const install = ipcPath(home, 'install');
+    rotateIpcNonce(home);
+    expect(ipcPath(home, 'host')).not.toBe(host);
+    expect(ipcPath(home, 'install')).not.toBe(install);
+    expect(readFileSync(join(home, 'ipc-nonce'), 'utf8')).toMatch(/^[0-9a-f]{32}$/);
+    expect(readdirSync(home).filter((name) => name.endsWith('.tmp'))).toEqual([]);
   });
 
   it.each(['', '\\'])('refuses a junction as the home (suffix %j)', (suffix) => {
