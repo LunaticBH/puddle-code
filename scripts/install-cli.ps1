@@ -311,13 +311,8 @@ function Stop-Puddle([string]$Message) { throw $Message }
 # .NET 7 (Windows PowerShell 5.1 runs on .NET Framework, where an emulated
 # process sees X64); the environment describes this process alone.
 function Get-PuddleArchitecture {
-  $os = $null
-  try {
-    $os = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' -Name PROCESSOR_ARCHITECTURE -ErrorAction Stop).PROCESSOR_ARCHITECTURE
-  } catch { $os = $null }
-  if (-not $os) {
-    try { $os = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() } catch { $os = $null }
-  }
+  $os = Get-PuddleRegistryArchitecture
+  if (-not $os) { $os = Get-PuddleRuntimeArchitecture }
   if (-not $os) {
     $os = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
   }
@@ -326,6 +321,17 @@ function Get-PuddleArchitecture {
     '^ARM64$' { return 'arm64' }
     default { Stop-Puddle "unsupported architecture $os" }
   }
+}
+
+# Separate functions so tests can stand in for either source.
+function Get-PuddleRegistryArchitecture {
+  try {
+    return (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' -Name PROCESSOR_ARCHITECTURE -ErrorAction Stop).PROCESSOR_ARCHITECTURE
+  } catch { return $null }
+}
+
+function Get-PuddleRuntimeArchitecture {
+  try { return [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() } catch { return $null }
 }
 
 # The COFF machine of a PE file, read through e_lfanew: x64, arm64, or the

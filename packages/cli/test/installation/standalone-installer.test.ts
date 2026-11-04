@@ -616,13 +616,78 @@ describe.runIf(process.platform === 'win32')('Windows standalone CLI installer',
   });
 
   it('takes the operating system architecture from a 32-bit Windows PowerShell', () => {
-    // WOW64 gives this process PROCESSOR_ARCHITECTURE=x86; the registry still
-    // names the machine. The emulation-proof check that x64 runners can make.
+    // WOW64 gives this process PROCESSOR_ARCHITECTURE=x86 while the real
+    // registry read still names the machine. .NET Framework's OSArchitecture
+    // would also answer here; the ordering test below covers emulated x64.
     const wow64 = join(systemRoot, 'SysWOW64', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
     if (!existsSync(wow64)) return;
     const f = windowsFixture();
     f.install([], wow64);
     expect(runLauncher(f.launcher, ['--help'])).toContain('fixture CLI help');
+  });
+
+  it('prefers the registry to .NET and .NET to the environment for the architecture', () => {
+    // Emulated x64 on Arm: Windows PowerShell 5.1's .NET Framework reports
+    // OSArchitecture X64 and the environment AMD64, and only the machine-wide
+    // registry value says ARM64. The harness loads Get-PuddleArchitecture from
+    // install-cli.ps1 and stands in for its two sources.
+    const temp = mkdtempSync(join(tmpdir(), 'puddle-ps-arch-'));
+    temps.push(temp);
+    const harness = join(temp, 'arch.ps1');
+    writeFileSync(
+      harness,
+      [
+        'param([string]$Installer)',
+        '$ast = [Management.Automation.Language.Parser]::ParseFile($Installer, [ref]$null, [ref]$null)',
+        "$wanted = @('Get-PuddleArchitecture', 'Stop-Puddle')",
+        '$functions = $ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] }, $true)',
+        'foreach ($fn in $functions) { if ($wanted -contains $fn.Name) { . ([scriptblock]::Create($fn.Extent.Text)) } }',
+        'function Get-PuddleRegistryArchitecture { $env:PUDDLE_TEST_REGISTRY }',
+        'function Get-PuddleRuntimeArchitecture { $env:PUDDLE_TEST_RUNTIME }',
+        'try { Get-PuddleArchitecture } catch { "error: $($_.Exception.Message)" }',
+        '',
+      ].join('\r\n'),
+    );
+    const names = [
+      'PUDDLE_TEST_REGISTRY',
+      'PUDDLE_TEST_RUNTIME',
+      'PROCESSOR_ARCHITEW6432',
+      'PROCESSOR_ARCHITECTURE',
+    ];
+    const detect = (values: Record<string, string>) => {
+      const env: Record<string, string | undefined> = {};
+      for (const [key, value] of Object.entries(process.env)) {
+        if (!names.includes(key.toUpperCase())) env[key] = value;
+      }
+      return execFileSync(
+        windowsPowerShell,
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-File',
+          harness,
+          '-Installer',
+          powershellInstaller,
+        ],
+        { env: { ...env, ...values }, encoding: 'utf8', stdio: 'pipe' },
+      ).trim();
+    };
+    const emulated = {
+      PUDDLE_TEST_RUNTIME: 'X64',
+      PROCESSOR_ARCHITECTURE: 'AMD64',
+    };
+    expect(detect({ ...emulated, PUDDLE_TEST_REGISTRY: 'ARM64' })).toBe('arm64');
+    expect(detect({ PUDDLE_TEST_REGISTRY: 'AMD64', PUDDLE_TEST_RUNTIME: 'Arm64' })).toBe('x64');
+    expect(detect({ PUDDLE_TEST_RUNTIME: 'Arm64', PROCESSOR_ARCHITECTURE: 'AMD64' })).toBe('arm64');
+    expect(detect({ PROCESSOR_ARCHITEW6432: 'ARM64', PROCESSOR_ARCHITECTURE: 'x86' })).toBe(
+      'arm64',
+    );
+    expect(detect({ PROCESSOR_ARCHITECTURE: 'AMD64' })).toBe('x64');
+    expect(detect({ PUDDLE_TEST_REGISTRY: 'x86', PUDDLE_TEST_RUNTIME: 'X64' })).toBe(
+      'error: unsupported architecture x86',
+    );
   });
 
   it('refuses an unrelated launcher without overwriting it', () => {
