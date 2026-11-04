@@ -1,6 +1,6 @@
 import { statSync } from 'node:fs';
 import { isAbsolute, join, sep } from 'node:path';
-import { getEnv, type Environment } from './environment.js';
+import { getEnv, setEnv, type Environment } from './environment.js';
 
 export interface FindExecutableOptions {
   /** Search list in place of the environment's PATH. */
@@ -63,6 +63,26 @@ export function findExecutable(name: string, opts: FindExecutableOptions = {}): 
     }
   }
   return null;
+}
+
+/**
+ * Turns off Windows' search of the working directory for a bare program name.
+ * libuv (every Node spawn), cmd.exe and CreateProcess all look there before
+ * PATH unless `NoDefaultCurrentDirectoryInExePath` is set, so a repository
+ * that tracks `git.exe` would run as the user the moment a child starts in
+ * it. Puddle resolves executables on PATH itself; this is the safety net for
+ * a name that still reaches spawn unresolved, set once at process start-up.
+ * Children that inherit the environment keep it. A value already present is
+ * kept: any value disables the search. POSIX never searches the working
+ * directory, so it is left untouched.
+ */
+export function disableCurrentDirectorySearch(
+  env: Environment = process.env,
+  platform: NodeJS.Platform = process.platform,
+): void {
+  const name = 'NoDefaultCurrentDirectoryInExePath';
+  if (platform !== 'win32' || getEnv(env, name, platform) !== undefined) return;
+  setEnv(env, name, '1', platform);
 }
 
 /**

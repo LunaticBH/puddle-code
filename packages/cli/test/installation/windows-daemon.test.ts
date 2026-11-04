@@ -65,16 +65,30 @@ describe('the detached Windows supervisor', () => {
       PUDDLE_REFRESH_ID: 'x',
       ELECTRON_RUN_AS_NODE: '1',
     });
-    expect(env).toEqual({ Path: 'C:\\Windows', PUDDLE_HOME: 'C:\\h' });
+    expect(env).toEqual({
+      Path: 'C:\\Windows',
+      PUDDLE_HOME: 'C:\\h',
+      NoDefaultCurrentDirectoryInExePath: '1',
+    });
   });
 
   it('passes an overridden home on absolute, since the daemon runs elsewhere', () => {
     expect(daemonEnvironment({ puddle_home: '.puddle-dev' }, 'C:\\work\\.puddle-dev')).toEqual({
       puddle_home: 'C:\\work\\.puddle-dev',
+      NoDefaultCurrentDirectoryInExePath: '1',
     });
     // The default home stays implicit, as under a POSIX supervisor.
     expect(daemonEnvironment({ Path: 'C:\\Windows' }, 'C:\\Users\\a\\.puddle')).toEqual({
       Path: 'C:\\Windows',
+      NoDefaultCurrentDirectoryInExePath: '1',
+    });
+  });
+
+  it('starts the daemon with the working-directory program search off, keeping a user value', () => {
+    // libuv would otherwise look for a bare `git` in each worktree before PATH.
+    expect(daemonEnvironment({}).NoDefaultCurrentDirectoryInExePath).toBe('1');
+    expect(daemonEnvironment({ nodefaultcurrentdirectoryinexepath: 'yes' })).toEqual({
+      nodefaultcurrentdirectoryinexepath: 'yes',
     });
   });
 

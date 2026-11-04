@@ -15,6 +15,7 @@ import { isAbsolute, join, relative } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   deleteEnv,
+  disableCurrentDirectorySearch,
   envKey,
   findExecutable,
   getEnv,
@@ -152,6 +153,24 @@ describe('findExecutable on Windows', () => {
     expect(windowsExtensions(undefined)).toEqual(['.COM', '.EXE', '.BAT', '.CMD']);
     expect(windowsExtensions(' ; ;')).toEqual(['.COM', '.EXE', '.BAT', '.CMD']);
     expect(windowsExtensions('.EXE; .JS ;bad;.')).toEqual(['.EXE', '.JS']);
+  });
+});
+
+describe('disableCurrentDirectorySearch', () => {
+  it('leaves POSIX untouched, where the working directory is never searched', () => {
+    const env: Record<string, string | undefined> = { PATH: '/bin' };
+    disableCurrentDirectorySearch(env, 'linux');
+    disableCurrentDirectorySearch(env, 'darwin');
+    expect(env).toEqual({ PATH: '/bin' });
+  });
+
+  it('sets NoDefaultCurrentDirectoryInExePath on Windows, keeping a value already there', () => {
+    const env: Record<string, string | undefined> = { Path: 'C:\\Windows' };
+    disableCurrentDirectorySearch(env, 'win32');
+    expect(env).toEqual({ Path: 'C:\\Windows', NoDefaultCurrentDirectoryInExePath: '1' });
+    const own: Record<string, string | undefined> = { NODEFAULTCURRENTDIRECTORYINEXEPATH: 'yes' };
+    disableCurrentDirectorySearch(own, 'win32');
+    expect(own).toEqual({ NODEFAULTCURRENTDIRECTORYINEXEPATH: 'yes' });
   });
 });
 
