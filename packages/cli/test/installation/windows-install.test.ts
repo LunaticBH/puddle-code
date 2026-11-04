@@ -26,16 +26,37 @@ import {
   installWindowsDaemon,
   pruneCache,
   versionFromArchiveName,
-  windowsAssetName,
   windowsLauncher,
 } from '../../src/lib/installation/windows-install.js';
 import { LocalTransport } from '../../src/lib/transport/local.js';
 
 describe('Windows daemon release assets', () => {
-  it('names the x64 zip, which arm64 Windows runs under emulation in v1', () => {
-    expect(windowsAssetName('0.3.14', 'x64')).toBe('puddled-v0.3.14-win32-x64.zip');
-    expect(windowsAssetName('0.3.14', 'arm64')).toBe('puddled-v0.3.14-win32-x64.zip');
-    expect(() => windowsAssetName('0.3.14', 'ia32')).toThrow('no Windows ia32 build');
+  it('downloads the release zip and its SHA256SUMS by their release names', async () => {
+    const home = join(mkdtempSync(join(tmpdir(), 'puddle-windows-download-')), '.puddle');
+    const requested: string[] = [];
+    const fetchFn = (async (url: string | URL | Request) => {
+      requested.push(String(url));
+      return String(url).endsWith('/SHA256SUMS')
+        ? new Response(`${'0'.repeat(64)}  puddled-v1.2.3-win32-x64.zip\n`)
+        : new Response('not the published zip');
+    }) as typeof fetch;
+    const savedRepo = process.env.PUDDLE_REPO;
+    process.env.PUDDLE_REPO = 'acme/puddle';
+    try {
+      // The checksum refuses the download before anything is unpacked or started.
+      await expect(installWindowsDaemon({ home, version: '1.2.3', fetchFn })).rejects.toThrow(
+        'checksum mismatch',
+      );
+    } finally {
+      if (savedRepo === undefined) delete process.env.PUDDLE_REPO;
+      else process.env.PUDDLE_REPO = savedRepo;
+    }
+    expect(requested).toEqual([
+      'https://github.com/acme/puddle/releases/download/v1.2.3/puddled-v1.2.3-win32-x64.zip',
+      'https://github.com/acme/puddle/releases/download/v1.2.3/SHA256SUMS',
+    ]);
+    expect(existsSync(join(home, 'cache', 'puddled-v1.2.3-win32-x64.zip'))).toBe(false);
+    expect(existsSync(join(home, 'bin', 'versions', '1.2.3'))).toBe(false);
   });
 
   it('derives the version from a Windows archive name, whichever separator its path uses', () => {

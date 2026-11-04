@@ -44,7 +44,12 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 
-import { archiveTool, nodeBinary, stageNodeRuntime } from './lib/node-runtime.mjs';
+import {
+  archiveTool,
+  NODE_RUNTIME_VERSION,
+  nodeBinary,
+  stageNodeRuntime,
+} from './lib/node-runtime.mjs';
 import { smokePuddlang } from './lib/puddlang-smoke.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -175,6 +180,9 @@ function copyNativePackages() {
   }
   mkdirSync(join(bs3Dest, 'build', 'Release'), { recursive: true });
   cpSync(bs3Node, join(bs3Dest, 'build', 'Release', 'better_sqlite3.node'));
+  if (windows && process.versions.node.split('.')[0] !== NODE_RUNTIME_VERSION.split('.')[0]) {
+    stageRuntimeSqlite(bs3, bs3Dest);
+  }
 
   // bindings (better-sqlite3's runtime loader) and its one dependency, whole.
   const bindingsReq = createRequire(join(bs3, 'package.json'));
@@ -185,6 +193,31 @@ function copyNativePackages() {
     });
   }
   log('copied pruned native packages');
+}
+
+/**
+ * A Windows developer machine often runs a newer Node than the pinned
+ * runtime, so pnpm built better-sqlite3 for the wrong ABI. Replace only the
+ * staged copy (never pnpm's original: it is a hard link shared with every
+ * other checkout) with the pinned runtime's prebuild, fetched by
+ * better-sqlite3's own installer as `pnpm install` would. CI builds with the
+ * pinned Node major, so it never takes this path.
+ */
+function stageRuntimeSqlite(bs3, bs3Dest) {
+  const installer = createRequire(join(bs3, 'package.json')).resolve('prebuild-install/bin.js');
+  log(
+    `better-sqlite3 was built for Node ${process.versions.node}; ` +
+      `staging its prebuild for the Node ${NODE_RUNTIME_VERSION} runtime`,
+  );
+  rmSync(join(bs3Dest, 'build'), { recursive: true, force: true });
+  execFileSync(
+    process.execPath,
+    [installer, '--runtime', 'node', '--target', NODE_RUNTIME_VERSION, '--arch', arch],
+    { cwd: bs3Dest, stdio: 'inherit' },
+  );
+  if (!existsSync(join(bs3Dest, 'build', 'Release', 'better_sqlite3.node'))) {
+    fail(`no better-sqlite3 prebuild for Node ${NODE_RUNTIME_VERSION}: build with Node 22`);
+  }
 }
 
 /**

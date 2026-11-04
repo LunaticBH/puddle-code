@@ -101,12 +101,12 @@ jobs:
 
   tarball-windows:
     # Windows arm64 is not published in v1: Windows on Arm runs the x64 zips
-    # under emulation (docs/windows.md). Git Bash runs the steps; the
-    # archives and installers never need it.
+    # under emulation (docs/windows.md). PowerShell runs the steps, as on a
+    # user's machine; the archives and installers never need Git Bash.
     runs-on: windows-latest
     defaults:
       run:
-        shell: bash
+        shell: pwsh
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -117,14 +117,19 @@ jobs:
       - run: node scripts/install-ci.mjs
         env:
           ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
-      - run: node scripts/build-tarball.mjs --version "${GITHUB_REF_NAME#v}"
+      - run: node scripts/build-tarball.mjs --version ($env:GITHUB_REF_NAME -replace '^v', '')
       - name: build standalone CLI archive
         env:
           PUDDLE_REPO_SLUG: ${{ github.repository }}
+        # pwsh carries on past a failed native command unless told to stop.
         run: |
+          $version = $env:GITHUB_REF_NAME -replace '^v', ''
           pnpm --filter @puddle/web... build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           pnpm --filter @puddle-code/cli build
-          node scripts/build-cli-tarball.mjs --version "${GITHUB_REF_NAME#v}"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/build-cli-tarball.mjs --version $version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/test-cli-tarball.mjs
       - uses: actions/upload-artifact@v4
         with:

@@ -24,7 +24,7 @@
     file_server
   }
   # Installer requests must never receive the SPA fallback (including typos).
-  @installers path /install*.sh
+  @installers path /install*.sh /install*.ps1
   handle @installers {
     header Content-Type "text/plain; charset=utf-8"
     file_server
