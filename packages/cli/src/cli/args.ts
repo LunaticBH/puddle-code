@@ -135,7 +135,8 @@ persistent supervisor; an SSH-attached daemon keeps their state for the next lau
 install puts a component in place: 'daemon' under ~/.puddle on this machine
 or a user@host, 'desktop' as the macOS app bundle — or, on Linux, an
 AppImage placed where you say (default ~/puddle), then opened in the file
-manager. Already installed and no @version → nothing changes.
+manager; on Windows, the per-user installer run silently. Already installed
+and no @version → nothing changes.
 upgrade moves components to the newest release (or the named @version),
 installing any that are missing; with no component it covers everything
 installed on the target — the CLI last, using its installation channel. cli and desktop are
