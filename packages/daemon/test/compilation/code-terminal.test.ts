@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { compilationRunResponseSchema } from '@puddle/shared';
+import { findCodeExecutable } from '../../src/code/discovery.js';
 import { CodeProvider, createCodeProviders } from '../../src/code/provider.js';
 import { createCodeTerminalLauncher } from '../../src/code/terminal.js';
 import { CODE_RECIPES } from '../../src/code/recipes.js';
@@ -191,6 +192,32 @@ describe('programme terminals', () => {
       expect(failedOutput()).toContain('BUILD_FAILED');
       expect(failedOutput()).not.toContain('BINARY_READY');
       expect(second.terminal!.id).not.toBe(id);
+    },
+  );
+
+  it.runIf(windows)(
+    'runs a PowerShell script by its literal name and returns its exit status',
+    async () => {
+      const { f, deps, options } = setup();
+      const path = "main ' $(x) [y] 100%.ps1";
+      writeFileSync(join(f.repoPath, path), "Write-Output ('PS_' + 'READY')\r\nexit 3\r\n");
+      const provider = new CodeProvider(
+        CODE_RECIPES.find((r) => r.id === 'powershell')!,
+        {
+          ...deps,
+          discover: (names) => findCodeExecutable(names),
+        },
+      );
+      const result = await provider.run({ session: NO_SESSION, root: f.repoPath, path }, options);
+      const id = result.terminal!.id;
+      const output = () => stripVTControlCharacters(f.logs.readTail(id, 'agent'));
+      await waitFor(() => output().includes('[Process exited with status 3]'));
+      expect(output().indexOf('PS_READY')).toBeGreaterThan(-1);
+      expect(output().indexOf('PS_READY')).toBeLessThan(
+        output().indexOf('[Process exited with status 3]'),
+      );
+      f.ptys.write(id, 'agent', shellPrint('AFTER', 'SCRIPT'));
+      await waitFor(() => output().includes('AFTER-SCRIPT'));
     },
   );
 

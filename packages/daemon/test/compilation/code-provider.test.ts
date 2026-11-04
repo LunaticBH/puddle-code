@@ -15,7 +15,12 @@ import { compilationCapabilitiesResponseSchema, type Session } from '@puddle/sha
 import { isPidAlive, system32Path } from '@puddle/shared/node/platform';
 import { CodeProvider, createCodeProviders } from '../../src/code/provider.js';
 import { codeSearchDirectories, findCodeExecutable } from '../../src/code/discovery.js';
-import { CODE_RECIPES, managedBinaryName, recipeExecutables } from '../../src/code/recipes.js';
+import {
+  CODE_RECIPES,
+  hostRecipes,
+  managedBinaryName,
+  recipeExecutables,
+} from '../../src/code/recipes.js';
 import { CompilationService } from '../../src/compilation/service.js';
 import { compilationSpawn, runCompilationCommand } from '../../src/compilation/process.js';
 import { commandTemplate } from '../../src/compilation/command-template.js';
@@ -58,7 +63,7 @@ describe('code providers', () => {
     const service = new CompilationService(createCodeProviders({ ...deps, discover: () => null }));
     try {
       const capabilities = compilationCapabilitiesResponseSchema.parse(service.capabilities());
-      expect(capabilities.providers).toHaveLength(CODE_RECIPES.length);
+      expect(capabilities.providers).toHaveLength(hostRecipes().length);
       expect(
         capabilities.providers.every(
           (provider) => !provider.eager && !provider.available && provider.action === 'run',
@@ -238,24 +243,73 @@ describe('code tool discovery and process bounds', () => {
     },
   );
 
-  it('completes Windows names through PATHEXT and skips extensionless files and WSL', () => {
+  it('completes Windows names through PATHEXT and skips extensionless files', () => {
     const bin = directory();
-    const system32 = join(directory(), 'System32');
-    mkdirSync(system32);
     // npm installs an extensionless sh script beside each .cmd shim.
     writeFileSync(join(bin, 'cc'), '#!/bin/sh\n');
     writeFileSync(join(bin, 'tsx'), '#!/bin/sh\n');
     writeFileSync(join(bin, 'tsx.cmd'), '@echo off\r\n');
     writeFileSync(join(bin, 'gcc.exe'), '');
-    writeFileSync(join(system32, 'bash.exe'), '');
-    const find = (names: string[], dirs: string[]) => findCodeExecutable(names, dirs, 'win32');
+    writeFileSync(join(bin, 'powershell.exe'), '');
+    const find = (names: readonly string[], dirs: string[]) =>
+      findCodeExecutable(names, dirs, 'win32');
     expect(find(['cc', 'gcc'], [bin])).toBe(join(bin, 'gcc.exe'));
     expect(find(['tsx'], [bin])).toBe(join(bin, 'tsx.cmd'));
     expect(find(['python3'], [bin])).toBeNull();
-    expect(find(['bash'], [system32])).toBeNull();
-    writeFileSync(join(bin, 'bash.exe'), '');
-    expect(find(['bash'], [system32, bin])).toBe(join(bin, 'bash.exe'));
+    const powershell = recipeExecutables(recipe('powershell'), 'win32');
+    expect(find(powershell, [bin])).toBe(join(bin, 'powershell.exe'));
+    // PowerShell 7 wins wherever it is found.
+    const pwsh = directory();
+    writeFileSync(join(pwsh, 'pwsh.exe'), '');
+    expect(find(powershell, [bin, pwsh])).toBe(join(pwsh, 'pwsh.exe'));
   });
+
+  it('offers PowerShell scripts on Windows and POSIX shells elsewhere', () => {
+    // The POSIX provider list, in order, is fixed.
+    const posix = [
+      'python',
+      'javascript',
+      'typescript',
+      'c',
+      'cpp',
+      'rust',
+      'go',
+      'ruby',
+      'perl',
+      'r',
+      'shell',
+      'zsh',
+      'notebook',
+    ];
+    expect(hostRecipes('linux').map((entry) => entry.id)).toEqual(posix);
+    expect(hostRecipes('darwin').map((entry) => entry.id)).toEqual(posix);
+    expect(createCodeProviders(deps, 'linux').map((provider) => provider.recipe.id)).toEqual(posix);
+    const windows = [...posix.slice(0, 10), 'powershell', 'notebook'];
+    expect(hostRecipes('win32').map((entry) => entry.id)).toEqual(windows);
+    expect(createCodeProviders(deps, 'win32').map((provider) => provider.recipe.id)).toEqual(
+      windows,
+    );
+    expect(recipeExecutables(recipe('powershell'), 'win32')).toEqual(['pwsh', 'powershell']);
+    expect(recipe('powershell')).toMatchObject({
+      extensions: ['ps1'],
+      args: ['-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', '{{source}}'],
+    });
+  });
+
+  // Drive paths are absolute only on a Windows host.
+  it.runIf(process.platform === 'win32')(
+    'falls back to Windows PowerShell and never searches Git for Windows’ bin',
+    () => {
+      const home = directory();
+      const env = { SystemRoot: 'C:\\Windows', ProgramFiles: 'C:\\Program Files' };
+      const dirs = codeSearchDirectories(env, home, 'win32');
+      expect(dirs.at(-1)).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0');
+      expect(dirs).not.toContain('C:\\Program Files\\Git\\bin');
+      expect(findCodeExecutable(['powershell'], dirs, 'win32')?.toLowerCase()).toBe(
+        'c:\\windows\\system32\\windowspowershell\\v1.0\\powershell.exe',
+      );
+    },
+  );
 
   it('searches the Windows PATH safely, then venv Scripts and installer locations', () => {
     const home = directory();
