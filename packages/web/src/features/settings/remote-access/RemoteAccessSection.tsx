@@ -201,9 +201,9 @@ export function RemoteAccessSection() {
             !data.supervisor &&
             (windowsHost ? (
               <p className="mt-4 text-sm text-fg-secondary">
-                This host needs its daemon started at logon by Task Scheduler before access can be
-                enabled here: reinstall it with puddle upgrade daemon. For another supervisor,
-                configure the connector using the remote CLI commands.
+                This host needs Task Scheduler to start its daemon at logon before access can be
+                enabled here; puddle upgrade daemon registers it. For another supervisor, configure
+                the connector using the remote CLI commands.
               </p>
             ) : (
               <p className="mt-4 text-sm text-fg-secondary">
