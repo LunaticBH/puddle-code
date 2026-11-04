@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import {
   copyFileSync,
   mkdirSync,
@@ -10,6 +11,7 @@ import {
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 import { assertWindowsTreeArch, peMachine } from '../../../../scripts/lib/node-runtime.mjs';
 import * as windowsSign from '../../../../scripts/lib/windows-sign.mjs';
@@ -30,6 +32,7 @@ const { SIGN_SCRIPT, signWindowsTree, windowsSigningMode } = windowsSign as {
   windowsSigningMode: (env?: Record<string, string | undefined>) => string;
 };
 
+const repoRoot = fileURLToPath(new URL('../../../../', import.meta.url));
 const temp = mkdtempSync(join(tmpdir(), 'puddle-windows-release-'));
 afterAll(() => rmSync(temp, { recursive: true, force: true }));
 
@@ -98,6 +101,26 @@ describe('Windows release tree architecture', () => {
     helper.writeUInt16LE(2, 0x80 + 20);
     writeFileSync(join(root, 'helper.exe'), helper);
     expect(() => assertWindowsTreeArch(root, 'x64')).toThrow('helper.exe (x86)');
+  });
+
+  it('checks a tree from the command line, skipping the paths it is told to', () => {
+    const root = tree('cli-check', {
+      'Puddle.exe': pe(0x8664),
+      'resources/elevate.exe': pe(0x14c),
+    });
+    const script = join(repoRoot, 'scripts/check-windows-arch.mjs');
+    const run = (args: string[]) =>
+      spawnSync(process.execPath, [script, root, ...args], { encoding: 'utf8' });
+    const refused = run(['x64']);
+    expect(refused.status).toBe(1);
+    expect(refused.stderr).toContain('resources/elevate.exe (x86)');
+    const accepted = run(['x64', '--except', 'resources/elevate.exe']);
+    expect(accepted.stderr).toBe('');
+    expect(accepted.status).toBe(0);
+    expect(accepted.stdout).toContain('1 PE files');
+    expect(run(['arm64', '--except', 'resources/elevate.exe']).stderr).toContain(
+      'Puddle.exe (x64)',
+    );
   });
 
   it('accepts a native tree with AnyCPU helpers and names every stray binary', () => {
