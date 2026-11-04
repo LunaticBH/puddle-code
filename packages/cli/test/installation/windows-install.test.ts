@@ -17,7 +17,7 @@ import { basename, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ipcPath, listenPrivate } from '@puddle/shared/node';
-import { system32Path } from '@puddle/shared/node/platform';
+import { isPidAlive, system32Path } from '@puddle/shared/node/platform';
 import { waitForStartedDaemon } from '../../src/lib/connection/cockpit.js';
 import { readCurrentVersion } from '../../src/lib/installation/current-link.js';
 import {
@@ -158,6 +158,7 @@ describe.runIf(process.platform === 'win32' && existsSync(daemonDist))(
     const root = mkdtempSync(join(tmpdir(), 'puddle-windows-install-'));
     const home = join(root, '.puddle');
     let zip: string;
+    let newer: string;
     const homes = [home];
     const savedHome = process.env.PUDDLE_HOME;
     const logger = (lines: string[] = []) => ({
@@ -176,6 +177,7 @@ describe.runIf(process.platform === 'win32' && existsSync(daemonDist))(
 
     beforeAll(() => {
       zip = releaseZip(root, '1.2.3');
+      newer = releaseZip(root, '1.2.4');
       process.env.PUDDLE_HOME = home;
     }, 120_000);
 
@@ -257,6 +259,77 @@ describe.runIf(process.platform === 'win32' && existsSync(daemonDist))(
         [],
       );
       (await waitForStartedDaemon(new LocalTransport(), 60_000)).authority.close();
+      await stopWindowsDaemon(at);
+    }, 180_000);
+
+    it('keeps the event loop running while it smoke-tests the runtime', async () => {
+      const at = freshHome();
+      process.env.PUDDLE_FIXTURE_VERSION_DELAY_MS = '1500';
+      let last = Date.now();
+      let longest = 0;
+      const gap = () => {
+        longest = Math.max(longest, Date.now() - last);
+        last = Date.now();
+      };
+      const tick = setInterval(gap, 25);
+      try {
+        await installWindowsDaemon({ home: at, tarball: zip });
+        gap(); // a stall just before the install returns leaves no later tick to see it
+      } finally {
+        clearInterval(tick);
+        delete process.env.PUDDLE_FIXTURE_VERSION_DELAY_MS;
+      }
+      // The desktop runs this in Electron's main process: a blocked loop freezes its windows.
+      expect(longest).toBeLessThan(1000);
+      await stopWindowsDaemon(at);
+    }, 180_000);
+
+    it('never stops a daemon that a concurrent launcher started and is still starting', async () => {
+      const at = freshHome();
+      // Slow to bind, as under Defender's first scan of a fresh runtime.
+      process.env.PUDDLE_FIXTURE_START_DELAY_MS = '4000';
+      const first = logger();
+      const second = logger();
+      try {
+        const a = installWindowsDaemon({
+          home: at,
+          tarball: zip,
+          replaceRunning: false,
+          logger: first,
+        });
+        // The second launcher queues on the install lock behind the first.
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        const b = installWindowsDaemon({
+          home: at,
+          tarball: zip,
+          replaceRunning: false,
+          logger: second,
+        });
+        await Promise.all([a, b]);
+      } finally {
+        delete process.env.PUDDLE_FIXTURE_START_DELAY_MS;
+      }
+      const started = pid(at);
+      expect(isPidAlive(started, 'win32')).toBe(true);
+      expect(second.lines.join('\n')).toMatch(/leaving it running/);
+      expect(second.lines.join('\n')).not.toMatch(/stopping puddled|terminating/);
+      (await waitForStartedDaemon(new LocalTransport(), 60_000)).authority.close();
+      expect(pid(at)).toBe(started);
+      await stopWindowsDaemon(at);
+    }, 180_000);
+
+    it('leaves `current` naming the daemon it leaves running', async () => {
+      const at = freshHome();
+      await installWindowsDaemon({ home: at, tarball: zip });
+      (await waitForStartedDaemon(new LocalTransport(), 60_000)).authority.close();
+      const running = pid(at);
+      // Another launcher, on another release, that only needs a daemon.
+      const { lines, ...log } = logger();
+      await installWindowsDaemon({ home: at, tarball: newer, replaceRunning: false, logger: log });
+      expect(existsSync(join(at, 'bin', 'versions', '1.2.4'))).toBe(true);
+      expect(readCurrentVersion(at)).toBe('1.2.3');
+      expect(pid(at)).toBe(running);
+      expect(lines).toContain('puddled 1.2.4 is unpacked; the running daemon was left in place');
       await stopWindowsDaemon(at);
     }, 180_000);
 

@@ -1,4 +1,4 @@
-import { execFile, spawnSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import {
   createReadStream,
@@ -22,11 +22,13 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import { initialisePrivateHome, ipcPath, listenPrivate, rotateIpcNonce } from '@puddle/shared/node';
-import { renameWithRetry, system32Path } from '@puddle/shared/node/platform';
+import { isPidAlive, renameWithRetry, system32Path } from '@puddle/shared/node/platform';
+import { readCurrentVersion } from './current-link.js';
 import { parseSums } from './desktop-update.js';
 import { releaseArchiveName, releaseAssetUrl } from './releases.js';
 import {
   controlPipeState,
+  homeDaemonPids,
   startWindowsDaemon,
   stopWindowsDaemon,
   windowsRuntime,
@@ -50,6 +52,8 @@ import { pinnedDaemonVersion, repoSlug } from '../version.js';
 const ZIP_NAME = /^puddled-v(\d[^-]*)-win32-[a-z0-9]+\.zip$/;
 const CACHE_KEEP = 2;
 const LOCK_WAIT_MS = 10 * 60_000;
+/** ensureDaemon's start allowance: Defender scans a freshly unpacked runtime. */
+const SERVE_WAIT_MS = 60_000;
 
 export interface WindowsInstallOptions {
   home?: string;
@@ -101,7 +105,7 @@ export async function installWindowsDaemon(opts: WindowsInstallOptions = {}): Pr
   let lock = await acquireInstallLock(home, logger);
   try {
     const runtime = windowsRuntime(home, version);
-    if (existsSync(runtime.dir) && smokeTest(runtime, version, home)) {
+    if (existsSync(runtime.dir) && (await smokeTest(runtime, version, home))) {
       logger.info(`version ${version} already installed`);
     } else {
       const archive = local ?? (await download(home, version, opts.fetchFn ?? fetch, logger));
@@ -114,7 +118,7 @@ export async function installWindowsDaemon(opts: WindowsInstallOptions = {}): Pr
       }
       mkdirSync(runtime.dir, { recursive: true });
       await extract(home, archive, runtime.dir);
-      if (!smokeTest(runtime, version, home)) {
+      if (!(await smokeTest(runtime, version, home))) {
         rmSync(runtime.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
         throw new CliError(
           'not_installed',
@@ -133,19 +137,44 @@ export async function installWindowsDaemon(opts: WindowsInstallOptions = {}): Pr
       pipe = await controlPipeState(home);
     }
     const running = pipe === 'daemon' || pipe === 'unknown';
-    if (running && opts.replaceRunning === false) {
-      logger.info('puddled was started meanwhile — leaving it running');
-    } else if (running || existsSync(join(home, 'puddled.pid'))) {
+    const pidFile = existsSync(join(home, 'puddled.pid'));
+    // A launcher that only needs a daemon never stops one that another
+    // launcher started, even one that has not served its pipe yet.
+    const starting =
+      opts.replaceRunning === false &&
+      !running &&
+      pidFile &&
+      (await homeDaemonPids(home).catch(() => [])).length > 0;
+    const leave = opts.replaceRunning === false && (running || starting);
+    if (leave) {
+      logger.info(`puddled was ${running ? 'started' : 'starting'} meanwhile — leaving it running`);
+    } else if (running || pidFile) {
       await stopWindowsDaemon(home, { logger });
     }
-    pointCurrent(home, version);
+    // The launcher that started a running daemon pointed `current` at it.
+    if (!leave || readCurrentVersion(home, 'win32') === undefined) pointCurrent(home, version);
     writeFileSync(join(home, 'bin', 'puddled.cmd'), windowsLauncher());
     pruneCache(join(home, 'cache'));
     writeFileSync(join(home, 'supervisor'), 'detached\n');
-    if (!running || opts.replaceRunning !== false) await startWindowsDaemon(home, version);
+    if (leave) {
+      logger.info(`puddled ${version} is unpacked; the running daemon was left in place`);
+      return;
+    }
+    const pid = await startWindowsDaemon(home, version);
+    // Until it serves its pipe, the next lock holder's probe could not see it.
+    await servedOrGone(home, pid);
     logger.info(`installed puddled ${version} under ${home} (supervisor: detached)`);
   } finally {
     await new Promise<void>((resolve) => lock.close(() => resolve()));
+  }
+}
+
+/** Until the daemon just started holds its control pipe or exits, within the start allowance. */
+async function servedOrGone(home: string, pid: number): Promise<void> {
+  const deadline = Date.now() + SERVE_WAIT_MS;
+  while (Date.now() < deadline && isPidAlive(pid, 'win32')) {
+    if ((await controlPipeState(home, 1000)) !== 'absent') return;
+    await sleep(100);
   }
 }
 
@@ -175,24 +204,33 @@ async function acquireInstallLock(home: string, logger: Logger): Promise<Server>
   }
 }
 
-/** `node.exe daemon\puddled.mjs --version` must name the expected release. */
-function smokeTest(runtime: ReturnType<typeof windowsRuntime>, version: string, home: string) {
+/**
+ * `node.exe daemon\puddled.mjs --version` must name the expected release.
+ * Asynchronous: the desktop runs this in Electron's main process, and the
+ * run loads the whole daemon bundle with its native addons.
+ */
+async function smokeTest(
+  runtime: ReturnType<typeof windowsRuntime>,
+  version: string,
+  home: string,
+): Promise<boolean> {
   const log = join(home, 'logs', 'install-smoke.log');
   if (!existsSync(runtime.node) || !existsSync(runtime.entry)) return false;
-  const result = spawnSync(runtime.node, [runtime.entry, '--version'], {
-    windowsHide: true,
-    encoding: 'utf8',
-    // A freshly unpacked runtime is scanned by Defender on its first run.
-    timeout: 120_000,
-  });
-  if (result.status === 0 && result.stdout.startsWith(`puddled ${version} `)) {
+  const result = await new Promise<{ error: Error | null; stdout: string; stderr: string }>(
+    (done) =>
+      execFile(
+        runtime.node,
+        [runtime.entry, '--version'],
+        // A freshly unpacked runtime is scanned by Defender on its first run.
+        { windowsHide: true, encoding: 'utf8', timeout: 120_000 },
+        (error, stdout, stderr) => done({ error, stdout, stderr }),
+      ),
+  );
+  if (result.error === null && result.stdout.startsWith(`puddled ${version} `)) {
     rmSync(log, { force: true });
     return true;
   }
-  writeFileSync(
-    log,
-    `${result.error?.message ?? ''}\n${result.stdout ?? ''}${result.stderr ?? ''}`,
-  );
+  writeFileSync(log, `${result.error?.message ?? ''}\n${result.stdout}${result.stderr}`);
   return false;
 }
 
