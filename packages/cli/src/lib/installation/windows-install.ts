@@ -156,7 +156,8 @@ export async function installWindowsDaemon(opts: WindowsInstallOptions = {}): Pr
       }
     }
     let pipe = await controlPipeState(home);
-    let supervisor = (await supervisorRequest(home, 'status')).kind;
+    let answer = await supervisorRequest(home, 'status');
+    let supervisor = answer.kind;
     if (pipe === 'foreign' || supervisor === 'foreign') {
       // Another account serves a name an earlier run used. Renamed under the
       // lock, the home's pipes leave it behind; the lock moves with them, and
@@ -171,11 +172,15 @@ export async function installWindowsDaemon(opts: WindowsInstallOptions = {}): Pr
       rotateIpcNonce(home);
       lock = await relock(home, lock, logger);
       pipe = await controlPipeState(home);
-      supervisor = (await supervisorRequest(home, 'status')).kind;
+      answer = await supervisorRequest(home, 'status');
+      supervisor = answer.kind;
     }
     const running = pipe === 'daemon' || pipe === 'unknown';
-    // A supervisor between restarts, or starting its daemon, counts as running it.
-    const supervising = supervisor === 'answered' || supervisor === 'unavailable';
+    // A supervisor between restarts, or starting its daemon, counts as running
+    // it; one that is exiting (it gave up, or was asked to stop) runs none, and
+    // is waited out by the stop below rather than left to answer the next start.
+    const exiting = answer.kind === 'answered' && answer.state.stopping;
+    const supervising = (supervisor === 'answered' && !exiting) || supervisor === 'unavailable';
     const pidFile = existsSync(join(home, 'puddled.pid'));
     // A launcher that only needs a daemon never stops one that another
     // launcher started, even one that has not served its pipe yet.
@@ -186,7 +191,7 @@ export async function installWindowsDaemon(opts: WindowsInstallOptions = {}): Pr
     const leave = opts.replaceRunning === false && (running || starting);
     if (leave) {
       logger.info(`puddled was ${running ? 'started' : 'starting'} meanwhile — leaving it running`);
-    } else if (running || pidFile || supervising) {
+    } else if (running || pidFile || supervising || exiting) {
       await stopWindowsDaemon(home, { logger });
     }
     // The launcher that started a running daemon pointed `current` at it.
