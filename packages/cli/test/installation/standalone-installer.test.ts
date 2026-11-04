@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
@@ -25,6 +25,8 @@ import type { Transport } from '../../src/lib/transport/transport.js';
 import {
   standaloneInstallation,
   removeStandaloneCli,
+  TREE_CLEANUP_COMMAND,
+  treeCleanupArgs,
   windowsStandaloneLauncher,
   windowsUpgradeCommand,
 } from '../../src/lib/installation/standalone-cli.js';
@@ -332,6 +334,14 @@ describe('Windows standalone launchers (any OS)', () => {
     );
   });
 
+  it('waits a second between self-removal retries, not only once the tree is gone', () => {
+    // cmd.exe runs everything after an unbracketed `if` as its body.
+    expect(TREE_CLEANUP_COMMAND).toContain(
+      '& (if not exist "%PUDDLE_CLEANUP_ROOT%" exit /b 0) & ping -n 2 127.0.0.1 >nul)',
+    );
+    expect(treeCleanupArgs()).toEqual(['/d', '/s', '/c', `"${TREE_CLEANUP_COMMAND}"`]);
+  });
+
   it('falls back to the absolute root across drives', () => {
     expect(windowsStandaloneLauncher('D:\\tools\\puddle', 'C:\\bin')).toBe(
       '@rem puddle standalone launcher\r\n' +
@@ -627,4 +637,31 @@ describe.runIf(process.platform === 'win32')('Windows standalone CLI installer',
     await removeStandaloneCli(installation!, 'win32');
     expect(existsSync(f.prefix)).toBe(false);
   });
+
+  it('keeps retrying a self-removal until the exiting process releases the tree', async () => {
+    const temp = mkdtempSync(join(tmpdir(), 'puddle-ps-cleanup-'));
+    temps.push(temp);
+    const tree = join(temp, 'cli');
+    const held = join(tree, 'versions', '1.2.3', 'bin');
+    mkdirSync(held, { recursive: true });
+    writeFileSync(join(tree, 'INSTALLATION'), 'puddle-cli\n');
+    // A working directory cannot be removed: the stand-in for the exiting node.exe.
+    const holder = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 2500)'], {
+      cwd: held,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    await new Promise((resolve) => holder.once('spawn', resolve));
+    const started = Date.now();
+    const cleanup = spawn(join(systemRoot, 'System32', 'cmd.exe'), treeCleanupArgs(), {
+      stdio: 'ignore',
+      windowsHide: true,
+      windowsVerbatimArguments: true,
+      env: { ...process.env, PUDDLE_CLEANUP_ROOT: tree },
+    });
+    const code = await new Promise((resolve) => cleanup.once('exit', resolve));
+    expect(code).toBe(0);
+    expect(existsSync(tree)).toBe(false);
+    expect(Date.now() - started).toBeGreaterThan(1500);
+  }, 30_000);
 });
