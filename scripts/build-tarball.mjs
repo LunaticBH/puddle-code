@@ -23,8 +23,10 @@
  *
  * On Windows the same tree ships as puddled-v<v>-win32-<arch>.zip (docs/windows.md):
  * bin\node.exe, node-pty's win32 prebuilds (conpty and winpty, no .pdb), and
- * puddled.cmd / puddle-connector.cmd for humans. The CLI and desktop start
- * bin\node.exe on daemon\puddled.mjs directly, never through cmd.exe.
+ * puddled.cmd / puddle-connector.cmd for humans, and daemon\supervisor.mjs:
+ * the resident supervisor that the home's scheduled task (or a launcher)
+ * starts, which runs bin\node.exe on daemon\puddled.mjs (and the connector)
+ * directly, never through cmd.exe.
  */
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -130,6 +132,30 @@ async function bundleDaemon() {
   log(
     `bundled daemon (${(statSync(join(stage, 'daemon', 'puddled.mjs')).size / 1e6).toFixed(1)} MB)`,
   );
+}
+
+/*
+ * 1b — Windows only: the resident supervisor the home's scheduled task
+ * starts (docs/windows.md, decision 6). POSIX trees stay as they were.
+ */
+async function bundleWindowsSupervisor() {
+  await build({
+    entryPoints: [join(repoRoot, 'packages/daemon/src/windows-supervisor.ts')],
+    outfile: join(stage, 'daemon', 'supervisor.mjs'),
+    bundle: true,
+    platform: 'node',
+    target: 'node22',
+    format: 'esm',
+    alias: {
+      '@puddle/shared/node/platform': join(repoRoot, 'packages/shared/src/node/platform.ts'),
+      '@puddle/shared/node': join(repoRoot, 'packages/shared/src/node/security.ts'),
+      '@puddle/shared': join(repoRoot, 'packages/shared/src/index.ts'),
+    },
+    define: { __PUDDLED_VERSION__: JSON.stringify(version) },
+    sourcemap: false,
+    minify: false,
+    logLevel: 'warning',
+  });
 }
 
 /* 2 — copy the two native packages, pruned to their runtime shape. */
@@ -324,6 +350,10 @@ function smokeTestWindows() {
   }
   const connector = run('connector.mjs');
   if (!connector.startsWith('puddle-connector ')) fail('connector smoke test failed');
+  const supervisor = run('supervisor.mjs');
+  if (!supervisor.startsWith(`puddle-supervisor ${version}`)) {
+    fail(`supervisor smoke test failed: unexpected --version output ${JSON.stringify(supervisor)}`);
+  }
   execFileSync(
     node,
     [
@@ -337,7 +367,9 @@ function smokeTestWindows() {
     ],
     { cwd: join(stage, 'daemon'), stdio: 'inherit' },
   );
-  log(`smoke test passed: ${out.trim()}; ${connector.trim()}; conpty and sqlite load`);
+  log(
+    `smoke test passed: ${out.trim()}; ${connector.trim()}; ${supervisor.trim()}; conpty and sqlite load`,
+  );
 }
 
 /* 6 — tar + checksum. */
@@ -378,6 +410,7 @@ function packWindows() {
 rmSync(stage, { recursive: true, force: true });
 mkdirSync(stage, { recursive: true });
 await bundleDaemon();
+if (windows) await bundleWindowsSupervisor();
 await build({
   entryPoints: ['runner', 'runtime-api', 'zod'].map((name) =>
     join(repoRoot, `packages/daemon/src/puddlang/${name}.ts`),
