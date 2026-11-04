@@ -1,5 +1,5 @@
 import { statSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join, sep } from 'node:path';
 import { getEnv, type Environment } from './environment.js';
 
 export interface FindExecutableOptions {
@@ -25,8 +25,11 @@ export const DEFAULT_PATHEXT = '.COM;.EXE;.BAT;.CMD';
  * a PATHEXT extension is tried as given, any other name with each extension in
  * turn (appended in lower case). Extensions compare case-insensitively. PATH is
  * split on `;`, entries lose surrounding quotes and empty ones are skipped.
- * Unlike cmd.exe, the working directory is never searched implicitly. A name
- * with a separator or a drive is checked directly, with the same completion.
+ * Unlike cmd.exe, the working directory is never searched implicitly, and
+ * neither is a relative entry such as `.`: it would name whichever directory
+ * the process happens to run in. A bare name therefore only ever resolves to
+ * an absolute path. A name with a separator or a drive is checked directly,
+ * with the same completion.
  *
  * `platform` selects the lookup rules; candidates are always joined with the
  * native `path`, since they name files on this machine.
@@ -53,13 +56,24 @@ export function findExecutable(name: string, opts: FindExecutableOptions = {}): 
   }
   for (const entry of (opts.path ?? getEnv(env, 'PATH', 'win32') ?? '').split(';')) {
     const dir = entry.replace(/^"(.*)"$/, '$1');
-    if (!dir) continue;
+    if (!isFullyQualified(dir)) continue;
     for (const candidate of candidates) {
       const path = join(dir, candidate);
       if (isFile(path)) return path;
     }
   }
   return null;
+}
+
+/**
+ * A PATH entry that names one directory wherever the process runs: absolute
+ * and, on a Windows host, with a drive or UNC prefix (`\tools` would follow
+ * the current drive, and libuv resolves it against the child's working
+ * directory instead).
+ */
+function isFullyQualified(dir: string): boolean {
+  if (dir === '' || !isAbsolute(dir)) return false;
+  return sep === '/' || /^(?:[A-Za-z]:[\\/]|[\\/]{2})/.test(dir);
 }
 
 /** PATHEXT as a list of `.ext` entries; the Windows default when unset or empty. */

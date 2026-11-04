@@ -11,7 +11,7 @@ import {
 } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   deleteEnv,
@@ -120,6 +120,20 @@ describe('findExecutable on Windows', () => {
     expect(findExecutable('tool', { ...windows, env })).toBe(join(second, 'tool.bat'));
     expect(findExecutable('tool', { ...windows, env: { PATH: second } })).toBe(
       join(second, 'tool.bat'),
+    );
+  });
+
+  it('never resolves a bare name through a relative or drive-relative PATH entry', () => {
+    const dir = directory();
+    writeFileSync(join(dir, 'tool.exe'), '');
+    // Relative entries name whichever directory the process runs in, and
+    // libuv would resolve the result against the child's instead.
+    const relativeDir = relative(process.cwd(), dir);
+    expect(isAbsolute(relativeDir)).toBe(false);
+    const env = { PATH: ['.', relativeDir, '\\rooted', ''].join(';') };
+    expect(findExecutable('tool', { ...windows, env })).toBeNull();
+    expect(findExecutable('tool', { ...windows, env: { PATH: `${relativeDir};${dir}` } })).toBe(
+      join(dir, 'tool.exe'),
     );
   });
 
