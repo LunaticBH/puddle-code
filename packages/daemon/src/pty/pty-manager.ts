@@ -55,12 +55,17 @@ interface Live {
  * daemon. Resizes are therefore held here until the PTY is ready, and the
  * pseudoconsole is closed at most once: a second `kill()` reaches a closed
  * native handle.
+ *
+ * `size` is the pseudoconsole's current size. ResizePseudoConsole repaints the
+ * whole screen even when the size is unchanged, which would duplicate a
+ * viewer's just-replayed snapshot as live output, so an unchanged size is
+ * never re-applied.
  */
 interface ConptyState {
   ready: boolean;
   closed: boolean;
   exited: boolean;
-  spawnedSize: { cols: number; rows: number };
+  size: { cols: number; rows: number };
 }
 
 const windows = process.platform === 'win32';
@@ -139,7 +144,7 @@ export class PtyManager extends EventEmitter {
       term,
       quiesced: null,
       queryTail: '',
-      conpty: windows ? { ready: false, closed: false, exited: false, spawnedSize: size } : null,
+      conpty: windows ? { ready: false, closed: false, exited: false, size } : null,
     };
     this.live.set(key, live);
     proc.onData((raw) => {
@@ -183,15 +188,20 @@ export class PtyManager extends EventEmitter {
     setImmediate(() => {
       if (state.exited || this.live.get(this.key(live.stream, live.term)) !== live) return;
       const size = this.sizes.get(this.key(live.stream, live.term));
-      if (!size || (size.cols === state.spawnedSize.cols && size.rows === state.spawnedSize.rows)) {
-        return;
-      }
-      try {
-        live.proc.resize(size.cols, size.rows);
-      } catch {
-        // The process exited in between.
-      }
+      if (size) this.resizeConpty(live, size.cols, size.rows);
     });
+  }
+
+  /** Size a ready ConPTY, unless it already has that size (see ConptyState). */
+  private resizeConpty(live: Live, cols: number, rows: number): void {
+    const state = live.conpty!;
+    if (state.size.cols === cols && state.size.rows === rows) return;
+    try {
+      live.proc.resize(cols, rows);
+      state.size = { cols, rows };
+    } catch {
+      // The process exited in between.
+    }
   }
 
   /** Whether calls on this PTY run now rather than in node-pty's deferred queue. */
@@ -279,6 +289,7 @@ export class PtyManager extends EventEmitter {
     try {
       live.proc.resize(size.cols + 1, size.rows);
       live.proc.resize(size.cols, size.rows);
+      if (live.conpty) live.conpty.size = { cols: size.cols, rows: size.rows };
     } catch {
       // The process may exit between the two resize calls.
     }
@@ -300,6 +311,10 @@ export class PtyManager extends EventEmitter {
     const live = this.live.get(this.key(stream, term));
     // A ConPTY not yet ready picks the remembered size up in conptyReady.
     if (!live || !this.callable(live)) return;
+    if (live.conpty) {
+      this.resizeConpty(live, cols, rows);
+      return;
+    }
     try {
       live.proc.resize(cols, rows);
     } catch {

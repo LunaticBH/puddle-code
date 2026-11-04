@@ -195,4 +195,28 @@ describe.skipIf(process.platform !== 'win32')('PtyManager on ConPTY', () => {
     await waitFor(() => exits.length === 1);
     expect(typeof exits[0]!.exitCode).toBe('number');
   });
+
+  it('never re-applies an unchanged size, which would repaint the whole screen', async () => {
+    const { ptys, chunks, output, exits } = manager();
+    ptys.spawn(
+      's6',
+      'agent',
+      process.execPath,
+      ['-e', "process.stdout.write('PAINTED\\n'); setInterval(() => {}, 1000)"],
+      { cwd: tmpdir() },
+    );
+    await waitFor(() => output().includes('PAINTED'));
+    await new Promise((r) => setTimeout(r, 500)); // ConPTY's own start-up painting
+    const settled = chunks.length;
+    // A viewer re-attaching at the size the PTY already has (it started at 120x32).
+    ptys.resize('s6', 'agent', 120, 32);
+    ptys.resize('s6', 'agent', 120, 32);
+    await new Promise((r) => setTimeout(r, 500));
+    expect(chunks.slice(settled)).toEqual([]);
+    // A real size change still reaches the pseudoconsole, which repaints.
+    ptys.resize('s6', 'agent', 100, 30);
+    await waitFor(() => chunks.length > settled);
+    ptys.kill('s6', 'agent', 'SIGKILL');
+    await waitFor(() => exits.length === 1);
+  });
 });
