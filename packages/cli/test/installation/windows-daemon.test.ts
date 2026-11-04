@@ -142,7 +142,9 @@ describe('the detached Windows supervisor', () => {
     expect(isHomeSupervisor(process_(10, task.replaceAll('.puddle', '.puddle2')), home)).toBe(
       false,
     );
-    expect(isHomeSupervisor(process_(10, task, 'conhost.exe'), home)).toBe(false);
+    // The windowless launcher the task starts names the supervisor too, but is not one.
+    const launcher = `"C:\\Users\\a\\.puddle\\bin\\current\\bin\\puddle-hidden.exe" ${task}`;
+    expect(isHomeSupervisor(process_(10, launcher, 'puddle-hidden.exe'), home)).toBe(false);
     expect(isHomeSupervisor(process_(10, null), home)).toBe(false);
     expect(
       isHomeSupervisor(process_(10, task.replace('supervisor.mjs', 'puddled.mjs')), home),

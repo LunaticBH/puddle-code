@@ -156,7 +156,7 @@ describe('starting the supervisor', () => {
     });
     expect(started).toBe('process');
     expect(calls[1]!.PUDDLE_PROCESS_COMMAND).toMatch(
-      /conhost\.exe" --headless ".*supervisor\.mjs" --home "/,
+      /^"[^"]*\\bin\\current\\bin\\puddle-hidden\.exe" "[^"]*\\node\.exe" ".*supervisor\.mjs" --home "/,
     );
     expect(lines.join('\n')).toMatch(/no desktop session/);
   });

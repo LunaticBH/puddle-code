@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, openSync, realpathSync, renameSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, win32 } from 'node:path';
-import { deleteEnv, getEnv, setEnv, system32Path } from './environment.js';
+import { deleteEnv, getEnv, setEnv } from './environment.js';
 import { disableCurrentDirectorySearch } from './executables.js';
 import { readCurrentWindowsUserSid } from './windows-acl.js';
 import { supervisorRequest } from './windows-pipes.js';
@@ -21,10 +21,11 @@ import {
 /**
  * Windows daemon supervision (docs/windows.md, decision 6). One per-user
  * scheduled task per home starts the resident supervisor
- * (`daemon\supervisor.mjs`) at logon; the supervisor runs the daemon and,
- * while remote access is supervised, the connector, restarting either after
- * a crash. Launchers start the same supervisor: through the task, then
- * through WMI when the task cannot run (no interactive session), and as a
+ * (`daemon\supervisor.mjs`, through the windowless `bin\puddle-hidden.exe`)
+ * at logon; the supervisor runs the daemon and, while remote access is
+ * supervised, the connector, restarting either after a crash. Launchers
+ * start the same supervisor: through the task, then through WMI when the
+ * task cannot run (no interactive session), and as a
  * detached child of the launcher only when both are refused. The
  * supervisor's private pipe is the single-instance arbiter, as the daemon's
  * own control pipe is for daemons, so no path ever starts a competitor.
@@ -98,9 +99,9 @@ export function supervisorTaskName(home: string): string {
 }
 
 /**
- * Why a home cannot be supervised, if it cannot: Task Scheduler and
- * conhost.exe expand `%NAME%` in the command line they start, and a quote
- * or control character would end or split an argument.
+ * Why a home cannot be supervised, if it cannot: Task Scheduler expands
+ * `%NAME%` in the command it starts, and a quote or control character would
+ * end or split an argument.
  */
 export function unsupervisableHome(home: string): string | undefined {
   // eslint-disable-next-line no-control-regex -- Refuse control characters at the trust boundary.
@@ -115,30 +116,31 @@ function quoted(value: string): string {
   return `"${value.replace(/(\\+)$/, '$1$1')}"`;
 }
 
+/**
+ * `bin\puddle-hidden.exe`, built from packages/daemon/src/supervision/puddle-hidden.cs:
+ * a GUI-subsystem program, so Windows gives it no console, that runs the
+ * command line after its own name with a console that has no window and
+ * exits with that program's status. Task Scheduler would give node.exe, a
+ * console program, a console window. `conhost.exe --headless` hides one
+ * too, but it expands `%NAME%`, exits 0 whatever its program returns, and
+ * runs nothing when its standard input is NUL (verified on Windows 11 26200).
+ */
+export const WINDOWLESS_LAUNCHER = 'puddle-hidden.exe';
+
 /** The supervisor through the `current` junction: an upgrade needs no new task. */
-export function supervisorPaths(home: string): { node: string; script: string } {
+export function supervisorPaths(home: string): { launcher: string; node: string; script: string } {
   const current = win32.join(canonicalWindowsHome(home), 'bin', 'current');
   return {
+    launcher: win32.join(current, 'bin', WINDOWLESS_LAUNCHER),
     node: win32.join(current, 'bin', 'node.exe'),
     script: win32.join(current, 'daemon', 'supervisor.mjs'),
   };
 }
 
-/**
- * `conhost.exe --headless`: a windowless console for node.exe, a console
- * program that Task Scheduler would otherwise give a console window. It
- * expands `%NAME%` in the command line it runs and does not report the
- * program's exit status, which nothing relies on.
- */
+/** What the launcher runs: node.exe on the supervisor, told its home. */
 function supervisorArguments(home: string): string {
   const { node, script } = supervisorPaths(home);
-  return [
-    '--headless',
-    quoted(node),
-    quoted(script),
-    '--home',
-    quoted(canonicalWindowsHome(home)),
-  ].join(' ');
+  return [quoted(node), quoted(script), '--home', quoted(canonicalWindowsHome(home))].join(' ');
 }
 
 export function supervisorTaskDefinition(home: string, userSid: string): WindowsTaskDefinition {
@@ -148,7 +150,7 @@ export function supervisorTaskDefinition(home: string, userSid: string): Windows
       `Puddle: starts the daemon for ${canonical} at logon (and the remote-access ` +
       'connector while it is enabled), restarting them after a crash.',
     userSid,
-    command: '%SystemRoot%\\System32\\conhost.exe',
+    command: supervisorPaths(home).launcher,
     arguments: supervisorArguments(home),
     workingDirectory: homedir(),
     // Normal priority: the default (7) runs agents and builds below normal.
@@ -156,9 +158,9 @@ export function supervisorTaskDefinition(home: string, userSid: string): Windows
   };
 }
 
-/** The task's command line with `%SystemRoot%` resolved, for CreateProcess through WMI. */
+/** The task's command line, for CreateProcess through WMI. */
 export function supervisorCommandLine(home: string): string {
-  return `${quoted(system32Path('conhost.exe'))} ${supervisorArguments(home)}`;
+  return `${quoted(supervisorPaths(home).launcher)} ${supervisorArguments(home)}`;
 }
 
 /**
@@ -312,7 +314,13 @@ export async function superviseWindowsConnector(
   }
 }
 
-/** Whether a release tree ships the supervisor (older Windows trees ran the daemon directly). */
+/**
+ * Whether a release tree ships the supervisor and its windowless launcher
+ * (older Windows trees ran the daemon directly).
+ */
 export function shipsSupervisor(versionDir: string): boolean {
-  return existsSync(join(versionDir, 'daemon', 'supervisor.mjs'));
+  return (
+    existsSync(join(versionDir, 'daemon', 'supervisor.mjs')) &&
+    existsSync(join(versionDir, 'bin', WINDOWLESS_LAUNCHER))
+  );
 }

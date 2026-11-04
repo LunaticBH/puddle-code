@@ -40,8 +40,8 @@ function fakePowerShell(reply: (env: Readonly<Record<string, string>>) => object
 const definition = (overrides: Partial<WindowsTaskDefinition> = {}): WindowsTaskDefinition => ({
   description: 'Puddle & <friends> "quoted"',
   userSid: SID,
-  command: '%SystemRoot%\\System32\\conhost.exe',
-  arguments: '--headless "C:\\Users\\a b\\x.exe" --home "C:\\Users\\a b"',
+  command: 'C:\\Users\\a b\\bin\\puddle-hidden.exe',
+  arguments: '"C:\\Users\\a b\\x.exe" --home "C:\\Users\\a b"',
   workingDirectory: 'C:\\Users\\a b',
   priority: 4,
   ...overrides,
@@ -66,9 +66,9 @@ describe('Windows scheduled task definitions', () => {
     expect(xml).toContain(
       '<Description>Puddle &amp; &lt;friends&gt; &quot;quoted&quot;</Description>',
     );
-    expect(xml).toContain('<Command>%SystemRoot%\\System32\\conhost.exe</Command>');
+    expect(xml).toContain('<Command>C:\\Users\\a b\\bin\\puddle-hidden.exe</Command>');
     expect(xml).toContain(
-      '<Arguments>--headless &quot;C:\\Users\\a b\\x.exe&quot; --home &quot;C:\\Users\\a b&quot;</Arguments>',
+      '<Arguments>&quot;C:\\Users\\a b\\x.exe&quot; --home &quot;C:\\Users\\a b&quot;</Arguments>',
     );
     expect(xml).not.toMatch(/<\?xml/);
   });
@@ -88,20 +88,21 @@ describe('Windows scheduled task definitions', () => {
   it('starts the supervisor windowless through the current junction, quoting every path', () => {
     const home = 'C:\\Users\\Zoë Ørsted\\.puddle dev';
     const task = supervisorTaskDefinition(home, SID);
-    expect(task.command).toBe('%SystemRoot%\\System32\\conhost.exe');
+    const current = 'C:\\Users\\Zoë Ørsted\\.puddle dev\\bin\\current';
+    expect(task.command).toBe(`${current}\\bin\\puddle-hidden.exe`);
     expect(task.arguments).toBe(
-      '--headless "C:\\Users\\Zoë Ørsted\\.puddle dev\\bin\\current\\bin\\node.exe" ' +
-        '"C:\\Users\\Zoë Ørsted\\.puddle dev\\bin\\current\\daemon\\supervisor.mjs" ' +
+      `"${current}\\bin\\node.exe" "${current}\\daemon\\supervisor.mjs" ` +
         '--home "C:\\Users\\Zoë Ørsted\\.puddle dev"',
     );
     expect(task.priority).toBe(4);
     expect(task.description).toContain(home);
     // A drive-root home keeps its closing quote: the trailing backslash is doubled.
     expect(supervisorTaskDefinition('D:\\', SID).arguments).toMatch(/--home "D:\\\\"$/);
-    expect(supervisorCommandLine(home)).toMatch(/^"[^"]+\\System32\\conhost\.exe" --headless "/);
+    // WMI runs the same launcher and arguments, the launcher quoted.
+    expect(supervisorCommandLine(home)).toBe(`"${task.command}" ${task.arguments}`);
   });
 
-  it('refuses homes that Task Scheduler or conhost would expand or split', () => {
+  it('refuses homes whose task command Task Scheduler would expand or split', () => {
     expect(unsupervisableHome('C:\\Users\\a\\.puddle')).toBeUndefined();
     expect(unsupervisableHome('C:\\100%\\.puddle')).toMatch(/cannot be supervised/);
     expect(unsupervisableHome('C:\\a"b')).toMatch(/cannot be supervised/);
@@ -134,7 +135,7 @@ describe('Task Scheduler through PowerShell', () => {
       PUDDLE_TASK_START: '1',
     });
     expect(call!.script).not.toContain(name);
-    expect(call!.script).not.toContain('conhost');
+    expect(call!.script).not.toContain('puddle-hidden');
     expect(call!.script).toContain('Register-ScheduledTask -TaskName $name');
     expect(call!.script).toContain('-Xml $env:PUDDLE_TASK_XML -Force');
   });
@@ -208,7 +209,7 @@ describe('Task Scheduler through PowerShell', () => {
 
   it('creates a process through WMI with its command line in the environment', async () => {
     const { runner, calls } = fakePowerShell(() => ({ code: 0, pid: 4242, error: '' }));
-    const command = '"C:\\Windows\\System32\\conhost.exe" --headless "C:\\a b\\node.exe"';
+    const command = '"C:\\a b\\bin\\puddle-hidden.exe" "C:\\a b\\bin\\node.exe" %NAME%';
     expect(await createWindowsProcess(command, 'C:\\Users\\a', { powershell: runner })).toBe(4242);
     expect(calls[0]!.env).toEqual({
       PUDDLE_PROCESS_COMMAND: command,

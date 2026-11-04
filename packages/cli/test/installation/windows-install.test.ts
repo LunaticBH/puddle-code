@@ -190,6 +190,8 @@ function releaseZip(dir: string, version: string, supervised = true): string {
       join(tree, 'daemon', 'supervisor.mjs'),
       `await import(${JSON.stringify(pathToFileURL(supervisorDist).href)});\n`,
     );
+    // Only Task Scheduler and WMI run the windowless launcher, and both are stand-ins here.
+    writeFileSync(join(tree, 'bin', 'puddle-hidden.exe'), '');
   }
   writeFileSync(
     join(tree, 'daemon', 'connector.mjs'),
@@ -343,6 +345,9 @@ describe.runIf(
     const registration = scheduler.calls.find((env) => 'PUDDLE_TASK_XML' in env)!;
     expect(registration.PUDDLE_TASK_NAME).toMatch(/^Puddle [0-9a-f]{16}$/);
     expect(registration.PUDDLE_TASK_XML).toContain('\\bin\\current\\daemon\\supervisor.mjs');
+    expect(registration.PUDDLE_TASK_XML).toMatch(
+      /<Command>[^<]*\\bin\\current\\bin\\puddle-hidden\.exe<\/Command>/,
+    );
     expect(registration.PUDDLE_TASK_START).toBe('1');
     // The task did not run and WMI refused: the supervisor is this process's detached child.
     expect(lines.join('\n')).toMatch(/no desktop session/);

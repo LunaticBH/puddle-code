@@ -68,7 +68,7 @@ export interface WindowsTaskDefinition {
   description: string;
   /** The user the task runs as and whose logon starts it. */
   userSid: string;
-  /** May name `%SystemRoot%`: Task Scheduler expands the command. */
+  /** An absolute program; Task Scheduler expands `%NAME%` in it and in the arguments. */
   command: string;
   /** Already quoted for the program's command line. */
   arguments: string;
@@ -246,7 +246,8 @@ const UNREGISTER_SCRIPT = [
  * Win32_Process.Create: the new process is WMI's child, outside the caller's
  * job object, so it outlives a launcher that a kill-on-close job ends (an
  * OpenSSH session, some CI and IDE hosts). It inherits no handles and
- * receives the user's own environment, not the caller's.
+ * receives the user's own environment, not the caller's; its command line
+ * reaches CreateProcess as given, `%NAME%` unexpanded.
  */
 const CREATE_PROCESS_SCRIPT = [
   "$ErrorActionPreference = 'Stop'",

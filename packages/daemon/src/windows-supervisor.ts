@@ -32,7 +32,9 @@ import { WindowsSupervisor, type SupervisedChild } from './supervision/windows-s
 /**
  * `daemon\supervisor.mjs` (Windows release archives only): started at logon
  * by the home's scheduled task, or by a launcher, as
- * `node.exe supervisor.mjs --home <home>`. See supervision/windows-supervisor.ts.
+ * `node.exe supervisor.mjs --home <home>` (the task and WMI start it through
+ * the windowless bin\puddle-hidden.exe, supervision/puddle-hidden.cs). See
+ * supervision/windows-supervisor.ts.
  */
 
 declare const __PUDDLED_VERSION__: string | undefined;

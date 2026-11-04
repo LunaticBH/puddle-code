@@ -78,6 +78,7 @@ export {
   supervisorTaskName,
   unsupervisableHome,
   waitForSupervisor,
+  WINDOWLESS_LAUNCHER,
   type StartSupervisorOptions,
   type SupervisorStart,
 } from './windows-supervision.js';

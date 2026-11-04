@@ -86,7 +86,7 @@ describe('connector supervision on Windows hosts', () => {
       /Persistent daemon supervision/,
     );
     expect(existsSync(join(detached, 'remote', 'supervised'))).toBe(false);
-    // conhost.exe would expand `%…%` in the supervisor's command line.
+    // Task Scheduler would expand `%…%` in the supervisor's command line.
     const percent = home('task', 'puddle-100%-');
     await expect(installConnectorSupervisor(percent, 'win32')).rejects.toThrow(
       /cannot be supervised/,
