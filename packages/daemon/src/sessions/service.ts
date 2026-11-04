@@ -57,6 +57,7 @@ import {
 import type { MarkerFileSync } from './onboarding.js';
 import { SessionRefs } from './session-refs.js';
 import { TerminalAgentMonitor } from './terminal-agent-monitor.js';
+import { assertWindowsPromptFits } from './windows-prompt.js';
 import { notificationContent } from './notification-content.js';
 
 export interface SessionServiceDeps {
@@ -406,6 +407,9 @@ export class SessionService extends EventEmitter {
     if (input.cwd !== undefined) {
       throw ApiError.badRequest('cwd_terminal_only', 'cwd applies to terminal sessions only');
     }
+    // Windows: an interactive agent's prompt is a command-line argument
+    // (headless turns send it on stdin), refused before anything is created.
+    if (agentMode === 'interactive') assertWindowsPromptFits(input.prompt);
     if (input.account_id === undefined) {
       throw ApiError.badRequest('account_required', 'an agent session needs an account_id');
     }

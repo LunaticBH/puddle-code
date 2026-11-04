@@ -4,7 +4,7 @@ import type { Account } from '@puddle/shared';
 import { git } from '../git/exec.js';
 import type { LogStore } from '../logs/log-store.js';
 import { stripAnsi } from '../pty/ansi.js';
-import { quoteWindowsArgument } from '../pty/pty-spawn.js';
+import { windowsPromptOverflow } from './windows-prompt.js';
 
 /**
  * Composing the tier-2 hand-off prompt (SPEC §5).
@@ -24,12 +24,10 @@ import { quoteWindowsArgument } from '../pty/pty-spawn.js';
 const TRANSCRIPT_BUDGET = 12_000;
 
 /**
- * Windows only: every adapter passes the prompt as one argument, and
- * CreateProcess caps the whole command line at 32,767 characters after
- * quoting. The quoted prompt keeps well inside that, leaving room for the
- * executable, script and flags; each git section is bounded too.
+ * Windows only: every adapter passes the prompt as one argument, so the
+ * quoted prompt is kept within WINDOWS_PROMPT_BUDGET, which session creation
+ * enforces too; each git section is bounded as well.
  */
-const WINDOWS_PROMPT_BUDGET = 24_000;
 const WINDOWS_GIT_SECTION_BUDGET = 4_000;
 
 export interface HandoffSources {
@@ -66,7 +64,7 @@ export async function buildHandoffPrompt(
       boundedCommits,
       boundedStatus,
     );
-    const overflow = quoteWindowsArgument(prompt).length - WINDOWS_PROMPT_BUDGET;
+    const overflow = windowsPromptOverflow(prompt);
     if (overflow <= 0 || budget === 0) return prompt;
     budget = Math.max(0, budget - overflow);
   }

@@ -17,7 +17,9 @@ import { resolveSpawn, setEnv, type Environment } from '@puddle/shared/node/plat
  * - node-pty quotes an argv itself, but leaves an argument that already
  *   starts and ends with `"` unquoted and so loses its quotes. The command
  *   line is built here instead, following the Microsoft C runtime rules that
- *   node.exe, PowerShell and Git Bash all parse with.
+ *   node.exe, PowerShell and Git Bash all parse with. A line CreateProcess
+ *   would refuse is refused here, with its length, rather than with
+ *   node-pty's bare "error code: 206".
  *
  * node-pty sets `TERM` to the terminal name only on Unix; Windows children get
  * the same value here, for TERM-sniffing CLIs and MSYS tools.
@@ -27,6 +29,20 @@ export interface PtySpawnPlan {
   /** An argv on POSIX; a complete Windows command line (after the file) on win32. */
   args: string[] | string;
   env: Record<string, string>;
+}
+
+/** CreateProcess's command-line limit, counting the terminating NUL. */
+export const WINDOWS_COMMAND_LINE_LIMIT = 32_767;
+
+/** A Windows command line too long for CreateProcess, which would fail with error 206. */
+export class WindowsCommandLineTooLongError extends Error {
+  constructor(readonly length: number) {
+    super(
+      `the command line is ${length.toLocaleString('en-GB')} characters long, ` +
+        `but Windows allows at most ${(WINDOWS_COMMAND_LINE_LIMIT - 1).toLocaleString('en-GB')}`,
+    );
+    this.name = 'WindowsCommandLineTooLongError';
+  }
 }
 
 export function planPtySpawn(
@@ -46,11 +62,11 @@ export function planPtySpawn(
   setEnv(env, 'TERM', 'xterm-256color', platform);
   const resolved = resolveSpawn(file, args, { platform, env });
   for (const [key, value] of Object.entries(resolved.env ?? {})) setEnv(env, key, value, platform);
-  return {
-    file: resolved.file,
-    args: windowsCommandLine(resolved.args, resolved.windowsVerbatimArguments === true),
-    env: env as Record<string, string>,
-  };
+  const tail = windowsCommandLine(resolved.args, resolved.windowsVerbatimArguments === true);
+  // node-pty hands CreateProcess the file, quoted as here, a space and the tail.
+  const length = quoteWindowsArgument(resolved.file).length + 1 + tail.length;
+  if (length >= WINDOWS_COMMAND_LINE_LIMIT) throw new WindowsCommandLineTooLongError(length);
+  return { file: resolved.file, args: tail, env: env as Record<string, string> };
 }
 
 /**
