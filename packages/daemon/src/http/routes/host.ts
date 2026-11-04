@@ -1,9 +1,10 @@
-import { homedir, hostname, release, userInfo } from 'node:os';
+import { homedir, hostname, userInfo } from 'node:os';
 import { Hono } from 'hono';
 import type { HostInfo } from '@puddle/shared';
 import { readConfig } from '../../config.js';
 import { canonicalHostPath } from '../../host-path.js';
 import type { PuddlePaths } from '../../paths.js';
+import { windowsBuildNumber } from '../../pty/windows-console.js';
 
 /** Who and where the daemon is — the UI's host indicator (SPEC §6). */
 export function hostRoutes(deps: { paths: PuddlePaths }): Hono {
@@ -24,7 +25,6 @@ export function hostRoutes(deps: { paths: PuddlePaths }): Hono {
 }
 
 function windowsBuild(): Pick<HostInfo, 'osBuild'> {
-  if (process.platform !== 'win32') return {};
-  const build = Number(release().split('.')[2]);
-  return Number.isInteger(build) && build >= 0 ? { osBuild: build } : {};
+  const build = windowsBuildNumber();
+  return build === undefined ? {} : { osBuild: build };
 }

@@ -6,7 +6,12 @@ import { isPidAlive, system32Path } from '@puddle/shared/node/platform';
 import { LogStore } from '../../src/logs/log-store.js';
 import { stripAnsi } from '../../src/pty/ansi.js';
 import { PtyManager, type PtyExitEvent } from '../../src/pty/pty-manager.js';
-import { planPtySpawn, quoteWindowsArgument, windowsCommandLine } from '../../src/pty/pty-spawn.js';
+import {
+  planPtySpawn,
+  quoteWindowsArgument,
+  windowsCommandLine,
+  WindowsCommandLineTooLongError,
+} from '../../src/pty/pty-spawn.js';
 import {
   isConsoleHostTitle,
   STATUS_CONTROL_C_EXIT,
@@ -98,6 +103,28 @@ describe('planPtySpawn', () => {
     expect(plan({ NoDefaultCurrentDirectoryInExePath: 'puddle' }, 'linux')).toEqual({
       NoDefaultCurrentDirectoryInExePath: 'puddle',
     });
+  });
+
+  it('on win32 refuses a command line CreateProcess would refuse, with its length', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'puddle-plan-'));
+    const tool = join(dir, 'tool.exe');
+    writeFileSync(tool, '');
+    // The quoted file, a space and the tail: 32,766 characters, plus the NUL.
+    const fits = 'x'.repeat(32_766 - quoteWindowsArgument(tool).length - 1);
+    const plan = (arg: string) =>
+      planPtySpawn('tool', [arg], undefined, { platform: 'win32', base: { Path: dir } });
+    expect(plan(fits).args).toBe(fits);
+    expect(() => plan(`${fits}x`)).toThrow(WindowsCommandLineTooLongError);
+    expect(() => plan(`${fits}x`)).toThrow(
+      'the command line is 32,767 characters long, but Windows allows at most 32,766',
+    );
+    // Quoting counts: one embedded quote costs a backslash and a pair of quotes.
+    expect(() => plan(`${fits.slice(3)}"`)).toThrow(WindowsCommandLineTooLongError);
+  });
+
+  it('never limits a POSIX argv', () => {
+    const arg = 'x'.repeat(100_000);
+    expect(planPtySpawn('agent', [arg], undefined, { platform: 'linux' }).args).toEqual([arg]);
   });
 });
 
@@ -233,6 +260,22 @@ describe.skipIf(process.platform !== 'win32')('PtyManager on ConPTY', () => {
     ptys.kill('s5', 'agent'); // a second close must not reach the closed handle
     await waitFor(() => exits.length === 1);
     expect(typeof exits[0]!.exitCode).toBe('number');
+  });
+
+  it('starts a 32,766-character command line and refuses a longer one by its length', async () => {
+    const { ptys, output, exits } = manager();
+    const code = "process.stdout.write('LONG=' + process.argv[1].length + '|')";
+    const fixed =
+      quoteWindowsArgument(process.execPath).length + windowsCommandLine(['-e', code]).length + 2;
+    const pad = 'x'.repeat(32_766 - fixed);
+    ptys.spawn('s7', 'agent', process.execPath, ['-e', code, pad], { cwd: tmpdir() });
+    await waitFor(() => output().includes(`LONG=${pad.length}|`));
+    await waitFor(() => exits.length === 1);
+    // One more character is CreateProcess's error 206, reported with the length.
+    expect(() =>
+      ptys.spawn('s8', 'agent', process.execPath, ['-e', code, `${pad}x`], { cwd: tmpdir() }),
+    ).toThrow('the command line is 32,767 characters long, but Windows allows at most 32,766');
+    expect(ptys.has('s8', 'agent')).toBe(false);
   });
 
   it('never re-applies an unchanged size, which would repaint the whole screen', async () => {

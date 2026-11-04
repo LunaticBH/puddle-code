@@ -4,11 +4,14 @@ import { join } from 'node:path';
 import { renameWithRetry } from '@puddle/shared/node/platform';
 import headless, {
   type ITerminalAddon as HeadlessTerminalAddon,
+  type ITerminalOptions,
   type Terminal as HeadlessTerminal,
 } from '@xterm/headless';
 import { SerializeAddon } from '@xterm/addon-serialize';
+import { windowsBuildNumber } from './windows-console.js';
 import { serialiseXtermMouseEncoding } from './xterm-mouse-encoding.js';
 import { preserveXtermScrollUp } from './xterm-scrollback.js';
+import { xtermWindowsPty } from './xterm-windows-pty.js';
 
 const { Terminal } = headless;
 
@@ -27,6 +30,13 @@ interface PersistedTerminalState {
   cols: number;
   rows: number;
   data: string;
+}
+
+/** The host the mirrored PTYs run on; the daemon's own by default. */
+export interface TerminalScreenHost {
+  platform?: NodeJS.Platform;
+  /** The Windows build number (see windowsBuildNumber). */
+  osBuild?: number;
 }
 
 interface ScreenState {
@@ -58,10 +68,15 @@ export class TerminalScreenStateStore {
 
   private retryAt = 0;
   private retryMs = 1000;
+  private readonly windowsPty: Pick<ITerminalOptions, 'windowsPty'>;
   constructor(
     private readonly stateDir?: string,
     private readonly onHealth?: (degraded: boolean) => void,
-  ) {}
+    host: TerminalScreenHost = {},
+  ) {
+    const platform = host.platform ?? process.platform;
+    this.windowsPty = xtermWindowsPty(platform, host.osBuild ?? windowsBuildNumber(platform));
+  }
 
   write(stream: string, term: string, data: string): void {
     if (data === '') return;
@@ -179,6 +194,8 @@ export class TerminalScreenStateStore {
       cols: DEFAULT_COLS,
       rows: DEFAULT_ROWS,
       scrollback: SCROLLBACK_LINES,
+      // Windows only: emulate ConPTY as the browser's terminals do.
+      ...this.windowsPty,
     });
     preserveXtermScrollUp(terminal);
     const serialiser = new SerializeAddon();

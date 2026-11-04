@@ -139,6 +139,14 @@ describe('windowsDescendants', () => {
     expect(windowsDescendants([0], table)).toEqual(new Set([0]));
   });
 
+  it('follows no children of a root missing from the table', () => {
+    // 900 is a sidecar that has exited, or a PTY spawned after the table was
+    // read: 4000 may be an earlier holder's orphan, and nothing can tell.
+    const table = [entry(700, 1, 1_000), entry(4000, 900, 1_000), entry(4001, 4000, 1_100)];
+    expect(windowsDescendants([700, 900], table)).toEqual(new Set([700, 900]));
+    expect(windowsDescendants([900], table)).toEqual(new Set([900]));
+  });
+
   it('reads the process table instead of exec-ing ps on Windows', async () => {
     vi.mocked(execFile).mockClear();
     const tree = await descendantsOf([100], {
