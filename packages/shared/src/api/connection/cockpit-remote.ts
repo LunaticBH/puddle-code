@@ -56,16 +56,16 @@ export const cockpitRegistrationCheckSchema = z
 
 /**
  * Deliberately excludes routing credentials, account tokens and host private keys.
- * `unsupported` (protocol 25.7): the host's platform has no connector
- * supervision yet (Windows hosts, docs/windows.md).
+ * `task_scheduler` (protocol 25.7): a Windows host whose daemon supervisor
+ * runs from a per-user scheduled task (docs/windows.md).
  */
 export const cockpitRemoteStatusSchema = z.object({
-  availability: z.enum(['ready', 'not_installed', 'upgrade_required', 'unsupported']),
+  availability: z.enum(['ready', 'not_installed', 'upgrade_required']),
   configured: z.boolean(),
   enabled: z.boolean(),
   connected: z.boolean(),
   canDeleteRegistration: z.boolean().optional(),
-  supervisor: z.enum(['systemd', 'launchd']).nullable(),
+  supervisor: z.enum(['systemd', 'launchd', 'task_scheduler']).nullable(),
   host: remoteIdSchema.optional(),
   peer: remotePeerSchema.optional(),
   service: remoteOriginSchema.optional(),

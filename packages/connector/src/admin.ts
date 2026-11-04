@@ -188,7 +188,7 @@ async function configureUnlocked(
   if (setup.code && existing) retireRegistration(profileDirectory(home, profile), existing);
   atomicPrivateJson(path, connectorConfigSchema.parse(config));
   try {
-    if (setup.managed) installConnectorSupervisor(home);
+    if (setup.managed) await installConnectorSupervisor(home);
   } catch (error) {
     atomicPrivateJson(path, { ...config, enabled: false });
     throw error;

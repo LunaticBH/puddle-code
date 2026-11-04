@@ -1,6 +1,10 @@
 const profile = 'a'.repeat(10);
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { RemoteAccessControl } from '../../src/lib/host/remote-access.js';
+import type { WindowsConnectorRunner } from '../../src/lib/installation/windows-connector.js';
 import { LocalTransport } from '../../src/lib/transport/local.js';
 import type { ExecOptions, Transport } from '../../src/lib/transport/transport.js';
 
@@ -111,20 +115,106 @@ describe('desktop remote control boundary', () => {
     }
     expect(exec).not.toHaveBeenCalled();
   });
+});
 
-  it('reports remote access as unsupported on a Windows host without running anything', async () => {
-    const control = new RemoteAccessControl(new LocalTransport({ platform: 'win32' }));
-    expect(await control.status(profile)).toEqual({
-      availability: 'unsupported',
-      canDeleteRegistration: false,
-      configured: false,
-      enabled: false,
-      connected: false,
-      supervisor: null,
-      devices: [],
+describe('remote access on this Windows machine', () => {
+  /** A home whose `bin\current` names a release that ships the connector, or none. */
+  function windowsHome(version: string | null) {
+    const home = mkdtempSync(join(tmpdir(), 'puddle-windows-remote-'));
+    if (version !== null) {
+      const tree = join(home, 'bin', 'versions', version);
+      mkdirSync(join(tree, 'daemon'), { recursive: true });
+      writeFileSync(join(tree, 'daemon', 'connector.mjs'), '');
+      symlinkSync(
+        tree,
+        join(home, 'bin', 'current'),
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+    }
+    return home;
+  }
+  function runner(answers: Record<string, string>) {
+    const run = vi.fn<WindowsConnectorRunner>(async (_home, args) => ({
+      code: 0,
+      stdout: answers[args[0]!] ?? '{}',
+      stderr: '',
+    }));
+    return run;
+  }
+  const windows = (home: string, run: WindowsConnectorRunner) =>
+    new RemoteAccessControl(new LocalTransport({ platform: 'win32' }), { run, home: () => home });
+
+  it('runs the installed connector directly, with values only on stdin', async () => {
+    const home = windowsHome('1.2.3');
+    const run = runner({
+      '--version': 'puddle-connector remote protocol 4; cockpit controls 2; delete registration 1',
+      '--inspect': JSON.stringify({
+        availability: 'ready',
+        configured: false,
+        enabled: false,
+        connected: false,
+        supervisor: 'task_scheduler',
+        devices: [],
+      }),
+      '--configure': JSON.stringify({ enabled: true, connected: false }),
     });
-    await expect(control.request({ t: 'status' }, () => true, profile)).rejects.toThrow(
-      'not supported on Windows hosts',
+    const control = windows(home, run);
+    expect(await control.status(profile)).toMatchObject({
+      availability: 'ready',
+      supervisor: 'task_scheduler',
+      canDeleteRegistration: true,
+    });
+    const registration = {
+      service: 'https://relay.example.test',
+      app: 'https://app.example.test',
+      code: 'a'.repeat(64),
+    };
+    expect(await control.request({ t: 'enable', registration }, () => true, profile)).toEqual({
+      enabled: true,
+      connected: false,
+    });
+    const configure = run.mock.calls.find(([, args]) => args[0] === '--configure')!;
+    expect(configure[0]).toBe(home);
+    expect(configure[1]).toEqual(['--configure']);
+    expect(JSON.parse(configure[2]!.stdin!)).toEqual({
+      profile,
+      setup: { ...registration, managed: true },
+    });
+    expect(run.mock.calls.find(([, args]) => args[0] === '--inspect')![2]!.stdin).toBe(
+      JSON.stringify({ profile }) + '\n',
+    );
+  });
+
+  it('asks the installed release for its capabilities once per version', async () => {
+    const home = windowsHome('1.2.3');
+    const run = runner({
+      '--version': 'puddle-connector remote protocol 4; cockpit controls 2',
+      '--inspect': JSON.stringify({
+        configured: false,
+        enabled: false,
+        connected: false,
+        supervisor: null,
+        devices: [],
+      }),
+    });
+    const control = windows(home, run);
+    await control.status(profile);
+    await control.status(profile);
+    expect(run.mock.calls.filter(([, args]) => args[0] === '--version')).toHaveLength(1);
+  });
+
+  it('reports a release without the connector, and an older one, without enabling anything', async () => {
+    const missing = runner({});
+    expect(await windows(windowsHome(null), missing).status(profile)).toMatchObject({
+      availability: 'not_installed',
+      supervisor: null,
+    });
+    expect(missing).not.toHaveBeenCalled();
+    const older = runner({ '--version': 'puddle-connector remote protocol 3' });
+    const control = windows(windowsHome('1.0.0'), older);
+    expect((await control.status(profile)).availability).toBe('upgrade_required');
+    await expect(control.request({ t: 'disable' }, () => true, profile)).rejects.toThrow(
+      'Upgrade the daemon',
     );
   });
 });

@@ -1,3 +1,5 @@
+import { spawn } from 'node:child_process';
+import { homedir } from 'node:os';
 import { createInterface } from 'node:readline';
 import { Writable } from 'node:stream';
 import {
@@ -7,10 +9,16 @@ import {
   remoteOriginSchema,
   remoteSecretSchema,
 } from '@puddle/shared';
-import { WINDOWS_REMOTE_ACCESS_UNSUPPORTED } from '../lib/host/remote-access.js';
+import {
+  connectorEnvironment,
+  runWindowsConnector,
+  windowsConnectorInstalled,
+  windowsConnectorPaths,
+  type WindowsConnectorRunner,
+} from '../lib/installation/windows-connector.js';
 import { isLocalWindows, LocalTransport } from '../lib/transport/local.js';
 import { SshTransport } from '../lib/transport/ssh.js';
-import { hostPaths } from '../lib/paths.js';
+import { clientHome, hostPaths } from '../lib/paths.js';
 import { CliError } from '../lib/types.js';
 
 export interface RemoteCommand {
@@ -114,37 +122,64 @@ async function registrationCode(): Promise<string> {
     process.stderr.write('\n');
   }
 }
-export async function runRemote(command: RemoteCommand): Promise<number> {
+/**
+ * `puddle remote run` on this Windows machine: the manager in the
+ * foreground, sharing this console. Ctrl+C reaches both processes; the CLI
+ * waits for the connector to stop cleanly rather than dying first.
+ */
+function runWindowsConnectorForeground(home: string): Promise<number> {
+  const { node, script } = windowsConnectorPaths(home);
+  const ignore = () => {};
+  process.on('SIGINT', ignore);
+  return new Promise<number>((resolve, reject) => {
+    const child = spawn(node, [script], {
+      cwd: homedir(),
+      stdio: 'inherit',
+      env: connectorEnvironment(home),
+    });
+    child.once('error', reject);
+    child.once('exit', (code) => resolve(code ?? 1));
+  }).finally(() => process.off('SIGINT', ignore));
+}
+
+export async function runRemote(
+  command: RemoteCommand,
+  /** Test seams for this Windows machine's connector. */
+  windows: { run?: WindowsConnectorRunner; home?: string } = {},
+): Promise<number> {
   const transport = command.host ? new SshTransport(command.host) : new LocalTransport();
   try {
-    if (isLocalWindows(transport)) {
-      throw new CliError(
-        'unsupported_platform',
-        WINDOWS_REMOTE_ACCESS_UNSUPPORTED,
-        'manage a Linux or macOS host instead: puddle remote <action> user@host',
-      );
-    }
     if (transport instanceof SshTransport) await transport.open();
+    const localWindows = isLocalWindows(transport);
+    const home = windows.home ?? clientHome();
     const base = `${hostPaths.current}/bin/node ${hostPaths.current}/daemon/connector.mjs`;
-    const check = await transport.exec(`test -f ${hostPaths.current}/daemon/connector.mjs`);
-    if (check.code !== 0)
+    // Windows has no shell for the fixed commands: the installed node.exe runs the connector.
+    const connector = (flag: string, opts: { stdin?: string; timeoutMs?: number }) =>
+      localWindows
+        ? (windows.run ?? runWindowsConnector)(home, [flag], opts)
+        : transport.exec(`${base} ${flag}`, opts);
+    const installed = localWindows
+      ? windowsConnectorInstalled(home)
+      : (await transport.exec(`test -f ${hostPaths.current}/daemon/connector.mjs`)).code === 0;
+    if (!installed)
       throw new CliError(
         'not_installed',
         'The installed daemon does not include mobile access',
         `puddle upgrade daemon${command.host ? ` ${command.host}` : ''}`,
       );
-    const capabilities = await transport.exec(`${base} --version`, { timeoutMs: 10_000 });
+    const capabilities = await connector('--version', { timeoutMs: 10_000 });
     if (capabilities.code !== 0 || !capabilities.stdout.includes('cockpit controls 2'))
       throw new CliError(
         'protocol_mismatch',
         'Upgrade the host daemon before managing profile registrations.',
       );
     if (command.action === 'run') {
+      if (localWindows) return await runWindowsConnectorForeground(home);
       const result = await transport.exec(base, { onStdout: (text) => process.stdout.write(text) });
       return result.code;
     }
     if (command.action === 'reset') {
-      const result = await transport.exec(`${base} --reset`, {
+      const result = await connector('--reset', {
         timeoutMs: 30_000,
         stdin: JSON.stringify({ profile: command.profile }) + '\n',
       });
@@ -164,18 +199,16 @@ export async function runRemote(command: RemoteCommand): Promise<number> {
             managed: !command.foreground,
           }
         : { t: command.action, ...(command.id ? { id: command.id } : {}) };
-    const result = await transport.exec(
-      `${base} ${command.action === 'enable' ? '--configure' : '--admin'}`,
-      {
-        stdin:
-          JSON.stringify(
-            command.action === 'enable'
-              ? { profile: command.profile, setup: payload }
-              : { profile: command.profile, request: payload },
-          ) + '\n',
-        timeoutMs: 30_000,
-      },
-    );
+    const result = await connector(command.action === 'enable' ? '--configure' : '--admin', {
+      stdin:
+        JSON.stringify(
+          command.action === 'enable'
+            ? { profile: command.profile, setup: payload }
+            : { profile: command.profile, request: payload },
+        ) + '\n',
+      // A Windows enable may start the home's supervisor first.
+      timeoutMs: localWindows && command.action === 'enable' ? 120_000 : 30_000,
+    });
     if (result.code !== 0)
       throw new CliError('bad_arguments', result.stderr.trim() || 'Remote operation failed');
     const response = remoteAdminResponseSchema.parse(JSON.parse(result.stdout));

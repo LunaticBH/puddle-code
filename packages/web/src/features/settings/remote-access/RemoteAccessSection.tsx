@@ -7,6 +7,7 @@ import {
   type CockpitRemoteRequest,
 } from '@puddle/shared';
 import { api, ApiError } from '../../../lib/transport/api';
+import { hostStyleForPlatform } from '../../../lib/host-path';
 import { useCurrentProfileId } from '../../profile/profile-store';
 import { useHostInfo, useProfiles } from '../../../lib/queries/queries';
 import { Button } from '../../../components/ui/button';
@@ -23,7 +24,6 @@ import { RegistrationForm } from './RegistrationForm';
 import { PairingInvitation } from './PairingInvitation';
 import { DeviceList } from './DeviceList';
 import { DeleteRegistrationDialog } from './DeleteRegistrationDialog';
-import { remoteAccessUnsupported } from './remote-access-support';
 
 export function RemoteAccessSection() {
   const queryClient = useQueryClient();
@@ -43,9 +43,7 @@ export function RemoteAccessSection() {
   const status = useQuery({
     queryKey: ['cockpit-remote', profile],
     queryFn: async () => cockpitRemoteStatusSchema.parse(await api('GET', path)),
-    // An unsupported host's answer never changes under a running cockpit.
-    refetchInterval: (query) =>
-      busy || query.state.data?.availability === 'unsupported' ? false : 5000,
+    refetchInterval: busy ? false : 5000,
     refetchOnWindowFocus: !busy,
     refetchOnReconnect: !busy,
     retry: false,
@@ -106,8 +104,7 @@ export function RemoteAccessSection() {
     }
   };
   const data = status.data;
-  // One path for a host that cannot offer remote access (Windows in v1).
-  const unsupported = remoteAccessUnsupported(data, host.data?.platform);
+  const windowsHost = hostStyleForPlatform(host.data?.platform) === 'win32';
   const unavailable = status.error instanceof ApiError && status.error.status === 404;
   const disabled = busy || status.isError;
   return (
@@ -119,35 +116,31 @@ export function RemoteAccessSection() {
       </SectionTitle>
       <div className="mt-5 flex items-center justify-between gap-3">
         <span role="status" className="text-sm font-medium">
-          {unsupported
-            ? 'Not supported on Windows hosts'
-            : status.isError
-              ? 'Status unavailable'
-              : !data
-                ? 'Checking remote access…'
-                : data.availability !== 'ready'
-                  ? 'Daemon upgrade required'
-                  : !data.configured
-                    ? 'Not configured'
-                    : !data.enabled
-                      ? 'Disabled'
-                      : data.connected
-                        ? 'Connected to relay'
-                        : 'Enabled · relay disconnected'}
+          {status.isError
+            ? 'Status unavailable'
+            : !data
+              ? 'Checking remote access…'
+              : data.availability !== 'ready'
+                ? 'Daemon upgrade required'
+                : !data.configured
+                  ? 'Not configured'
+                  : !data.enabled
+                    ? 'Disabled'
+                    : data.connected
+                      ? 'Connected to relay'
+                      : 'Enabled · relay disconnected'}
         </span>
-        {!unsupported && (
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={busy}
-            onClick={() => void status.refetch({ cancelRefetch: false })}
-          >
-            <RefreshCw />
-            Refresh status
-          </Button>
-        )}
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={busy}
+          onClick={() => void status.refetch({ cancelRefetch: false })}
+        >
+          <RefreshCw />
+          Refresh status
+        </Button>
       </div>
-      {status.isError && !unsupported && (
+      {status.isError && (
         <p role="alert" className="mt-3 text-sm text-danger">
           {unavailable
             ? 'This cockpit does not provide remote controls. Update Puddle and reopen this window.'
@@ -164,17 +157,10 @@ export function RemoteAccessSection() {
           {message}
         </p>
       )}
-      {unsupported ? (
+      {data?.availability !== undefined && data.availability !== 'ready' && (
         <p className="mt-3 text-sm text-fg-secondary">
-          Remote access is not available for Windows hosts yet.
+          Update the daemon on this host, then refresh status to set up mobile access.
         </p>
-      ) : (
-        data?.availability !== undefined &&
-        data.availability !== 'ready' && (
-          <p className="mt-3 text-sm text-fg-secondary">
-            Update the daemon on this host, then refresh status to set up mobile access.
-          </p>
-        )
       )}
       {data?.availability === 'ready' && (
         <>
@@ -211,13 +197,21 @@ export function RemoteAccessSection() {
               )}
             </dl>
           ) : null}
-          {!data.enabled && !data.supervisor && (
-            <p className="mt-4 text-sm text-fg-secondary">
-              This host needs persistent systemd or launchd supervision before access can be enabled
-              here. For another supervisor, configure both the daemon and connector using the remote
-              CLI commands.
-            </p>
-          )}
+          {!data.enabled &&
+            !data.supervisor &&
+            (windowsHost ? (
+              <p className="mt-4 text-sm text-fg-secondary">
+                This host needs its daemon started at logon by Task Scheduler before access can be
+                enabled here: reinstall it with puddle upgrade daemon. For another supervisor,
+                configure the connector using the remote CLI commands.
+              </p>
+            ) : (
+              <p className="mt-4 text-sm text-fg-secondary">
+                This host needs persistent systemd or launchd supervision before access can be
+                enabled here. For another supervisor, configure both the daemon and connector using
+                the remote CLI commands.
+              </p>
+            ))}
           {data.configured && (
             <div
               className="mt-4 flex flex-wrap gap-2"

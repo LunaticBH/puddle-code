@@ -79,4 +79,11 @@ if (process.argv.includes('--version')) {
   };
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
+  if (process.platform === 'win32') {
+    // Closing a console sends SIGHUP and Ctrl-Break SIGBREAK; the Windows
+    // supervisor stops its connector by closing the IPC channel it gave it.
+    process.on('SIGHUP', stop);
+    process.on('SIGBREAK', stop);
+    if (process.channel) process.on('disconnect', stop);
+  }
 }
