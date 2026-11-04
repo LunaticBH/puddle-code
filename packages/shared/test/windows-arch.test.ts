@@ -115,6 +115,24 @@ describe('peMachine', () => {
     expect(peImage(temp)).toBeNull(); // a directory
   });
 
+  it('returns null for an optional header too short to hold its data directories', () => {
+    // SizeOfOptionalHeader ends before NumberOfRvaAndSizes (offset 108 or 92).
+    for (const [magic, sizes] of [
+      [0x20b, [2, 108, 111]],
+      [0x10b, [2, 92, 95]],
+    ] as const) {
+      for (const size of sizes) {
+        const image = syntheticPe({ machine: 0x8664, magic });
+        image.writeUInt16LE(size, 0x80 + 20);
+        expect(peImage(file(image))).toBeNull();
+      }
+    }
+    // Just long enough for the count but no directory: a machine, unsigned.
+    const bare = syntheticPe({ machine: 0x8664 });
+    bare.writeUInt16LE(112, 0x80 + 20);
+    expect(peImage(file(bare))).toEqual({ machine: 'x64', signed: false });
+  });
+
   it.runIf(process.platform === 'win32')(
     'reads the running node.exe as its own architecture',
     () => {

@@ -66,9 +66,10 @@ export function peImage(file: string): PeImage | null {
     const optional = read(optionalStart, optionalSize);
     if (optional === null || optionalSize < 2) return null;
     const magic = optional.readUInt16LE(0);
-    // PE32 and PE32+ differ in where the data directories start.
+    // PE32 and PE32+ differ in where the data directories start; an optional
+    // header that ends before them (NumberOfRvaAndSizes included) is malformed.
     const directories = magic === 0x20b ? 112 : magic === 0x10b ? 96 : -1;
-    if (directories < 0) return null;
+    if (directories < 0 || optionalSize < directories) return null;
     const count = optional.readUInt32LE(directories - 4);
     const directory = (index: number): { address: number; size: number } | null => {
       const at = directories + index * 8;
