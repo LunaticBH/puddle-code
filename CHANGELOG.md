@@ -13,7 +13,7 @@ Past releases: see docs/changelogs/.
 ### Added
 
 - Run Puddle natively on Windows 10 1809+ and Windows 11 (x64): `puddle launch` installs and supervises the daemon on this machine without a shell, as a windowless detached process stopped gracefully over its private control pipe (see `docs/windows.md`).
-- Report the daemon's platform, and on Windows its build number, from `GET /api/host`; accept a private-control `shutdown` request and a cockpit launcher `shutdown` (protocol 25.7).
+- Report the daemon's platform, and on Windows its build number, from `GET /api/host`; accept a private-control `shutdown` request and a cockpit launcher `shutdown`; on Windows, private-control `open` and `shutdown` may carry a `challenge` that the reply answers with a `proof` (protocol 25.7, optional fields).
 - Windows: `puddle install/upgrade/remove daemon`, `puddle logs`, `puddle --version`, and background cockpits with `puddle list`, `kill` and `refresh`.
 - Windows: terminals and agent sessions start natively, with PATHEXT lookup, npm/pnpm `.cmd` shims run without `cmd.exe`, and PowerShell 7, Windows PowerShell or `cmd.exe` as the default shell.
 - Windows: PowerShell and Git Bash report their directory and keep session-private history; PowerShell also captures environment changes.
@@ -39,4 +39,6 @@ Past releases: see docs/changelogs/.
 
 ### Security
 
-- Give Windows control pipes a private per-home nonce, protect a newly created Windows Puddle home with an owner-only DACL, and refuse junctions as the home.
+- Windows: name control pipes by an HMAC under a private per-home key and believe a pipe server only once it proves it can read the home; protect a newly created Puddle home with an owner-only DACL; outside the profile, refuse a home another account owns, restrict one others can open, and refuse one holding entries another account could have placed there; refuse junctions as the home.
+- Windows: never run a `git.exe`, compiler or other programme from a repository or worktree (bare names resolve on `PATH` only), and never probe tools in folders another account could create (the drive root, `%ProgramData%`).
+- Windows: never open UNC or device paths that terminal output names when resolving links outside the session's tree.

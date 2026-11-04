@@ -14,7 +14,7 @@ source) and `unsafe_repository` (400, refused by git `safe.directory`), and
 `worktree_busy` gains an open-handle cause. The private host control channel gains the strict
 `shutdown` request, answered by `shutting_down` before the daemon stops;
 Windows supervision uses it in place of signals, and older daemons answer
-`invalid_control`. The cockpit launcher pipe accepts `shutdown` (answered
+`invalid_control`. On Windows the private control `open` and `shutdown` requests may carry an optional `challenge` (64 hex), and the `authority`, `shutting_down` and `error` answers to it carry `proof`, an HMAC-SHA256 under the home's private IPC key; Windows clients believe only a proven answer, and POSIX exchanges are unchanged. An interactive agent session on a Windows host may answer `prompt_too_long` (400) when its first prompt cannot fit the Windows command line. The cockpit launcher pipe accepts `shutdown` (answered
 `stopping`), and the cockpit remote-access status may report availability
 `unsupported` (Windows hosts). Remote protocol and operation allowlists remain
 unchanged.
