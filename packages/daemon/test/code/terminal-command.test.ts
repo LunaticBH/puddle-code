@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, relative } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -167,7 +167,8 @@ describe('one-shot terminal commands', () => {
 
   it('never spawns a file that is not an absolute path, reporting it as env(1) would', async () => {
     const cwd = directory();
-    // Spawned, this would run node relative to the working directory.
+    // The daemon resolves explicit relative paths itself, so a plan only ever
+    // carries one that bypassed it. Spawned, it would run relative to the cwd.
     const relativeNode = relative(cwd, process.execPath);
     expect(isAbsolute(relativeNode)).toBe(false);
     const plan: RunWrapperPlan = {
@@ -187,6 +188,39 @@ describe('one-shot terminal commands', () => {
     expect(result.stderr).toContain(`spawn ${relativeNode} ENOENT`);
     expect(result.status).toBe(0);
   });
+
+  it('hands the Windows wrapper a relative path as the file in the command’s directory', () => {
+    const cwd = directory();
+    mkdirSync(join(cwd, 'tools'));
+    writeFileSync(join(cwd, 'tools', 'build.exe'), '');
+    const spawned = terminalCommandSpawn(
+      { cwd, env: { PATH: directory() }, commands: [{ file: './tools/build', args: ['x'] }] },
+      process.execPath,
+      [],
+      'win32',
+    );
+    const plan = planOf(spawned.args);
+    expect(plan.commands).toEqual([{ file: join(cwd, 'tools', 'build.exe'), args: ['x'] }]);
+    // The banner shows the command as the user wrote it.
+    expect(plan.banner).toBe('./tools/build x');
+  });
+
+  it.runIf(process.platform === 'win32')(
+    'runs an explicit .\\ path from the working directory end to end on Windows',
+    async () => {
+      const cwd = directory();
+      mkdirSync(join(cwd, 'tools'));
+      copyFileSync(system32Path('hostname.exe'), join(cwd, 'tools', 'probe.exe'));
+      const spawned = terminalCommandSpawn(
+        { cwd, commands: [{ file: '.\\tools\\probe.exe', args: [] }] },
+        process.execPath,
+        ['-e', 'process.exit(0)'],
+      );
+      const result = await runWrapper(spawned.file, spawned.args, process.env, cwd);
+      expect(result.stdout.toLowerCase()).toContain(hostname().toLowerCase());
+      expect(result.stdout).toContain('[Process exited with status 0]');
+    },
+  );
 
   it.runIf(process.platform === 'win32')(
     'never runs a programme planted in the working directory on Windows',

@@ -8,7 +8,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { compilationCapabilitiesResponseSchema, type Session } from '@puddle/shared';
@@ -378,6 +378,32 @@ describe('code tool discovery and process bounds', () => {
     // POSIX execvp never looks in the working directory: the name stays as given.
     expect(compilationSpawn(command, 'linux').file).toBe('planted');
   });
+
+  it('starts a relative Windows path from the command’s working directory, as on POSIX', () => {
+    const cwd = directory();
+    mkdirSync(join(cwd, 'tools'));
+    writeFileSync(join(cwd, 'tools', 'build.exe'), '');
+    // A template such as `./tools/build.sh {{source}}` on POSIX, `.\tools\build.exe` here.
+    const command = { file: './tools/build', args: ['main.c'], cwd, env: { PATH: directory() } };
+    expect(compilationSpawn(command, 'win32')).toMatchObject({
+      file: join(cwd, 'tools', 'build.exe'),
+      args: ['main.c'],
+      options: { cwd },
+    });
+    expect(compilationSpawn(command, 'linux').file).toBe('./tools/build');
+  });
+
+  it.runIf(process.platform === 'win32')(
+    'runs an explicit .\\ path from the command’s working directory end to end',
+    async () => {
+      const cwd = directory();
+      mkdirSync(join(cwd, 'tools'));
+      // Any executable will do; hostname.exe prints this machine's name.
+      copyFileSync(system32Path('hostname.exe'), join(cwd, 'tools', 'probe.exe'));
+      const result = await runCompilationCommand({ file: '.\\tools\\probe.exe', args: [], cwd });
+      expect(result.stdout.trim().toLowerCase()).toBe(hostname().toLowerCase());
+    },
+  );
 
   it.runIf(process.platform === 'win32')(
     'never runs an executable planted in the command’s working directory',

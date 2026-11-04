@@ -242,6 +242,44 @@ describe('resolveSpawn on Windows', () => {
     writeFileSync(join(odd, '100%', 'x.bat'), '@echo off\r\n');
     expect(() => windows(join(odd, '100%', 'x.bat'), [], {})).toThrow(/batch file path/);
   });
+
+  it('finds a relative path with a directory part in the child’s working directory', () => {
+    const cwd = directory();
+    mkdirSync(join(cwd, 'tools'));
+    writeFileSync(join(cwd, 'tools', 'build.exe'), '');
+    writeFileSync(join(cwd, 'tools', 'make.bat'), '@echo off\r\n');
+    writeFileSync(join(cwd, 'planted.exe'), '');
+    const env = { Path: directory(), ComSpec: 'C:\\Windows\\System32\\cmd.exe' };
+    const inCwd = (file: string) => resolveSpawn(file, [], { platform: 'win32', env, cwd });
+    // As libuv and cmd.exe read it, completed through PATHEXT.
+    expect(inCwd('./tools/build').file).toBe(join(cwd, 'tools', 'build.exe'));
+    expect(inCwd('tools/build.exe').file).toBe(join(cwd, 'tools', 'build.exe'));
+    // A batch file there is recognised as one, and cmd.exe gets its full path.
+    expect(inCwd('./tools/make.bat').args).toEqual([
+      '/d',
+      '/s',
+      '/c',
+      `""${join(cwd, 'tools', 'make.bat')}""`,
+    ]);
+    // A bare name is still looked up on PATH only, never in the working directory.
+    expect(inCwd('planted').file).toBe('planted');
+    // Absolute paths, and every path without a working directory, stay as given.
+    expect(inCwd(join(cwd, 'tools', 'build.exe')).file).toBe(join(cwd, 'tools', 'build.exe'));
+    expect(inCwd('C:\\tools\\gcc.exe').file).toBe('C:\\tools\\gcc.exe');
+    expect(windows('./tools/build.exe', [], env).file).toBe('./tools/build.exe');
+  });
+
+  it.runIf(process.platform === 'win32')(
+    'resolves a Windows-style relative path against the working directory',
+    () => {
+      const cwd = directory();
+      mkdirSync(join(cwd, 'tools'));
+      writeFileSync(join(cwd, 'tools', 'build.exe'), '');
+      const inCwd = (file: string) => resolveSpawn(file, [], { platform: 'win32', env: {}, cwd });
+      expect(inCwd('.\\tools\\build.exe').file).toBe(join(cwd, 'tools', 'build.exe'));
+      expect(inCwd('tools\\build').file).toBe(join(cwd, 'tools', 'build.exe'));
+    },
+  );
 });
 
 describe('quoteCmdArgument', () => {

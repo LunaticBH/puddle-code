@@ -67,11 +67,12 @@ export function disposeCompilationCommands(): void {
  * `windowsHide`, it and every console grandchild share one hidden console
  * (a detached command's grandchildren would each open a visible window), and
  * cancellation stops the tree with taskkill. npm-style `.cmd` shims and other
- * batch files are resolved first, since Node will not start them directly.
- * Throws `UnsafeCmdArgumentError` for a batch file whose arguments cmd.exe
- * cannot carry, and ENOENT for a name not found on PATH: spawned bare, libuv
- * would look for it in the command's working directory first, inside the
- * repository.
+ * batch files are resolved first, since Node will not start them directly,
+ * and a relative path such as `.\tools\build.exe` names a file in the
+ * command's working directory, as on POSIX. Throws `UnsafeCmdArgumentError`
+ * for a batch file whose arguments cmd.exe cannot carry, and ENOENT for a
+ * bare name not found on PATH: spawned bare, libuv would look for it in the
+ * command's working directory first, inside the repository.
  */
 export function compilationSpawn(
   command: CompilationCommand,
@@ -90,7 +91,11 @@ export function compilationSpawn(
   // programmes in the working directory as they would in a console.
   const env = { ...(command.env ?? process.env) };
   restoreCurrentDirectorySearch(env, platform);
-  const resolved = resolveSpawn(command.file, command.args, { platform, env });
+  const resolved = resolveSpawn(command.file, command.args, {
+    platform,
+    env,
+    cwd: command.cwd,
+  });
   if (!win32.isAbsolute(resolved.file)) {
     throw Object.assign(new Error(`spawn ${command.file} ENOENT`), {
       code: 'ENOENT',

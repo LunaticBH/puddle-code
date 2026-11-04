@@ -85,10 +85,11 @@ export interface RunWrapperPlan {
  * with inherited stdio and exits with its status. A programme ended by Ctrl+C
  * (STATUS_CONTROL_C_EXIT) reports 130, as a shell reports SIGINT; one that
  * cannot start reports 127 or 126 with the error, like env(1). A file that is
- * not an absolute path (a name the daemon did not find on PATH) is never
- * spawned: libuv would look for it in the working directory, the worktree,
- * before PATH, so it reports 127 at once. Each status line waits for its
- * write, since console writes are asynchronous on Windows.
+ * not an absolute path (a bare name the daemon did not find on PATH; it
+ * resolves relative paths itself) is never spawned: libuv would look for it
+ * in the working directory, the worktree, before PATH, so it reports 127 at
+ * once. Each status line waits for its write, since console writes are
+ * asynchronous on Windows.
  */
 export const RUN_WRAPPER = `
 'use strict';
@@ -147,8 +148,9 @@ const run = (step) => new Promise((resolve) => {
  * environment with the command's variables applied: npm shims become
  * `node <script>` and other batch files run through cmd.exe with strict
  * quoting, which throws `UnsafeCmdArgumentError` for an argument cmd.exe
- * cannot carry. A name that is not on PATH stays bare, and the wrapper
- * refuses to spawn it.
+ * cannot carry. A relative path such as `.\tools\build.exe` becomes the file
+ * in the command's working directory, as on POSIX. A bare name that is not on
+ * PATH stays bare, and the wrapper refuses to spawn it.
  */
 function windowsRunWrapperSpawn(
   command: TerminalCommand,
@@ -158,7 +160,7 @@ function windowsRunWrapperSpawn(
   const env: Record<string, string | undefined> = { ...process.env };
   for (const [name, value] of Object.entries(command.env ?? {})) setEnv(env, name, value, 'win32');
   const step = (file: string, args: string[]): RunWrapperStep => {
-    const resolved = resolveSpawn(file, args, { platform: 'win32', env });
+    const resolved = resolveSpawn(file, args, { platform: 'win32', env, cwd: command.cwd });
     return {
       file: resolved.file,
       args: resolved.args,
