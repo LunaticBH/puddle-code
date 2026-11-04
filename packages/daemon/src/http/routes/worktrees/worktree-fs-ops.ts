@@ -7,7 +7,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, extname, isAbsolute, join, relative, sep } from 'node:path';
+import { dirname, isAbsolute, relative, sep } from 'node:path';
 import { Hono } from 'hono';
 import { newFileContent } from '../../../notebooks/empty.js';
 import {
@@ -18,7 +18,7 @@ import {
   transferEntryRequestSchema,
   type FsOpResponse,
 } from '@puddle/shared';
-import { wireRelative } from '../../../host-path.js';
+import { hostPathApi, wireRelative } from '../../../host-path.js';
 import { ApiError } from '../../errors.js';
 import { parseBody } from '../../validate.js';
 import {
@@ -48,16 +48,28 @@ import {
  * A non-colliding sibling of `abs`, inserting ` copy`, ` copy 2`, … before the
  * extension (VSCode's paste-into-same-folder behaviour): `foo.txt` → `foo copy.txt`,
  * a folder `bar` → `bar copy`. Returns `abs` unchanged when nothing exists there.
+ *
+ * Windows takes the stem from the name itself: a drive or share root is a
+ * dirname that ends in its separator, so slicing one character past it
+ * dropped the name's first letter (`D:\notes.txt` → `D:\otes copy.txt`).
  */
-function uniqueDestination(abs: string): string {
-  if (!existsSync(abs)) return abs;
-  const dir = dirname(abs);
-  const ext = extname(abs);
-  const stem = abs.slice(dir.length + 1, abs.length - ext.length);
+export function uniqueDestination(
+  abs: string,
+  platform: NodeJS.Platform = process.platform,
+  exists: (path: string) => boolean = existsSync,
+): string {
+  if (!exists(abs)) return abs;
+  const path = hostPathApi(platform);
+  const dir = path.dirname(abs);
+  const ext = path.extname(abs);
+  const stem =
+    platform === 'win32'
+      ? path.basename(abs, ext)
+      : abs.slice(dir.length + 1, abs.length - ext.length);
   for (let n = 1; ; n++) {
     const suffix = n === 1 ? ' copy' : ` copy ${n}`;
-    const candidate = join(dir, `${stem}${suffix}${ext}`);
-    if (!existsSync(candidate)) return candidate;
+    const candidate = path.join(dir, `${stem}${suffix}${ext}`);
+    if (!exists(candidate)) return candidate;
   }
 }
 
