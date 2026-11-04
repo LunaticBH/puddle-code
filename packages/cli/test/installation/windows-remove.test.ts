@@ -1,8 +1,17 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { system32Path } from '@puddle/shared/node/platform';
 import {
   removeWindowsDaemon,
   sweepWindowsWorktrees,
@@ -43,6 +52,28 @@ describe('removing the daemon from this Windows machine', () => {
     expect((await sweepWindowsWorktrees(home)).sort()).toEqual([dirty, unpushed].sort());
     expect(await sweepWindowsWorktrees(join(home, 'absent'))).toEqual([]);
   });
+
+  it.runIf(process.platform === 'win32')(
+    'never runs a git.exe planted in the directory the removal starts from',
+    async () => {
+      const { home, dirty, unpushed } = homeWithWorktrees();
+      const start = mkdtempSync(join(tmpdir(), 'puddle-windows-remove-cwd-'));
+      // Any executable will do: hostname.exe fails on git's argv, so nothing reads as dirty.
+      copyFileSync(system32Path('hostname.exe'), join(start, 'git.exe'));
+      // A plain user environment: Claude Code's own shells set this, hiding the lookup.
+      const saved = process.env.NoDefaultCurrentDirectoryInExePath;
+      delete process.env.NoDefaultCurrentDirectoryInExePath;
+      const cwd = process.cwd();
+      process.chdir(start);
+      try {
+        expect((await sweepWindowsWorktrees(home)).sort()).toEqual([dirty, unpushed].sort());
+      } finally {
+        process.chdir(cwd);
+        if (saved !== undefined) process.env.NoDefaultCurrentDirectoryInExePath = saved;
+        rmSync(start, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('removes the install but keeps the data, never following a junction out', async () => {
     const home = mkdtempSync(join(tmpdir(), 'puddle-windows-remove-'));

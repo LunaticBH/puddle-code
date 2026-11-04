@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { existsSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import { findExecutable } from '@puddle/shared/node/platform';
 import { stopWindowsDaemon } from './windows-daemon.js';
 import { CliError, type Logger, silentLogger } from '../types.js';
 
@@ -42,10 +43,21 @@ function entries(dir: string): string[] {
   }
 }
 
-/** Trimmed stdout; a failure reads as "nothing to report", as in the POSIX sweep. */
+/**
+ * Trimmed stdout; a failure reads as "nothing to report", as in the POSIX
+ * sweep. git.exe comes from PATH only: spawned bare, libuv would look for it
+ * first in the working directory `puddle remove` was started from, which may
+ * be a repository that tracks its own `git.exe`. Only `.com` and `.exe`
+ * count, as for libuv, since Node will not start a batch file without a shell.
+ */
 async function git(dir: string, args: string[]): Promise<string> {
+  const file =
+    process.platform === 'win32'
+      ? findExecutable('git', { platform: 'win32', pathext: '.COM;.EXE' })
+      : 'git';
+  if (file === null) return '';
   try {
-    const { stdout } = await execute('git', ['-C', dir, ...args], {
+    const { stdout } = await execute(file, ['-C', dir, ...args], {
       windowsHide: true,
       timeout: 30_000,
       maxBuffer: 4 * 1024 * 1024,
