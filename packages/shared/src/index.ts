@@ -30,6 +30,7 @@ export * from './api/connection/cockpit.js';
 export * from './api/connection/cockpit-remote.js';
 export * from './ws/messages.js';
 export * from './api/connection/connection-auth.js';
+export * from './api/connection/supervisor-control.js';
 export * from './remote/protocol.js';
 export * from './remote/image-upload.js';
 export * from './remote/service.js';

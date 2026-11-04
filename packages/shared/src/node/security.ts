@@ -213,7 +213,8 @@ function assertPrivateWindowsHome(path: string, created: boolean): void {
   if (served) {
     throw refuse(
       'Puddle is running from this home, whose keys other users could read and must be replaced: ' +
-        'end node.exe running its puddled.mjs in Task Manager, then run Puddle again',
+        'end node.exe running its supervisor.mjs, puddled.mjs and connector.mjs in Task Manager, ' +
+        'then run Puddle again',
     );
   }
   if (problem !== null) {
@@ -310,8 +311,9 @@ const IPC_SECRETS = [
 ] as const;
 
 /**
- * Whether the daemon's or the installer's pipe of a home is served now,
- * from the pipe namespace: nothing connects, and neither secret is created.
+ * Whether a pipe of a home's daemon, installer, supervisor or connector is
+ * served now, from the pipe namespace: nothing connects, and neither secret
+ * is created.
  */
 function windowsHomePipesServed(home: string): boolean {
   const [key, nonce] = IPC_SECRETS.map(([name, bytes]) => {
@@ -325,7 +327,7 @@ function windowsHomePipesServed(home: string): boolean {
   // Without both, the home has never named a pipe.
   if (key === undefined || nonce === undefined) return false;
   const served = new Set(readdirSync(PIPES).map((name) => name.toLowerCase()));
-  return ['host', 'install'].some((scope) =>
+  return ['host', 'install', 'supervisor', 'remote'].some((scope) =>
     served.has(windowsPipeName(home, scope, key, nonce).toLowerCase()),
   );
 }
