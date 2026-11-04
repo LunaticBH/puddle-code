@@ -1,6 +1,9 @@
 // Compiles src/ssh-askpass-shim.cs (the Windows SSH_ASKPASS program) with the
 // .NET Framework 4 C# compiler that every supported Windows ships, so neither
-// the build nor the user needs an SDK.
+// the build nor the user needs an SDK. The output is IL-only AnyCPU, so one
+// binary runs natively on x64 and on Arm64 (.NET Framework 4.8.1) whichever
+// compiler built it; electron-builder signs it from app.asar.unpacked when
+// the release is signed.
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -10,7 +13,7 @@ const source = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'ss
 
 function compiler() {
   const windows = process.env.WINDIR ?? process.env.SystemRoot ?? 'C:\\Windows';
-  const candidates = ['Framework64', 'Framework'].map((framework) =>
+  const candidates = ['Framework64', 'FrameworkArm64', 'Framework'].map((framework) =>
     join(windows, 'Microsoft.NET', framework, 'v4.0.30319', 'csc.exe'),
   );
   const found = candidates.find((candidate) => existsSync(candidate));
@@ -19,7 +22,9 @@ function compiler() {
 }
 
 export function compileAskpassShim(outFile) {
-  execFileSync(compiler(), ['/nologo', '/target:exe', '/optimize+', `/out:${outFile}`, source], {
-    stdio: ['ignore', 'pipe', 'inherit'],
-  });
+  execFileSync(
+    compiler(),
+    ['/nologo', '/target:exe', '/platform:anycpu', '/optimize+', `/out:${outFile}`, source],
+    { stdio: ['ignore', 'pipe', 'inherit'] },
+  );
 }

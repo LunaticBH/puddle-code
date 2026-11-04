@@ -15,7 +15,9 @@
 //   line 2  askpass helper script    line 4  bridge token
 //
 // Built by scripts/askpass-shim.mjs with the .NET Framework 4 compiler that
-// every supported Windows ships (C# 5: no newer syntax).
+// every supported Windows ships (C# 5: no newer syntax), as /platform:anycpu
+// IL, so the one binary runs natively on x64 and Arm64 .NET Framework (4.8.1
+// on Arm). electron-builder Authenticode-signs it when signing is configured.
 using System;
 using System.Diagnostics;
 using System.IO;
