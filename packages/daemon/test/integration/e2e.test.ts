@@ -78,13 +78,11 @@ function wsClient(daemon: RunningDaemon) {
   };
 }
 
-// Shell tabs run the real shell: cmd.exe on Windows (SHELL may name it there
-// because it is an existing executable), where Enter is CR and `cd` prints the
-// directory. A wide terminal keeps deep temp paths from wrapping.
+// Shell tabs run the real shell: PowerShell on Windows, where Enter is CR. A
+// wide terminal keeps deep temp paths from wrapping.
 const windows = process.platform === 'win32';
-if (windows) process.env.SHELL = process.env.ComSpec;
 const ENTER = windows ? '\r' : '\n';
-const PRINT_DIRECTORY = windows ? 'cd\r' : 'pwd\n';
+const PRINT_DIRECTORY = windows ? '$PWD.ProviderPath\r' : 'pwd\n';
 
 async function pollUntil(cond: () => Promise<boolean>, ms = 30000): Promise<void> {
   const start = Date.now();
@@ -399,9 +397,16 @@ describe('daemon end-to-end (Phase 1 acceptance)', () => {
     await waitFor(() => spawns().length === 2);
     expect(spawns()[1]!.term).toBe(term);
 
-    // The stream attaches like a session and the shell answers stdin.
+    // The stream attaches like a session and the shell answers stdin. The
+    // home shell is the user's own, unhooked: on Windows the line is left
+    // unsubmitted, so it never reaches the user's PSReadLine history.
     viewer.send({ t: 'attach', session: 'home', term, cols: 80, rows: 24 });
-    viewer.send({ t: 'stdin', session: 'home', term, data: `echo home-shell-ok${ENTER}` });
+    viewer.send({
+      t: 'stdin',
+      session: 'home',
+      term,
+      data: windows ? 'echo home-shell-ok' : `echo home-shell-ok${ENTER}`,
+    });
     await waitFor(() => viewer.outputFor('home', term).includes('home-shell-ok'));
 
     // kill-shell ends it; attached viewers learn through `exit`.

@@ -11,7 +11,6 @@ import { join } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { compilationRunResponseSchema } from '@puddle/shared';
-import { system32Path } from '@puddle/shared/node/platform';
 import { CodeProvider, createCodeProviders } from '../../src/code/provider.js';
 import { createCodeTerminalLauncher } from '../../src/code/terminal.js';
 import { CODE_RECIPES } from '../../src/code/recipes.js';
@@ -24,10 +23,12 @@ const windows = process.platform === 'win32';
 
 /**
  * Shell input that prints `<first>-<second>` without its own echo containing
- * that text. On Windows the session shell is cmd.exe, which drops the `^`.
+ * that text. On Windows the session shell is PowerShell.
  */
 function shellPrint(first: string, second: string): string {
-  return windows ? `echo ${first}-^${second}\r` : `printf '${first}-%s\\n' ${second}\r`;
+  return windows
+    ? `Write-Output ('${first}-' + '${second}')\r`
+    : `printf '${first}-%s\\n' ${second}\r`;
 }
 
 /**
@@ -57,7 +58,7 @@ afterEach(async () => {
 function setup() {
   const f = fixture();
   fixtures.push(f);
-  vi.stubEnv('SHELL', windows ? system32Path('cmd.exe') : '/bin/bash');
+  if (!windows) vi.stubEnv('SHELL', '/bin/bash');
   vi.stubEnv('HOME', f.paths.home);
   if (windows) {
     const binary = join(f.paths.home, 'binary.cjs');

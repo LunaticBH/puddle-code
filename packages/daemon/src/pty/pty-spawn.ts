@@ -22,15 +22,15 @@ import {
  * - node-pty quotes an argv itself, but leaves an argument that already
  *   starts and ends with `"` unquoted and so loses its quotes. The command
  *   line is built here instead, following the Microsoft C runtime rules that
- *   node.exe, PowerShell and Git Bash all parse with. A line CreateProcess
- *   would refuse is refused here, with its length, rather than with
- *   node-pty's bare "error code: 206".
+ *   node.exe and PowerShell parse with. A line CreateProcess would refuse is
+ *   refused here, with its length, rather than with node-pty's bare
+ *   "error code: 206".
  *
  * node-pty sets `TERM` to the terminal name only on Unix; Windows children get
- * the same value here, for TERM-sniffing CLIs and MSYS tools. The daemon's
- * own `NoDefaultCurrentDirectoryInExePath` setting is taken out of the base
- * environment, so `gradlew` or `build.bat` typed in a cmd.exe terminal, or
- * called by an agent's batch file, still runs from the current directory.
+ * the same value here, for TERM-sniffing CLIs. The daemon's own
+ * `NoDefaultCurrentDirectoryInExePath` setting is taken out of the base
+ * environment, so `gradlew` or `build.bat` called by an agent's batch file
+ * still runs from the current directory.
  */
 export interface PtySpawnPlan {
   file: string;

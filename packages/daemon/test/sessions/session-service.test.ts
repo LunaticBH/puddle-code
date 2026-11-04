@@ -3,15 +3,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { fakeAdapter } from '../helpers/daemon-fixtures.js';
+import { resolvePaths } from '../../src/paths.js';
 import { stripAnsi } from '../../src/pty/ansi.js';
+import { installShellHooks, type ShellHooks } from '../../src/pty/shell-hooks.js';
 import { reconcilePass } from '../../src/sessions/reconcile.js';
 import { fixture, waitFor } from '../helpers/daemon-fixtures.js';
 import { sh } from '../helpers/git-fixtures.js';
 
-// Shell tabs run the real shell. Windows: cmd.exe, which starts fastest and
-// which SHELL may name there because it is an existing executable.
+// Shell tabs run the real shell: PowerShell on Windows, else $SHELL.
 const windows = process.platform === 'win32';
-if (windows) process.env.SHELL = process.env.ComSpec;
 
 /** A config dir carrying the fake adapter's logged-in marker. */
 function credsDir(label: string): string {
@@ -583,7 +583,7 @@ describe('shells', () => {
     const term = f.service.spawnShell(session.id);
     expect(term).toBe('shell-1');
     f.ptys.resize(session.id, term, 400, 40); // a deep temp path must not wrap
-    f.ptys.write(session.id, term, windows ? 'cd\r' : 'pwd\n');
+    f.ptys.write(session.id, term, windows ? '$PWD.ProviderPath\r' : 'pwd\n');
     await waitFor(() =>
       stripAnsi(f.logs.readTail(session.id, term)).includes(session.worktree_path),
     );
@@ -1133,12 +1133,18 @@ describe('captured env', () => {
       shell: string;
       session?: { captureEnv: boolean; historyFile: string };
     }> = [];
+    // Windows adds the real PowerShell hook, which keeps the typed probe out of
+    // the user's own PSReadLine history.
+    const real = windows
+      ? installShellHooks(resolvePaths(mkdtempSync(join(tmpdir(), 'puddle-hook-'))), 'win32')
+      : null;
     const stubHooks = {
       spawnConfig: (shell: string, session?: { captureEnv: boolean; historyFile: string }) => {
         spawnConfigCalls.push({ shell, session });
-        return { args: [], env: { PUDDLE_HOOK_MARKER: '1' } };
+        const hook = real?.spawnConfig(shell, session) ?? { args: [], env: {} };
+        return { args: hook.args, env: { ...hook.env, PUDDLE_HOOK_MARKER: '1' } };
       },
-    } as unknown as import('../../src/pty/shell-hooks.js').ShellHooks;
+    } as unknown as ShellHooks;
     const f = fixture({ shellHooks: stubHooks });
     const session = await liveSession(f);
     f.stores.sessions.mergeEnv(session.id, { CAPTURED_PROBE: 'shell-sees-me' }, []);
@@ -1152,7 +1158,7 @@ describe('captured env', () => {
       session.id,
       term,
       windows
-        ? 'echo probe-%CAPTURED_PROBE%-hook-%PUDDLE_HOOK_MARKER%\r'
+        ? 'Write-Output "probe-${env:CAPTURED_PROBE}-hook-${env:PUDDLE_HOOK_MARKER}"\r'
         : 'echo probe-$CAPTURED_PROBE-hook-$PUDDLE_HOOK_MARKER\n',
     );
     await waitFor(() => f.logs.readTail(session.id, term).includes('probe-shell-sees-me-hook-1'));

@@ -29,7 +29,7 @@ import { LogStore } from '../../src/logs/log-store.js';
 import { ensureHome, resolvePaths } from '../../src/paths.js';
 import { PortScanner } from '../../src/ports/scanner.js';
 import { PtyManager } from '../../src/pty/pty-manager.js';
-import type { ShellHooks } from '../../src/pty/shell-hooks.js';
+import { installShellHooks, type ShellHooks } from '../../src/pty/shell-hooks.js';
 import { ConversationShare } from '../../src/sessions/conversation-share.js';
 import { MarkerFileSync } from '../../src/sessions/onboarding.js';
 import { SessionService } from '../../src/sessions/service.js';
@@ -236,6 +236,11 @@ export function fixture(
     storage?: StorageMonitor;
     share?: boolean;
     titleRefreshMs?: number;
+    /**
+     * None on POSIX by default. Windows defaults to the real PowerShell hook in
+     * this temp home, as the daemon installs it, so a test typing into a shell
+     * keeps its commands out of the user's own PSReadLine history.
+     */
     shellHooks?: ShellHooks;
     /** Adapter executable; pass a name absent from PATH to test the install guard. */
     agentBinary?: string;
@@ -315,7 +320,9 @@ export function fixture(
     logs,
     onboarding,
     share,
-    shellHooks: opts.shellHooks,
+    shellHooks:
+      opts.shellHooks ??
+      (process.platform === 'win32' ? installShellHooks(paths, 'win32') : undefined),
     statusQuietMs: opts.quietMs ?? 150,
     titleRefreshMs: opts.titleRefreshMs,
   });
