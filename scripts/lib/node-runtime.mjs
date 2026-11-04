@@ -149,12 +149,14 @@ export function peMachine(file) {
     const raw = coff.readUInt16LE(4);
     const machine = MACHINES[raw] ?? `machine 0x${raw.toString(16).padStart(4, '0')}`;
     if (machine !== 'x86') return machine;
-    // An IL-only image's CLR header (data directory 14) decides AnyCPU.
+    // An IL-only image's CLR header (data directory 14) decides AnyCPU. An
+    // optional header too short to hold that directory cannot name one.
     const sections = coff.readUInt16LE(6);
     const optionalSize = coff.readUInt16LE(20);
+    if (optionalSize < 96 + 15 * 8) return machine;
     const optional = read(header + 24, optionalSize);
     if (optional === null || optional.readUInt16LE(0) !== 0x10b) return machine;
-    if (optional.readUInt32LE(92) <= 14 || 96 + 15 * 8 > optionalSize) return machine;
+    if (optional.readUInt32LE(92) <= 14) return machine;
     const rva = optional.readUInt32LE(96 + 14 * 8);
     if (rva === 0) return machine;
     for (let i = 0; i < sections; i++) {

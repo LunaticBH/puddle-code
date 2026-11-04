@@ -83,6 +83,23 @@ describe('Windows release tree architecture', () => {
     expect(peMachine(join(temp, 'missing.exe'))).toBeNull();
   });
 
+  it('reads an x86 image whose optional header cannot hold a CLR directory as x86', () => {
+    // SizeOfOptionalHeader 0, 2 and 95 end before NumberOfRvaAndSizes; 215
+    // ends inside the CLR directory itself.
+    for (const size of [0, 2, 95, 215]) {
+      const image = pe(0x14c, 0x1);
+      image.writeUInt16LE(size, 0x80 + 20);
+      const name = `short-${size}.exe`;
+      writeFileSync(join(temp, name), image);
+      expect(peMachine(join(temp, name))).toBe('x86');
+    }
+    const root = tree('short-optional', { 'helper.exe': pe(0x14c, 0x1) });
+    const helper = readFileSync(join(root, 'helper.exe'));
+    helper.writeUInt16LE(2, 0x80 + 20);
+    writeFileSync(join(root, 'helper.exe'), helper);
+    expect(() => assertWindowsTreeArch(root, 'x64')).toThrow('helper.exe (x86)');
+  });
+
   it('accepts a native tree with AnyCPU helpers and names every stray binary', () => {
     const arm64 = tree('arm64', {
       'bin/node.exe': pe(0xaa64),
