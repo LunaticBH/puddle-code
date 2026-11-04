@@ -19,6 +19,7 @@ import {
 import { connect, createServer, type Server, type Socket } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 import { CONTROL_MAX_BYTES } from '../api/connection/connection-auth.js';
+import { normaliseHostPath } from '../host-path.js';
 import { system32Path } from './environment.js';
 import { renameWithRetrySync } from './rename.js';
 
@@ -174,11 +175,20 @@ export function readPrivateJson(path: string): unknown {
  * in one machine-wide namespace, so on Windows the name also carries the
  * home's private nonce: other users, who cannot read the home, can neither
  * connect to the pipe nor create it first.
+ *
+ * Every spelling of a Windows home names the same pipes: the key hashes the
+ * home's on-disk path (`realpath.native`, upper-case drive letter, decision
+ * 11), which the daemon's canonical home and a client's `d:\puddle` or 8.3
+ * spelling share.
  */
 export function ipcPath(home: string, scope: string): string {
   initialisePrivateHome(home);
+  if (process.platform === 'win32') {
+    const identity = normaliseHostPath(realpathSync.native(home));
+    const key = digest(`${identity}\0${scope}`).slice(0, 24);
+    return `\\\\.\\pipe\\puddle-${key}-${ipcNonce(home)}`;
+  }
   const key = digest(`${realpathSync(home)}\0${scope}`).slice(0, 24);
-  if (process.platform === 'win32') return `\\\\.\\pipe\\puddle-${key}-${ipcNonce(home)}`;
   const dir = join('/tmp', `puddle-${process.getuid!()}-${key}`);
   privateDirectory(dir);
   return join(dir, 'control.sock');

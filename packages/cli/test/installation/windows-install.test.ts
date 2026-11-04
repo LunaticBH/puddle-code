@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { system32Path } from '@puddle/shared/node/platform';
@@ -90,96 +90,127 @@ describe('Windows daemon release assets', () => {
 const daemonDist = fileURLToPath(new URL('../../../daemon/dist/daemon.js', import.meta.url));
 
 /**
- * The whole decision-5/6 path against a real release-shaped zip: this
- * machine's node.exe as the runtime and, as the daemon, a fixture that runs
- * the built daemon (`pnpm build` first). Windows only: it drives tar.exe,
- * junctions and detached node.exe processes.
+ * A release-shaped `puddled-v<version>-win32-x64.zip` (with its `.sha256`) in
+ * `dir`: this machine's node.exe as the runtime and, as the daemon, a fixture
+ * that runs the built daemon. PUDDLE_FIXTURE_VERSION_DELAY_MS slows its
+ * `--version`, PUDDLE_FIXTURE_START_DELAY_MS the start before it binds.
+ */
+function releaseZip(dir: string, version: string): string {
+  const tree = join(dir, `stage-${version}`, `puddled-v${version}`);
+  mkdirSync(join(tree, 'bin'), { recursive: true });
+  mkdirSync(join(tree, 'daemon'), { recursive: true });
+  try {
+    linkSync(process.execPath, join(tree, 'bin', 'node.exe'));
+  } catch {
+    copyFileSync(process.execPath, join(tree, 'bin', 'node.exe'));
+  }
+  const delay = (name: string) =>
+    `await new Promise((r) => setTimeout(r, Number(process.env.${name} ?? 0)));`;
+  writeFileSync(
+    join(tree, 'daemon', 'puddled.mjs'),
+    [
+      "if (process.argv.includes('--version')) {",
+      `  ${delay('PUDDLE_FIXTURE_VERSION_DELAY_MS')}`,
+      `  console.log('puddled ${version} (protocol 25.7)');`,
+      '  process.exit(0);',
+      '}',
+      delay('PUDDLE_FIXTURE_START_DELAY_MS'),
+      `const { startDaemon } = await import(${JSON.stringify(pathToFileURL(daemonDist).href)});`,
+      `await startDaemon({ port: 0, adapters: [], version: "${version}", onShutdown: () => process.exit(0) });`,
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(join(tree, 'VERSION'), `${version}\n`);
+  writeFileSync(join(tree, 'PROTOCOL'), '25.7\n');
+  const file = `puddled-v${version}-win32-x64.zip`;
+  const zip = join(dir, file);
+  execFileSync(
+    system32Path('tar.exe'),
+    [
+      '-a',
+      '-c',
+      '--options',
+      'zip:compression=store',
+      '-f',
+      file,
+      '-C',
+      dirname(tree),
+      basename(tree),
+    ],
+    // Relative names: tar.exe takes its arguments in the ANSI code page.
+    { cwd: dir, windowsHide: true },
+  );
+  const digest = createHash('sha256').update(readFileSync(zip)).digest('hex');
+  writeFileSync(`${zip}.sha256`, `${digest}  ${file}\n`);
+  return zip;
+}
+
+/**
+ * The whole decision-5/6 path against a real release-shaped zip (`pnpm build`
+ * first). Windows only: it drives tar.exe, junctions and detached node.exe
+ * processes.
  */
 describe.runIf(process.platform === 'win32' && existsSync(daemonDist))(
   'installing and supervising a Windows daemon',
   () => {
     const root = mkdtempSync(join(tmpdir(), 'puddle-windows-install-'));
     const home = join(root, '.puddle');
-    const zip = join(root, 'puddled-v1.2.3-win32-x64.zip');
+    let zip: string;
+    const homes = [home];
     const savedHome = process.env.PUDDLE_HOME;
+    const logger = (lines: string[] = []) => ({
+      lines,
+      info: (line: string) => lines.push(line),
+      warn: (line: string) => lines.push(line),
+    });
+    /** A fresh home, which PUDDLE_HOME then names (as `spelling`, if given). */
+    const freshHome = (parent = root, spelling?: (path: string) => string) => {
+      const path = join(mkdtempSync(join(parent, 'home-')), '.puddle');
+      homes.push(path);
+      process.env.PUDDLE_HOME = spelling ? spelling(path) : path;
+      return spelling ? spelling(path) : path;
+    };
+    const pid = (at: string) => Number(readFileSync(join(at, 'puddled.pid'), 'utf8'));
 
     beforeAll(() => {
-      const tree = join(root, 'stage', 'puddled-v1.2.3');
-      mkdirSync(join(tree, 'bin'), { recursive: true });
-      mkdirSync(join(tree, 'daemon'), { recursive: true });
-      try {
-        linkSync(process.execPath, join(tree, 'bin', 'node.exe'));
-      } catch {
-        copyFileSync(process.execPath, join(tree, 'bin', 'node.exe'));
-      }
-      writeFileSync(
-        join(tree, 'daemon', 'puddled.mjs'),
-        [
-          "if (process.argv.includes('--version')) {",
-          "  console.log('puddled 1.2.3 (protocol 25.7)');",
-          '  process.exit(0);',
-          '}',
-          `const { startDaemon } = await import(${JSON.stringify(pathToFileURL(daemonDist).href)});`,
-          'await startDaemon({ port: 0, adapters: [], version: "1.2.3", onShutdown: () => process.exit(0) });',
-          '',
-        ].join('\n'),
-      );
-      writeFileSync(join(tree, 'VERSION'), '1.2.3\n');
-      writeFileSync(join(tree, 'PROTOCOL'), '25.7\n');
-      execFileSync(
-        system32Path('tar.exe'),
-        [
-          '-a',
-          '-c',
-          '--options',
-          'zip:compression=store',
-          '-f',
-          zip,
-          '-C',
-          dirname(tree),
-          'puddled-v1.2.3',
-        ],
-        { windowsHide: true },
-      );
-      const digest = createHash('sha256').update(readFileSync(zip)).digest('hex');
-      writeFileSync(`${zip}.sha256`, `${digest}  puddled-v1.2.3-win32-x64.zip\n`);
+      zip = releaseZip(root, '1.2.3');
       process.env.PUDDLE_HOME = home;
-    });
+    }, 120_000);
 
     afterAll(async () => {
-      await stopWindowsDaemon(home).catch(() => undefined);
+      for (const each of homes) await stopWindowsDaemon(each).catch(() => undefined);
       if (savedHome === undefined) delete process.env.PUDDLE_HOME;
       else process.env.PUDDLE_HOME = savedHome;
+      delete process.env.PUDDLE_FIXTURE_START_DELAY_MS;
+      delete process.env.PUDDLE_FIXTURE_VERSION_DELAY_MS;
     });
 
     it('verifies, unpacks, links, starts and stops the daemon', async () => {
-      const lines: string[] = [];
-      const logger = {
-        info: (line: string) => lines.push(line),
-        warn: (line: string) => lines.push(line),
-      };
-      await installWindowsDaemon({ home, tarball: zip, logger });
+      process.env.PUDDLE_HOME = home;
+      const { lines, ...log } = logger();
+      const opts = { home, tarball: zip, logger: log };
+      await installWindowsDaemon(opts);
 
       expect(readCurrentVersion(home)).toBe('1.2.3');
       expect(readlinkSync(join(home, 'bin', 'current'))).toContain('versions\\1.2.3');
       expect(readFileSync(join(home, 'supervisor'), 'utf8')).toBe('detached\n');
       expect(readFileSync(join(home, 'bin', 'puddled.cmd'), 'utf8')).toBe(windowsLauncher());
-      const firstPid = Number(readFileSync(join(home, 'puddled.pid'), 'utf8'));
+      const firstPid = pid(home);
 
       const started = await waitForStartedDaemon(new LocalTransport(), 60_000);
       expect(started.authority.version?.version).toBe('1.2.3');
       started.authority.close();
 
       // The idempotent path: nothing is unpacked again, but the daemon is replaced.
-      await installWindowsDaemon({ home, tarball: zip, logger });
+      await installWindowsDaemon(opts);
       expect(lines).toContain('version 1.2.3 already installed');
-      expect(Number(readFileSync(join(home, 'puddled.pid'), 'utf8'))).not.toBe(firstPid);
+      expect(pid(home)).not.toBe(firstPid);
       (await waitForStartedDaemon(new LocalTransport(), 60_000)).authority.close();
 
       // A launcher that only needs a daemon leaves a running one alone.
-      const secondPid = readFileSync(join(home, 'puddled.pid'), 'utf8');
-      await installWindowsDaemon({ home, tarball: zip, logger, replaceRunning: false });
-      expect(readFileSync(join(home, 'puddled.pid'), 'utf8')).toBe(secondPid);
+      const secondPid = pid(home);
+      await installWindowsDaemon({ ...opts, replaceRunning: false });
+      expect(pid(home)).toBe(secondPid);
 
       await stopWindowsDaemon(home);
       expect(await controlPipePresent(home)).toBe(false);
@@ -197,5 +228,16 @@ describe.runIf(process.platform === 'win32' && existsSync(daemonDist))(
       );
       expect(existsSync(join(home, 'bin', 'versions', '1.2.4'))).toBe(false);
     });
+
+    it('reaches its daemon however the home is spelled', async () => {
+      // `d:\…` for `D:\…`: the daemon canonicalises its home, the CLI does not.
+      const at = freshHome(root, (path) => path[0]!.toLowerCase() + path.slice(1));
+      await installWindowsDaemon({ home: at, tarball: zip });
+      const started = await waitForStartedDaemon(new LocalTransport(), 60_000);
+      expect(started.authority.version?.version).toBe('1.2.3');
+      started.authority.close();
+      await stopWindowsDaemon(at);
+      expect(existsSync(join(at, 'puddled.pid'))).toBe(false);
+    }, 180_000);
   },
 );

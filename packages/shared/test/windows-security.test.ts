@@ -55,6 +55,16 @@ describe.skipIf(process.platform !== 'win32')('Windows Puddle home', () => {
     expect(icacls(home)).toBe(before);
   });
 
+  it('names the same pipes for every spelling of the home', () => {
+    const { home } = fixture();
+    const host = ipcPath(home, 'host');
+    // The daemon canonicalises its home; a CLI passes PUDDLE_HOME as typed.
+    expect(ipcPath(home[0]!.toLowerCase() + home.slice(1), 'host')).toBe(host);
+    expect(ipcPath(home.toUpperCase(), 'host')).toBe(host);
+    expect(ipcPath(home.replaceAll('\\', '/'), 'host')).toBe(host);
+    expect(ipcPath(`${home}\\`, 'host')).toBe(host);
+  });
+
   it.each(['', '\\'])('refuses a junction as the home (suffix %j)', (suffix) => {
     const { parent, home } = fixture();
     const target = join(parent, 'target');
