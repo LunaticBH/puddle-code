@@ -2,3 +2,6 @@ dist/
 pnpm-lock.yaml
 CHANGELOG.md
 docs/
+# A symlink to CLAUDE.md, which prettier checks itself. Windows checkouts
+# without symlink support hold the target path as plain text instead.
+AGENTS.md
