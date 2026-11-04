@@ -97,6 +97,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Add-Content -Path $env:GITHUB_PATH -Value "$env:RUNNER_TEMP\notebook-python\Scripts"
       - run: pnpm test
+      - run: pnpm test:e2e
       - name: build the daemon zip
         run: pnpm build:tarball
       # Separate steps: pwsh would carry on past a failed native command.
