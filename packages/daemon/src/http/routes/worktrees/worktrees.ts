@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, realpathSync, writeFileSync, type Stats } from 'node:fs';
+import { stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { Hono } from 'hono';
 import {
@@ -17,6 +18,7 @@ import { worktreeFileRoutes } from './worktree-files.js';
 import { worktreeFsOpsRoutes } from './worktree-fs-ops.js';
 import { worktreeGitRoutes } from './worktree-git.js';
 import { resolveWorktree, type WorktreeDeps } from './worktree-shared.js';
+import { refusesForeignNetworkPath } from './windows-paths.js';
 
 /** Decoded-size cap for pasted images; generous for screenshots, hostile to abuse. */
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
@@ -81,7 +83,7 @@ export function worktreeRoutes(deps: WorktreeDeps): Hono {
   // host path exists is not a capability this endpoint adds — and a
   // directory resolves too, which the UI binds the file tree to as a pinned
   // browse (SPEC §8). Only a path that names nothing 404s.
-  app.get('/:sid/resolve', (c) => {
+  app.get('/:sid/resolve', async (c) => {
     const { root } = resolveWorktree(deps, c);
     const rawPath = c.req.query('path');
     if (!rawPath) {
@@ -92,14 +94,22 @@ export function worktreeRoutes(deps: WorktreeDeps): Hono {
     // spawn); `~` against the daemon host's home, exactly as the shell the
     // agent printed it from would expand it.
     const abs = resolve(root, expandTilde(rawPath));
-    if (!existsSync(abs)) {
+    // Windows: a network or device path from terminal output is never
+    // opened unless it lies in the session's own tree (windows-paths.ts).
+    if (refusesForeignNetworkPath(abs, () => [root, safeRealpath(root), canonicalHostPath(root)])) {
       throw ApiError.notFound('path', rawPath);
     }
     // Symlinks are followed, even out of the worktree — consistent with the
     // file explorer / `containedPath`. The raw (unresolved) `abs` keeps a
     // symlinked-out file reading as INSIDE the worktree below, exactly as
-    // the explorer treats it.
-    const stat = statSync(abs);
+    // the explorer treats it. Asynchronous, so a slow volume cannot hold up
+    // every other session's terminal while the hover waits.
+    let stats: Stats;
+    try {
+      stats = await stat(abs);
+    } catch {
+      throw ApiError.notFound('path', rawPath);
+    }
 
     const lineParam = c.req.query('line');
     const parsedLine = lineParam === undefined ? NaN : Number.parseInt(lineParam, 10);
@@ -110,7 +120,7 @@ export function worktreeRoutes(deps: WorktreeDeps): Hono {
     // by the current resolution root so Files can reveal it in place (16.1).
     // Absolute answers are canonical and relative ones `/`-separated on every
     // host (decision 11); both are identities on POSIX.
-    if (stat.isDirectory()) {
+    if (stats.isDirectory()) {
       for (const base of [root, safeRealpath(root)]) {
         const rel = relative(base, abs);
         if (!rel.startsWith('..') && !isAbsolute(rel)) {
@@ -124,7 +134,7 @@ export function worktreeRoutes(deps: WorktreeDeps): Hono {
       }
       return c.json<ResolvePathResponse>({ path: canonicalHostPath(abs), line: null, kind: 'dir' });
     }
-    if (!stat.isFile()) {
+    if (!stats.isFile()) {
       throw ApiError.notFound('path', rawPath); // fifos, sockets, devices
     }
 

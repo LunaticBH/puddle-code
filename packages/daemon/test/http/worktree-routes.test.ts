@@ -249,6 +249,23 @@ describe('GET /api/worktrees/:sid/resolve', () => {
     },
   );
 
+  it.runIf(process.platform === 'win32')(
+    'refuses device-namespace and network spellings of a path outside the worktree on Windows',
+    async () => {
+      const outside = mkdtempSync(join(tmpdir(), 'puddle-resolve-device-'));
+      const secret = join(outside, 'secret.ts');
+      writeFileSync(secret, 'x');
+      const status = async (path: string) =>
+        (await resolvePath(resolveSessionId, `?path=${encodeURIComponent(path)}`)).status;
+      // The drive spelling resolves; the same file through \\?\ or \\.\ does not.
+      expect(await status(secret)).toBe(200);
+      for (const prefix of ['\\\\?\\', '\\\\.\\', '//?/']) {
+        expect(await status(`${prefix}${secret}`), prefix).toBe(404);
+      }
+      expect(await status('\\\\puddle-unreachable.invalid\\share\\x.txt')).toBe(404);
+    },
+  );
+
   it('resolves relative paths from a session-less directory target', async () => {
     const root = mkdtempSync(join(tmpdir(), 'puddle-resolve-directory-target-'));
     writeFileSync(join(root, 'notes.md'), '# notes\n');
