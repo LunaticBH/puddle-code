@@ -1,6 +1,7 @@
 import {
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   renameSync,
   rmSync,
@@ -152,13 +153,28 @@ function moveAcrossRoots(from: string, to: string): void {
  * Whether `from` and `to` name the same entry spelt differently, as a
  * case-only rename does on Windows' case-insensitive filesystems. `to` then
  * "exists" but the rename is legitimate. Always false on POSIX.
+ *
+ * The spellings must also open one filesystem object: a directory marked
+ * case-sensitive (WSL's DrvFs, `fsutil file setCaseSensitiveInfo`) holds
+ * `Readme.md` and `README.md` side by side, and renaming one onto the other
+ * would silently replace it. A filesystem without file ids (`ino` 0) is not
+ * trusted to tell them apart, so the rename is refused there.
  */
 export function sameEntry(
   from: string,
   to: string,
   platform: NodeJS.Platform = process.platform,
 ): boolean {
-  return platform === 'win32' && from !== to && from.toLowerCase() === to.toLowerCase();
+  if (platform !== 'win32' || from === to || from.toLowerCase() !== to.toLowerCase()) {
+    return false;
+  }
+  try {
+    const a = lstatSync(from, { bigint: true });
+    const b = lstatSync(to, { bigint: true });
+    return a.ino !== 0n && a.dev === b.dev && a.ino === b.ino;
+  } catch {
+    return false;
+  }
 }
 
 export function worktreeFsOpsRoutes(deps: WorktreeDeps): Hono {

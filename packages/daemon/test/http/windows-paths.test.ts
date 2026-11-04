@@ -185,10 +185,11 @@ describe('Windows file operations', () => {
     expect(unlessInUse('fine', () => 42, 'win32')).toBe(42);
   });
 
-  it('treats a case-only rename as the same entry on Windows only', () => {
-    expect(sameEntry('C:\\wt\\readme.md', 'C:\\wt\\README.md', 'win32')).toBe(true);
+  // Case-only renames compare the entries on disk: windows-fs-ops.test.ts.
+  it('never treats two spellings as one entry on POSIX, or without the files', () => {
     expect(sameEntry('C:\\wt\\a.md', 'C:\\wt\\b.md', 'win32')).toBe(false);
     expect(sameEntry('C:\\wt\\a.md', 'C:\\wt\\a.md', 'win32')).toBe(false);
+    expect(sameEntry('C:\\no-such\\readme.md', 'C:\\no-such\\README.md', 'win32')).toBe(false);
     expect(sameEntry('/wt/readme.md', '/wt/README.md', 'linux')).toBe(false);
   });
 });
