@@ -93,8 +93,8 @@ const EMPTY_USAGE: AgentUsage = {
  *   Windows 11): `CLAUDE_CONFIG_DIR` relocates state as above (default
  *   `%USERPROFILE%\.claude`), project dirs are named like `C--Users-…` and
  *   the JSONL records backslash cwds, compared through sameNativeCwd. Hooks
- *   use exec form and the status line is quoted for Git Bash or PowerShell;
- *   see hook-command.ts.
+ *   use exec form and the status line is a command every shell Claude may
+ *   pick runs alike; see hook-command.ts.
  *
  * COPY-ON-SELECT, and why puddle cannot suppress it (investigated 2026-08-05,
  * against 2.1.222). Dragging a selection in the TUI copies it, and its
