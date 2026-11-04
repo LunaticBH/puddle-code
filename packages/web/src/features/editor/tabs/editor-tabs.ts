@@ -1,4 +1,5 @@
 import type { CompilationMode } from '@puddle/shared';
+import { fileIdentity } from '../../../lib/host-path';
 
 /**
  * Pure tab-order logic for the editor zone (SPEC §8). A tab is keyed by
@@ -67,7 +68,10 @@ export function tabKind(tab: EditorTab): EditorTabKind {
  */
 export function tabKey(tab: EditorTab): string {
   if (tab.view === 'linked' || tab.view === 'locked') return tab.view;
-  const base = `${tabKind(tab)}:${tab.session}:${tab.sha ?? ''}:${tab.root ?? ''}:${tab.path}`;
+  // A live file under a Windows root keys in Windows' own comparison
+  // (`fileIdentity`); a commit's path is a git path, which is case-sensitive.
+  const { path, root } = tabKind(tab) === 'commit' ? tab : fileIdentity(tab.path, tab.root);
+  const base = `${tabKind(tab)}:${tab.session}:${tab.sha ?? ''}:${root ?? ''}:${path}`;
   // Preserve every pre-15.3 key byte-for-byte: activeKey/previewKey persist in
   // layout snapshots. Only the new source-control variants need a suffix to
   // distinguish HEAD→index from index→working tree.

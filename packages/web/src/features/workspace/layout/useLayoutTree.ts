@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CompilationMode, LayoutLeaf, LayoutNode, TabRef } from '@puddle/shared';
-import { tabKind, type EditorTab, type EditorView } from '../../editor/tabs/editor-tabs';
+import type { EditorTab, EditorView } from '../../editor/tabs/editor-tabs';
 import type { UiStateHandle } from '../use-ui-state';
 import {
   addTabToLeaf,
@@ -24,6 +24,7 @@ import {
   resizeSplit,
   setCompileMode,
   retargetFollowingTabs,
+  sameFollowingTarget,
   sourceTabLocation,
   setTabView,
   tabRefKey,
@@ -74,15 +75,6 @@ export interface LayoutController {
   pruneSessions(alive: ReadonlySet<string>): void;
   resize(splitId: string, sizes: number[]): void;
   drop(spec: DropSpec): void;
-}
-
-function sameFollowingTarget(left: EditorTab, right: EditorTab): boolean {
-  return (
-    left.session === right.session &&
-    left.path === right.path &&
-    (left.root ?? '') === (right.root ?? '') &&
-    tabKind(left) === tabKind(right)
-  );
 }
 
 /**

@@ -101,3 +101,31 @@ export function hostPathKey(path: string): string {
 export function sameHostPath(a: string, b: string): boolean {
   return hostPathKey(a) === hostPathKey(b);
 }
+
+/** A file as tab and buffer keys identify it: `path`, relative to an external tab's `root`. */
+export interface FileIdentity {
+  path: string;
+  root?: string;
+}
+
+/**
+ * The spelling tab and buffer keys compare a file by. Under a Windows root a
+ * name compares as Windows compares it, in any case and with either
+ * separator, so one file reached by two spellings opens one tab and one
+ * buffer. Every other identity is exact, POSIX roots included. A worktree
+ * file carries no root and keeps the daemon's spelling, which a Windows host
+ * gives in the case the file is stored in.
+ */
+export function fileIdentity(path: string, root?: string): FileIdentity {
+  if (root === undefined || hostPathStyle(root) !== 'win32') {
+    return root === undefined ? { path } : { path, root };
+  }
+  return { path: path.replaceAll('\\', '/').toLowerCase(), root: hostPathKey(root) };
+}
+
+/** Whether two tabs or buffers name one file, comparing `fileIdentity` exactly. */
+export function sameFileIdentity(a: FileIdentity, b: FileIdentity): boolean {
+  const left = fileIdentity(a.path, a.root);
+  const right = fileIdentity(b.path, b.root);
+  return left.path === right.path && left.root === right.root;
+}

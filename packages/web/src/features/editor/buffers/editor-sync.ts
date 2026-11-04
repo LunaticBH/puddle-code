@@ -31,10 +31,13 @@
  * `peerKey` to match.
  */
 
+import { fileIdentity } from '../../../lib/host-path';
+
 /** Mirrors `bufferKey` in `buffer-store.ts` — see the module doc comment above. */
 function peerKey(session: string, path: string, root?: string): string {
-  const base = `${encodeURIComponent(session)}:${encodeURIComponent(path)}`;
-  return root === undefined ? base : `${base}:${encodeURIComponent(root)}`;
+  const id = fileIdentity(path, root);
+  const base = `${encodeURIComponent(session)}:${encodeURIComponent(id.path)}`;
+  return id.root === undefined ? base : `${base}:${encodeURIComponent(id.root)}`;
 }
 
 export type EditorSyncMessage =

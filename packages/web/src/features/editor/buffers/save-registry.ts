@@ -19,10 +19,13 @@
  * focused tab, while the registrations come from inside the lazy editor chunk.
  */
 
+import { fileIdentity } from '../../../lib/host-path';
+
 /** The buffer identity a save is registered under — `bufferKey`'s shape, without monaco. */
 export function saverKey(session: string, path: string, root?: string): string {
-  const base = `${encodeURIComponent(session)}:${encodeURIComponent(path)}`;
-  return root === undefined ? base : `${base}:${encodeURIComponent(root)}`;
+  const id = fileIdentity(path, root);
+  const base = `${encodeURIComponent(session)}:${encodeURIComponent(id.path)}`;
+  return id.root === undefined ? base : `${base}:${encodeURIComponent(id.root)}`;
 }
 
 export interface SaverTarget {
