@@ -110,6 +110,11 @@ const WINDOWS_IN_USE = new Set(['EPERM', 'EBUSY', 'EACCES']);
  * failures into 409 `path_busy` instead of an opaque 500. Windows refuses to
  * move or delete an entry while an agent, dev server, editor or terminal holds
  * it (or, for a directory, anything inside it) open; POSIX errors pass through.
+ *
+ * Only EBUSY is certainly a sharing violation. Windows reports a handle held
+ * inside a directory as access denied (EPERM), exactly as it reports an ACL
+ * that forbids the change, so those answers name both causes; `details.cause`
+ * and the daemon's log keep the original code.
  */
 export function unlessInUse<T>(
   rel: string,
@@ -121,9 +126,14 @@ export function unlessInUse<T>(
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code ?? '';
     if (platform !== 'win32' || !WINDOWS_IN_USE.has(code)) throw error;
+    const name = rel || '.';
+    console.warn(`could not change ${name}: ${(error as Error).message}`);
     throw ApiError.conflict(
       'path_busy',
-      `${rel || '.'} is in use by another program (a terminal, editor or dev server); close it and try again`,
+      code === 'EBUSY'
+        ? `${name} is in use by another program (a terminal, editor or dev server); close it and try again`
+        : `${name} could not be changed: it is open in another program (a terminal, editor or dev server), or you do not have permission to change it`,
+      { cause: code },
     );
   }
 }

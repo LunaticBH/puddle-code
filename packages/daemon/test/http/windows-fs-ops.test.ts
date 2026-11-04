@@ -1,8 +1,13 @@
 import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { sameEntry, uniqueDestination } from '../../src/http/routes/worktrees/worktree-fs-ops.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApiError } from '../../src/http/errors.js';
+import {
+  sameEntry,
+  uniqueDestination,
+  unlessInUse,
+} from '../../src/http/routes/worktrees/worktree-fs-ops.js';
 
 /**
  * The Windows branches of the explorer's file operations (docs/windows.md,
@@ -10,11 +15,27 @@ import { sameEntry, uniqueDestination } from '../../src/http/routes/worktrees/wo
  * host. The POSIX branches are checked to be what they always were.
  */
 
+function errno(code: string): NodeJS.ErrnoException {
+  return Object.assign(new Error(`${code}: staged failure`), { code });
+}
+
+function apiError(run: () => unknown): ApiError {
+  try {
+    run();
+  } catch (error) {
+    if (error instanceof ApiError) return error;
+    throw error;
+  }
+  throw new Error('expected an ApiError');
+}
+
 let dir: string;
 beforeEach(() => {
   dir = fs.mkdtempSync(join(tmpdir(), 'puddle-fs-ops-'));
+  vi.spyOn(console, 'warn').mockImplementation(() => {});
 });
 afterEach(() => {
+  vi.restoreAllMocks();
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -74,5 +95,45 @@ describe('case-only renames (F21)', () => {
     expect(sameEntry(file, join(dir, 'b.md'), 'win32')).toBe(false);
     expect(sameEntry(file, file, 'win32')).toBe(false);
     expect(sameEntry(file, join(dir, 'A.md'), 'linux')).toBe(false);
+  });
+});
+
+describe('refusals Windows cannot attribute (F25)', () => {
+  const failing = (code: string) => () => {
+    throw errno(code);
+  };
+
+  it('names both causes for access denied, keeping the original code', () => {
+    for (const code of ['EPERM', 'EACCES']) {
+      const error = apiError(() => unlessInUse('src/app.log', failing(code), 'win32'));
+      expect(error.code).toBe('path_busy');
+      expect(error.status).toBe(409);
+      expect(error.message).toBe(
+        'src/app.log could not be changed: it is open in another program (a terminal, editor or dev server), or you do not have permission to change it',
+      );
+      expect(error.details).toEqual({ cause: code });
+    }
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('EPERM: staged failure'));
+  });
+
+  it('keeps the sharing-violation wording for EBUSY', () => {
+    const error = apiError(() => unlessInUse('', failing('EBUSY'), 'win32'));
+    expect(error.message).toBe(
+      '. is in use by another program (a terminal, editor or dev server); close it and try again',
+    );
+    expect(error.details).toEqual({ cause: 'EBUSY' });
+  });
+
+  it('passes every error through on POSIX', () => {
+    const denied = errno('EACCES');
+    expect(() =>
+      unlessInUse(
+        'x',
+        () => {
+          throw denied;
+        },
+        'linux',
+      ),
+    ).toThrow(denied);
   });
 });

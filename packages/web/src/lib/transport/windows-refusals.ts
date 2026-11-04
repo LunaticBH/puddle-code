@@ -12,7 +12,9 @@ import { ApiError } from './api';
  *   rejects a malformed untitled-draft name on every host; that message has
  *   another shape and is left alone.
  * - 409 `path_busy`: another program holds the entry open, so Windows cannot
- *   move or delete it.
+ *   move or delete it. Windows reports a handle held inside a folder as
+ *   access denied, just as it reports a permission it refuses, so that shape
+ *   names both causes.
  * - 409 `worktree_busy` with the open-handle cause. Its other cause, running
  *   sessions, comes from every host and is left alone.
  * - 400 `unsafe_repository`: git's safe.directory refusal, with git's advice.
@@ -46,11 +48,26 @@ function invalidName(message: string): string | null {
 
 const HELD_OPEN = 'open in another program (a terminal, editor or dev server)';
 
-/** Daemon: `<path> is in use by another program (…); close it and try again`. */
+function subjectOf(path: string | undefined): string {
+  return path === undefined || path === '.' ? 'This item' : `'${path}'`;
+}
+
+/**
+ * Daemon: `<path> is in use by another program (…); close it and try again`
+ * for a sharing violation, or `<path> could not be changed: it is open in
+ * another program (…), or you do not have permission to change it` when
+ * Windows denied access.
+ */
 function pathBusy(message: string): string {
+  const denied = /^(.+?) could not be changed: /s.exec(message);
+  if (denied) {
+    return (
+      `${subjectOf(denied[1])} is ${HELD_OPEN}, or you don't have permission to change it, ` +
+      "so Windows can't move or delete it. Close it there, or check its permissions, and try again."
+    );
+  }
   const path = /^(.+?) is in use by another program\b/s.exec(message)?.[1];
-  const subject = path === undefined || path === '.' ? 'This item' : `'${path}'`;
-  return `${subject} is ${HELD_OPEN}, so Windows can't move or delete it. Close it there and try again.`;
+  return `${subjectOf(path)} is ${HELD_OPEN}, so Windows can't move or delete it. Close it there and try again.`;
 }
 
 /** Daemon: `files in <path> are open in another program (…) — close them and try again`. */
