@@ -59,7 +59,8 @@ scripts/build-tarball.mjs   # self-contained puddled release tarball for the CUR
 scripts/build-cli-tarball.mjs # self-contained CLI archive; shares scripts/lib/node-runtime.mjs
 scripts/install.sh          # internal daemon bootstrap, embedded in CLI/desktop; never published alone
 scripts/install-cli.sh      # public CLI installer, published as install.sh
-scripts/stage-installers.mjs # stage only the public CLI installer as install.sh
+scripts/install-cli.ps1     # public Windows CLI installer, published as install.ps1
+scripts/stage-installers.mjs # stage the public CLI installers as install.sh and install.ps1
 docs/assets/          # README imagery: cockpit hero screenshots (dark chromeless, light in Mac chrome)
 docs/changelogs/      # archived per-version changelogs (see Changelog discipline)
 docs/acceptance/      # manual per-phase acceptance scripts (real-agent verification CI can't do)
@@ -99,7 +100,7 @@ pnpm build:tarball      # self-contained puddled tarball for this platform (dist
 pnpm build:cli-tarball  # standalone CLI archive (after build; same output directory)
 pnpm --filter @puddle-code/desktop start   # run the Electron shell (after pnpm build; NOT from
                                       # inside an agent session — see the puddled warning below)
-pnpm --filter @puddle-code/desktop dist    # package it (dmg/zip/AppImage via electron-builder)
+pnpm --filter @puddle-code/desktop dist    # package it (dmg/zip/AppImage/NSIS via electron-builder)
 ```
 
 For manual testing before a release exists: `pnpm build && pnpm build:tarball`, then
@@ -115,15 +116,18 @@ reachable from the UI's connection banner).
 `puddle remove <cli|daemon|desktop> [user@host]`
 manage the three components (SPEC §10): install ensures presence, upgrade
 moves to newest (or the named version; bare `upgrade` covers the installed local
-daemon and macOS desktop, then the CLI), remove uninstalls behind y/N confirmations — daemon
+daemon and macOS or Windows desktop, then the CLI), remove uninstalls behind y/N confirmations — daemon
 removal keeps ~/.puddle's data unless purged, and sweeps worktrees for
 uncommitted/unpushed work first. cli/desktop are client-machine only;
 `upgrade desktop` still installs the macOS app when none exists (writable
-`/Applications`, else `~/Applications`); Linux desktop stays in-app-update
+`/Applications`, else `~/Applications`) and runs the Windows per-user NSIS
+installer silently (`remove desktop` runs its registered uninstaller); Linux desktop stays in-app-update
 only (an AppImage has no fixed install path).
 
 Standalone CLI installs live under `~/.local/share/puddle/cli` (XDG/`--prefix`
-overrides supported), with a `~/.local/bin/puddle` wrapper. CLI upgrade/removal
+overrides supported), with a `~/.local/bin/puddle` wrapper; on Windows,
+`install.ps1` uses `%LOCALAPPDATA%puddlecli` with `.cmd` launchers in
+`%LOCALAPPDATA%puddlein`. CLI upgrade/removal
 uses the actual installation channel; daemon removal cannot delete the CLI.
 Keep old standalone release trees during upgrades: live cockpits serve their assets.
 The remote app and new GitHub releases publish only the CLI installer at
@@ -146,6 +150,7 @@ supervised one.
 
 ## Conventions
 
+- **Windows hosts** (`docs/windows.md`, SPEC §10 "Windows hosts"): Linux/macOS behaviour stays byte-for-byte unchanged, so every Windows branch sits behind a platform check (prefer an injectable `platform` parameter so both branches test on any OS). Use `@puddle/shared/node/platform` (`findExecutable`, `resolveSpawn`, `setEnv`, `killProcessTree`, `listWindowsProcesses`, `renameWithRetry`) and the `@puddle/shared` host-path helpers instead of ad-hoc `PATH` splitting, `.cmd` spawning, env spreading or `/`-joined host paths; daemon path identity goes through `daemon/src/host-path.ts`. Product code never requires Git Bash, WSL or Unix tools on Windows, and every spawn there is `windowsHide`. Local Windows host operations never go through `LocalTransport.exec` (it refuses); the Windows installer is `installation/windows-install.ts`, never `install.sh`. Test Windows from PowerShell as well as Git Bash: Git Bash puts a `bash` on PATH that masks missing Node fakes. Daemon test fakes use Node (`test/helpers`) on Windows.
 - The `pudl` command ships with the CLI and executes puddlang programmes as trusted single-file TypeScript on an existing local/SSH daemon (protocol 24.0, host Node 22.21.1+). Agent control belongs in provider folders under `agents/`: all four supported agents offer persisted interactive/headless modes. Codex interactive control uses its existing proxy; other interactive controls correlate prompt hashes through native hooks/plugins. Headless control resumes exact native refs and requires a successful structured result plus exit zero. Keep flags and parsers provider-owned; never infer replies from terminal quietness or catalogue discovery. Human input takes over hook-driven asks; custom stop hooks may continue past interactive completion (see the usage guide). Keep runs distinct from placement/conversation/runtime identities, recheck profile ownership per operation, retain account selection without fallback and never replay interrupted runs. Remote leases and the connector allowlist exclude puddlang. Automatic agent MCP binding, delegated credentials and descendant budgets remain deferred; see `docs/puddlang.md`.
 
 - **British English everywhere**: comments, documentation, commit messages, UI copy, and identifiers you choose (`colour`, `initialise`, `behaviour`, `licence` as the noun). Exception: never rename third-party API surface — CSS `color`, `Array.prototype.normalize`-style library methods, and external config keys keep their canonical spelling.

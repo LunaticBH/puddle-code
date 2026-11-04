@@ -1,11 +1,20 @@
 # The puddle communication protocol
 
-Protocol 25.7 adds optional `platform` (the daemon's `process.platform`) to GET
-`/api/host`; its absence means a POSIX host on an older daemon, and clients infer
-each path's style from the path itself. The private host control channel gains
-the strict `shutdown` request, answered by `shutting_down` before the daemon
-stops; Windows supervision uses it in place of signals, and older daemons answer
-`invalid_control`. Remote protocol and operation allowlists remain unchanged.
+Protocol 25.7 adds optional `platform` (the daemon's `process.platform`) and, on
+Windows hosts, `osBuild` (the Windows build number) to GET `/api/host`; absent
+`platform` means a POSIX host on an older daemon, and clients infer each path's
+style from the path itself. A Windows daemon emits canonical native absolute
+paths (`C:\Users\a\repo`), while root-relative paths use `/` on every host. It
+may answer the Windows-only error codes `invalid_name` (400, a name Windows
+cannot store), `path_busy` (409, an entry another program holds open) and
+`unsafe_repository` (400, refused by git `safe.directory`), and `worktree_busy`
+gains an open-handle cause. The private host control channel gains the strict
+`shutdown` request, answered by `shutting_down` before the daemon stops;
+Windows supervision uses it in place of signals, and older daemons answer
+`invalid_control`. The cockpit launcher pipe accepts `shutdown` (answered
+`stopping`), and the cockpit remote-access status may report availability
+`unsupported` (Windows hosts). Remote protocol and operation allowlists remain
+unchanged.
 
 Protocol 25.6 adds `logRetentionDays` to host configuration and its patch, defaulting
 to three days when omitted (zero disables age-based cleanup). New clients gate the
