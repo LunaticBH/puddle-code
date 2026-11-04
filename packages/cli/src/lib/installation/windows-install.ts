@@ -15,7 +15,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { copyFile } from 'node:fs/promises';
+import { copyFile, open } from 'node:fs/promises';
 import * as http from 'node:http';
 import type { Server } from 'node:net';
 import { basename, join, resolve, win32 } from 'node:path';
@@ -26,7 +26,6 @@ import { initialisePrivateHome, ipcPath, listenPrivate, rotateIpcNonce } from '@
 import {
   isPidAlive,
   isWindowsArch,
-  peMachine,
   registerSupervisorTask,
   renameWithRetry,
   shipsSupervisor,
@@ -157,7 +156,7 @@ export async function installWindowsDaemon(opts: WindowsInstallOptions = {}): Pr
       local !== undefined && existsSync(runtime.dir) && !shipsSupervisor(runtime.dir);
     // Another architecture's tree never counts as installed: an x64 runtime
     // still runs on Arm, under emulation, but it is not that machine's build.
-    const foreign = existsSync(runtime.node) && peMachine(runtime.node) !== arch;
+    const foreign = existsSync(runtime.node) && (await runtimeMachine(runtime.node)) !== arch;
     if (
       existsSync(runtime.dir) &&
       !outdated &&
@@ -183,7 +182,7 @@ export async function installWindowsDaemon(opts: WindowsInstallOptions = {}): Pr
       }
       mkdirSync(runtime.dir, { recursive: true });
       await extract(home, archive, runtime.dir);
-      const machine = peMachine(runtime.node);
+      const machine = await runtimeMachine(runtime.node);
       if (machine !== arch) {
         rmSync(runtime.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
         throw new CliError(
@@ -385,8 +384,35 @@ export async function windowsInstalledVersion(
 ): Promise<string | null> {
   const version = readCurrentVersion(home, 'win32');
   if (version === undefined) return null;
-  const machine = peMachine(win32.join(home, 'bin', 'current', 'bin', 'node.exe'));
+  const machine = await runtimeMachine(win32.join(home, 'bin', 'current', 'bin', 'node.exe'));
   return machine === (await hostArch()) ? version : null;
+}
+
+const MACHINES: Record<number, string> = { 0x8664: 'x64', 0xaa64: 'arm64', 0x14c: 'x86' };
+
+/**
+ * The PE machine of a runtime's node.exe (a native program, so the COFF
+ * machine is the whole answer), or null. Asynchronous unlike peMachine():
+ * Defender scans a freshly unpacked executable when it is first opened, for
+ * seconds, and the desktop runs this in Electron's main process.
+ */
+async function runtimeMachine(file: string): Promise<string | null> {
+  let handle: Awaited<ReturnType<typeof open>>;
+  try {
+    handle = await open(file, 'r');
+  } catch {
+    return null;
+  }
+  try {
+    const header = Buffer.alloc(4096);
+    const { bytesRead } = await handle.read(header, 0, header.length, 0);
+    if (bytesRead < 0x40 || header.toString('latin1', 0, 2) !== 'MZ') return null;
+    const pe = header.readUInt32LE(0x3c);
+    if (pe + 6 > bytesRead || header.toString('latin1', pe, pe + 4) !== 'PE\0\0') return null;
+    return MACHINES[header.readUInt16LE(pe + 4)] ?? 'other';
+  } finally {
+    await handle.close();
+  }
 }
 
 function readMarker(path: string): string | undefined {
