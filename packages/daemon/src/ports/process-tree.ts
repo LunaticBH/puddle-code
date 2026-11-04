@@ -78,7 +78,13 @@ export function descendantsOf(
   });
 }
 
-/** The BFS above over a Windows process table, creation-time checked. */
+/**
+ * The BFS above over a Windows process table, creation-time checked. A root
+ * missing from the table (a sidecar that has exited, or a PTY spawned after
+ * the table was read) has no creation time to check against, and any process
+ * still naming its pid as parent may be an earlier holder's orphan, so its
+ * children are not followed.
+ */
 export function windowsDescendants(
   roots: readonly number[],
   table: readonly WindowsProcess[],
@@ -97,9 +103,10 @@ export function windowsDescendants(
   while (queue.length > 0) {
     const pid = queue.shift()!;
     const parent = byPid.get(pid);
+    if (!parent) continue;
     for (const child of childrenOf.get(pid) ?? []) {
       if (seen.has(child.pid)) continue;
-      if (parent && !bornAfter(child, parent)) continue;
+      if (!bornAfter(child, parent)) continue;
       seen.add(child.pid);
       queue.push(child.pid);
     }
