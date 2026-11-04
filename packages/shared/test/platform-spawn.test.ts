@@ -121,6 +121,41 @@ describe('resolveSpawn on Windows', () => {
     expect(windows('agent', [], env).file).toBe(join(bin, 'node.exe'));
   });
 
+  it('runs a shim through strict cmd.exe quoting when its node is a batch file', () => {
+    // npm's %APPDATA%\npm layout (no node.exe beside the shim) behind a
+    // version manager's node.cmd that comes before node.exe on PATH.
+    const bin = directory();
+    writeFileSync(join(bin, 'agent.cmd'), NPM_SHIM('node_modules\\agent\\cli.js'));
+    const shims = directory();
+    writeFileSync(join(shims, 'node.cmd'), '@"C:\\nodejs\\node.exe" %*\r\n');
+    const nodeDir = nodeOnPath();
+    const env = {
+      PATH: `${bin};${shims};${nodeDir}`,
+      ComSpec: 'C:\\Windows\\System32\\cmd.exe',
+    };
+    expect(windows('agent', ['fix x'], env)).toEqual({
+      file: 'C:\\Windows\\System32\\cmd.exe',
+      args: ['/d', '/s', '/c', `""${join(bin, 'agent.cmd')}" "fix x""`],
+      windowsVerbatimArguments: true,
+    });
+    // An argument that would break out of node.cmd's implicit cmd.exe is refused.
+    expect(() => windows('agent', ['fix "x & calc"'], env)).toThrow(UnsafeCmdArgumentError);
+    expect(() => windows('agent', ['%USERNAME%'], env)).toThrow(UnsafeCmdArgumentError);
+  });
+
+  it('looks up the shim’s node without .JS, as the shim’s SET PATHEXT does', () => {
+    const bin = directory();
+    writeFileSync(join(bin, 'agent.cmd'), NPM_SHIM('node_modules\\agent\\cli.js'));
+    const scripts = directory();
+    writeFileSync(join(scripts, 'node.js'), '');
+    const nodeDir = nodeOnPath();
+    const env = { PATH: `${bin};${scripts};${nodeDir}`, PATHEXT: '.COM;.EXE;.BAT;.CMD;.JS' };
+    expect(windows('agent', ['x'], env)).toEqual({
+      file: join(nodeDir, 'node.exe'),
+      args: [join(bin, 'node_modules', 'agent', 'cli.js'), 'x'],
+    });
+  });
+
   it('keeps shebang flags and arguments cmd.exe could not carry', () => {
     const bin = directory();
     writeFileSync(join(bin, 'node.exe'), '');

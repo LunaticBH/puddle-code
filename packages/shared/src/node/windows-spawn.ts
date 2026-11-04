@@ -1,7 +1,7 @@
 import { closeSync, existsSync, openSync, readSync } from 'node:fs';
 import { dirname, extname, join, resolve } from 'node:path';
 import { getEnv, system32Path, type Environment } from './environment.js';
-import { findExecutable } from './executables.js';
+import { findExecutable, windowsExtensions } from './executables.js';
 
 /**
  * Spawning on Windows (docs/windows.md, decision 9). CreateProcess runs only
@@ -224,14 +224,23 @@ function readNodeShim(path: string, env: Environment): NodeShim | null {
 
 /**
  * The node.exe the shim would choose: an absolute one it names, else one
- * beside the shim, else node on PATH. Never `process.execPath`, which may
- * be Electron.
+ * beside the shim, else the first `node` on PATH, looked up as the shim
+ * does after its `SET PATHEXT=%PATHEXT:;.JS;=;%`. Never `process.execPath`,
+ * which may be Electron. When that first `node` is itself a batch file (a
+ * version manager's `node.cmd` shim, say), there is no node.exe to unwrap
+ * to: spawning the batch file directly would hand the arguments to an
+ * implicit cmd.exe with C runtime quoting, so null sends the whole shim
+ * through `viaCmd`'s strict quoting instead.
  */
 function shimNode(dir: string, absolute: string | null, env: Environment): string | null {
   if (absolute && existsSync(absolute)) return absolute;
   const beside = join(dir, 'node.exe');
   if (existsSync(beside)) return beside;
-  return findExecutable('node', { platform: 'win32', env });
+  const pathext = windowsExtensions(getEnv(env, 'PATHEXT', 'win32'))
+    .filter((extension) => extension.toLowerCase() !== '.js')
+    .join(';');
+  const found = findExecutable('node', { platform: 'win32', env, pathext });
+  return found !== null && /\.(?:exe|com)$/i.test(found) ? found : null;
 }
 
 function readSmallFile(path: string): string | null {
