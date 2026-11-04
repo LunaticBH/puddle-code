@@ -59,6 +59,7 @@ for (const file of [
   'index.js',
   'pudl.js',
   'host-control.mjs',
+  'windows-host.mjs',
   'install.sh',
   'install-cli.sh',
   ...(windows ? ['install-cli.ps1'] : []),

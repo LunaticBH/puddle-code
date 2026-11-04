@@ -8,9 +8,10 @@ import { fileURLToPath } from 'node:url';
 import { checkIpcEndpoint, ipcPath } from '@puddle/shared/node';
 import { controlResponseSchema, type HostInspection } from '@puddle/shared';
 import type { Duplex } from 'node:stream';
+import { remoteWindowsHost } from '../host/windows-remote-host.js';
 import { clientHome, hostPaths } from '../paths.js';
+import { remoteWindows } from '../transport/host-platform.js';
 import type { Transport } from '../transport/transport.js';
-import { windowsHostRefusal } from '../transport/windows-host.js';
 import { inspectHostLocally } from './host-inspection.js';
 
 const staged = new WeakMap<Transport, Promise<string>>();
@@ -41,13 +42,10 @@ fs.renameSync(tmp, dest);`;
         stdin: code,
         timeoutMs: 15_000,
       });
-      if (result.code !== 0) {
-        // The first command a connection runs, so a Windows host is recognised here.
-        throw (
-          windowsHostRefusal(transport, result) ??
-          new Error('Could not stage the host control helper')
-        );
-      }
+      // The first command a connection runs: a Git Bash default shell passes
+      // `true`, so a Windows host may be recognised only here (callers then
+      // take its own control path).
+      if (result.code !== 0) throw new Error('Could not stage the host control helper');
       return `${hostPaths.current}/bin/node ${hostPaths.home}/control/${name}`;
     })();
     staged.set(transport, pending);
@@ -55,23 +53,54 @@ fs.renameSync(tmp, dest);`;
   }
   return pending;
 }
+
+/**
+ * The POSIX helper's command, or null when staging it showed the host is
+ * Windows (whose own helper then serves the request).
+ */
+async function posixHelper(transport: Transport): Promise<string | null> {
+  try {
+    return await helper(transport);
+  } catch (err) {
+    if (remoteWindows(transport)) return null;
+    throw err;
+  }
+}
+
 export async function openControlChannel(transport: Transport): Promise<Duplex> {
   if (transport.kind === 'local') {
     const path = ipcPath(clientHome(), 'host');
     checkIpcEndpoint(path);
     return connect(path);
   }
+  const windows = remoteWindows(transport);
+  if (windows) return remoteWindowsHost(windows).openChannel();
   if (!transport.openChannel) throw new Error('Transport has no bidirectional control channel');
-  return transport.openChannel(await helper(transport));
+  const command = await posixHelper(transport);
+  if (command === null) return remoteWindowsHost(remoteWindows(transport)!).openChannel();
+  return transport.openChannel(command);
 }
+
 export async function inspectHost(transport: Transport): Promise<HostInspection | null> {
   if (transport.kind === 'local') return inspectHostLocally(clientHome());
-  const result = await transport.exec(`${await helper(transport)} --inspect`, {
-    timeoutMs: 10_000,
-  });
-  if (Buffer.byteLength(result.stdout) > 256 * 1024) return null;
+  const windows = remoteWindows(transport);
+  let stdout: string;
+  if (windows) stdout = await remoteWindowsHost(windows).inspect();
+  else {
+    const command = await posixHelper(transport);
+    stdout =
+      command === null
+        ? await remoteWindowsHost(remoteWindows(transport)!).inspect()
+        : (await transport.exec(`${command} --inspect`, { timeoutMs: 10_000 })).stdout;
+  }
+  return parseInspection(stdout);
+}
+
+/** The helper's one-line answer (host-control.ts, or the Windows host helper's `inspect`). */
+function parseInspection(stdout: string): HostInspection | null {
+  if (Buffer.byteLength(stdout) > 256 * 1024) return null;
   try {
-    const message = controlResponseSchema.parse(JSON.parse(result.stdout));
+    const message = controlResponseSchema.parse(JSON.parse(stdout));
     if (message.t === 'error' && message.code === 'rejected')
       throw new CliError('port_in_use', 'The host endpoint rejects its local credential');
     return message.t === 'inspection' ? message : null;

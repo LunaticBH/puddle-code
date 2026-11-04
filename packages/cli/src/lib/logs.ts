@@ -1,8 +1,7 @@
-import { clientHome, hostPaths } from './paths.js';
-import { isLocalWindows } from './transport/local.js';
+import { windowsOps } from './host/windows-ops.js';
+import { hostPaths } from './paths.js';
 import type { Transport } from './transport/transport.js';
 import { CliError } from './types.js';
-import { showWindowsLogs } from './windows-logs.js';
 
 export interface LogsOptions {
   /** Session id (or unique prefix already resolved by the caller). */
@@ -19,10 +18,13 @@ export interface LogsOptions {
 /**
  * Log access reads files over the Transport — deliberately NOT a gateway
  * attach, which would resize the live PTY out from under the agent
- * (ws/gateway.ts delivers every attach's dimensions).
+ * (ws/gateway.ts delivers every attach's dimensions). A Windows host has no
+ * `tail` or journald: windows-logs.ts reads its files, in process or
+ * through the SSH host helper.
  */
 export async function showLogs(transport: Transport, opts: LogsOptions): Promise<void> {
-  if (isLocalWindows(transport)) return showWindowsLogs(clientHome(), opts);
+  const windows = windowsOps(transport);
+  if (windows) return windows.logs(opts);
   if (opts.session !== undefined) {
     const file = `${hostPaths.logs}/${opts.session}/${opts.term ?? 'agent'}.log`;
     const command = opts.follow ? `tail -f -c 262144 ${file}` : `tail -c 262144 ${file}`;

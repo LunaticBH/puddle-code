@@ -1,6 +1,4 @@
-import { removeWindowsDaemon, sweepWindowsWorktrees } from './windows-remove.js';
-import { clientHome } from '../paths.js';
-import { isLocalWindows } from '../transport/local.js';
+import { windowsOps } from '../host/windows-ops.js';
 import type { Transport } from '../transport/transport.js';
 import { CliError, type Logger, silentLogger } from '../types.js';
 
@@ -16,12 +14,14 @@ import { CliError, type Logger, silentLogger } from '../types.js';
  * `puddle launch` resumes where the removal left off. What goes is what the
  * bootstrap can regenerate: bin/, cache/, runtime.json, the supervisor marker,
  * and the supervisor registration (systemd user unit / launchd agent / nohup
- * pidfile).
+ * pidfile). A Windows host, local or over SSH, has the same steps in Node
+ * (installation/windows-remove.ts, through host/windows-ops.ts).
  */
 
 /** Worktrees carrying work a purge would destroy: dirty, or unpushed commits. */
 export async function sweepDirtyWorktrees(transport: Transport): Promise<string[]> {
-  if (isLocalWindows(transport)) return sweepWindowsWorktrees(clientHome());
+  const windows = windowsOps(transport);
+  if (windows) return windows.sweep();
   // Two levels (~/.puddle/worktrees/<repo>/<dir>); a linked worktree's .git is
   // a FILE, so test both. Failures read as "not dirty" — this is a warning
   // sweep, not an inventory.
@@ -53,9 +53,8 @@ export async function removeDaemon(
   opts: { purge: boolean; logger?: Logger } = { purge: false },
 ): Promise<void> {
   const logger = opts.logger ?? silentLogger;
-  if (isLocalWindows(transport)) {
-    return removeWindowsDaemon(clientHome(), { purge: opts.purge, logger });
-  }
+  const windows = windowsOps(transport);
+  if (windows) return windows.remove({ purge: opts.purge, logger });
   const script = `
 set -u
 HOME_DIR="\${PUDDLE_HOME:-$HOME/.puddle}"

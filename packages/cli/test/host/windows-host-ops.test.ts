@@ -1,0 +1,151 @@
+import { randomUUID } from 'node:crypto';
+import { mkdtempSync } from 'node:fs';
+import type { Server, Socket } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { PassThrough } from 'node:stream';
+import { afterEach, describe, expect, it } from 'vitest';
+import { PROTOCOL_VERSION } from '@puddle/shared';
+import { ipcPath, ipcProof, listenPrivate } from '@puddle/shared/node';
+import { runWindowsHostOp } from '../../src/lib/host/windows-host-ops.js';
+import { parseHelperMessage } from '../../src/lib/host/windows-host-protocol.js';
+
+/**
+ * The host helper's operations (src/windows-host.ts), driven in process
+ * against a temporary home; ipcPath gives a socket off Windows, so the
+ * control channel's proof check runs on every OS.
+ */
+
+let server: Server | undefined;
+afterEach(async () => {
+  if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
+  server = undefined;
+});
+
+function io() {
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  let text = '';
+  stdout.on('data', (chunk: Buffer) => (text += chunk.toString()));
+  return {
+    stdin,
+    stdout,
+    lines: () =>
+      text
+        .split('\n')
+        .filter((line) => line !== '')
+        .map((line) => JSON.parse(line) as Record<string, unknown>),
+  };
+}
+
+const authority = (proof?: string) => ({
+  t: 'authority',
+  generation: randomUUID(),
+  token: `cn_${'a'.repeat(64)}`,
+  validForMs: 45_000,
+  port: 7434,
+  version: { version: '9.9.9', protocol: PROTOCOL_VERSION },
+  ...(proof !== undefined ? { proof } : {}),
+});
+
+/** Serve the home's control pipe; records each request it receives. */
+async function serve(home: string, reply: (challenge: string | undefined) => object) {
+  const requests: Array<Record<string, unknown>> = [];
+  server = await listenPrivate(ipcPath(home, 'host'), (socket: Socket) => {
+    socket.on('error', () => {});
+    socket.on('data', (data: Buffer) => {
+      const request = JSON.parse(data.toString()) as Record<string, unknown>;
+      requests.push(request);
+      socket.write(JSON.stringify(reply(request.challenge as string | undefined)) + '\n');
+    });
+  });
+  return requests;
+}
+
+const home = () => mkdtempSync(join(tmpdir(), 'puddle-host-op-'));
+
+describe('the control channel a Windows SSH host relays', () => {
+  it('challenges the home’s daemon itself and relays a proven answer', async () => {
+    const at = home();
+    const requests = await serve(at, (challenge) => authority(ipcProof(at, 'host', challenge!)));
+    const channel = io();
+    const done = runWindowsHostOp('channel', {}, { home: at, ...channel });
+    // The client cannot read this host's ipc-key, so it sends no challenge.
+    channel.stdin.write(JSON.stringify({ t: 'open' }) + '\n');
+    await expect.poll(() => channel.lines().length).toBe(1);
+    expect(requests[0]).toMatchObject({
+      t: 'open',
+      challenge: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(channel.lines()[0]).toMatchObject({ t: 'authority', port: 7434 });
+    channel.stdin.end();
+    await expect(done).resolves.toBe(0);
+  });
+
+  it('refuses a pipe server that cannot prove it reads the home, before relaying a word', async () => {
+    const at = home();
+    await serve(at, () => authority());
+    const channel = io();
+    const done = runWindowsHostOp('channel', {}, { home: at, ...channel });
+    channel.stdin.write(JSON.stringify({ t: 'open' }) + '\n');
+    await expect(done).resolves.toBe(1);
+    expect(channel.lines()).toEqual([{ t: 'error', code: 'rejected' }]);
+  });
+
+  it('refuses an impostor’s proof for another challenge', async () => {
+    const at = home();
+    await serve(at, () => authority(ipcProof(at, 'host', 'b'.repeat(64))));
+    const channel = io();
+    const done = runWindowsHostOp('channel', {}, { home: at, ...channel });
+    channel.stdin.write(JSON.stringify({ t: 'open' }) + '\n');
+    await expect(done).resolves.toBe(1);
+    expect(channel.lines()).toEqual([{ t: 'error', code: 'rejected' }]);
+  });
+});
+
+describe('the host helper’s other operations', () => {
+  it('reports an empty home as having no daemon and nothing installed', async () => {
+    const at = home();
+    const inspect = io();
+    await expect(runWindowsHostOp('inspect', {}, { home: at, ...inspect })).resolves.toBe(0);
+    expect(inspect.lines()).toEqual([{ t: 'error', code: 'unavailable' }]);
+    const pipe = io();
+    await runWindowsHostOp('pipe', {}, { home: at, ...pipe });
+    expect(pipe.lines()).toEqual([{ t: 'result', value: 'absent' }]);
+    const installed = io();
+    await runWindowsHostOp('installed', {}, { home: at, ...installed });
+    expect(installed.lines()).toEqual([{ t: 'result', value: null }]);
+    const sweep = io();
+    await runWindowsHostOp('sweep', {}, { home: at, ...sweep });
+    expect(sweep.lines()).toEqual([{ t: 'result', value: [] }]);
+  });
+
+  it('keeps the CliError code of a failure, so the client acts on it', async () => {
+    const logs = io();
+    await expect(
+      runWindowsHostOp('logs', { session: 'nope' }, { home: home(), ...logs }),
+    ).resolves.toBe(1);
+    expect(parseHelperMessage(JSON.stringify(logs.lines()[0]))).toMatchObject({
+      t: 'error',
+      code: 'unknown_session',
+    });
+    const install = io();
+    await runWindowsHostOp('install', {}, { home: home(), ...install });
+    expect(install.lines()[0]).toMatchObject({ t: 'error', code: 'bad_arguments' });
+  });
+
+  it('runs only the connector modes a client may ask for', async () => {
+    const connector = io();
+    await runWindowsHostOp(
+      'connector',
+      { args: ['--inspect', '--eval=process.exit()'] },
+      { home: home(), ...connector },
+    );
+    expect(connector.lines()[0]).toMatchObject({ t: 'error', code: 'bad_arguments' });
+    const unknown = io();
+    await expect(
+      runWindowsHostOp('exec', { command: 'calc' }, { home: home(), ...unknown }),
+    ).resolves.toBe(1);
+    expect(unknown.lines()[0]).toMatchObject({ t: 'error', code: 'bad_arguments' });
+  });
+});

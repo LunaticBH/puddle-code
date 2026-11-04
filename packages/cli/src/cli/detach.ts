@@ -28,12 +28,24 @@ import { CliError, type Logger } from '../lib/types.js';
  */
 
 const COCKPIT_CHILD_ENV = 'PUDDLE_COCKPIT_CHILD';
+/** The SSH host's platform as the launcher found it: `win32` for a Windows host. */
+const REMOTE_PLATFORM_ENV = 'PUDDLE_REMOTE_PLATFORM';
 /** How long a background start may take — first-time bootstrap downloads a release. */
 const READY_TIMEOUT_MS = 300_000;
 
 /** True inside the detached re-exec: run the cockpit, don't detach again. */
 export function isCockpitChild(env: Record<string, string | undefined> = process.env): boolean {
   return env[COCKPIT_CHILD_ENV] === '1';
+}
+
+/**
+ * Inside the detached re-exec: the platform the launcher detected for its
+ * SSH host, so the child never sends a Windows host POSIX `true` again.
+ */
+export function launcherRemotePlatform(
+  env: Record<string, string | undefined> = process.env,
+): 'win32' | undefined {
+  return isCockpitChild(env) && env[REMOTE_PLATFORM_ENV] === 'win32' ? 'win32' : undefined;
 }
 
 export function killHint(target: string): string {
@@ -84,9 +96,14 @@ export async function launchDetached(opts: {
   // detaching, so the TTY-less child only ever attaches to a live master.
   // Windows OpenSSH has no master, so the background child must authenticate
   // every connection itself, without prompting.
+  let remotePlatform: 'win32' | undefined;
   if (target !== 'local') {
-    if (process.platform === 'win32') await requirePromptlessSsh(target);
-    else await new SshTransport(target).open();
+    if (process.platform === 'win32') remotePlatform = await requirePromptlessSsh(target);
+    else {
+      const ssh = new SshTransport(target);
+      await ssh.open();
+      remotePlatform = ssh.remotePlatform;
+    }
   }
 
   const logFile = cockpitLogPath(target);
@@ -101,7 +118,11 @@ export async function launchDetached(opts: {
     // starts (ssh, git); hidden, it starts them hidden too. No-op elsewhere.
     windowsHide: true,
     stdio: ['ignore', fd, fd, 'ipc'],
-    env: { ...process.env, [COCKPIT_CHILD_ENV]: '1' },
+    env: {
+      ...process.env,
+      [COCKPIT_CHILD_ENV]: '1',
+      ...(remotePlatform ? { [REMOTE_PLATFORM_ENV]: remotePlatform } : {}),
+    },
   });
   closeSync(fd);
   child.unref();
@@ -195,6 +216,7 @@ export function spawnDetachedRefresh(target: string, argv: string[], refreshId: 
     PUDDLE_INTERNAL_REFRESH: '1',
   };
   delete env[COCKPIT_CHILD_ENV];
+  delete env[REMOTE_PLATFORM_ENV];
   const child = spawn(process.execPath, [process.argv[1] ?? '', ...argv], {
     detached: true,
     windowsHide: true,
@@ -208,13 +230,17 @@ export function spawnDetachedRefresh(target: string, argv: string[], refreshId: 
 /**
  * The background cockpit has no terminal, and on Windows no ssh master to
  * reuse: refuse up front unless key or agent authentication works without
- * a prompt, instead of letting every reconnect fail in the log.
+ * a prompt, instead of letting every reconnect fail in the log. Resolves
+ * with the platform the connection found.
  */
-async function requirePromptlessSsh(target: string): Promise<void> {
+async function requirePromptlessSsh(target: string): Promise<'win32' | undefined> {
   try {
-    await new SshTransport(target, { batchMode: true }).open();
+    const ssh = new SshTransport(target, { batchMode: true });
+    await ssh.open();
+    return ssh.remotePlatform;
   } catch (err) {
-    if (!(err instanceof CliError)) throw err;
+    // A host that answered but cannot be driven (ConstrainedLanguage) says so itself.
+    if (!(err instanceof CliError) || err.code !== 'ssh_unreachable') throw err;
     throw new CliError(
       'ssh_unreachable',
       `a background cockpit on Windows needs SSH to ${target} to work without prompts`,

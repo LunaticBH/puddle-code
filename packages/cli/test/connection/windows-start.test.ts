@@ -112,6 +112,22 @@ it('hands an installed daemon with another protocol to the handshake, on this la
   expect(install.mock.calls[1]![1]).toMatchObject({ version: pinnedDaemonVersion() });
 });
 
+it('keeps the daemon attached to the cockpit when only the SSH session could start it', async () => {
+  install.mockImplementationOnce(async () => {
+    throw new CliError('session_bound', 'puddled cannot outlive this SSH session');
+  });
+  const endpoint = { port: 1, daemonLifetime: 'cockpit' as const };
+  const attachedFallback = vi.fn(async () => endpoint as never);
+  const transport = new LocalTransport({ platform: 'win32' });
+  await expect(ensureDaemon(transport, { attachedFallback })).resolves.toBe(endpoint);
+  expect(attachedFallback).toHaveBeenCalledOnce();
+  // Without a cockpit to hold it (puddle install), the refusal stands.
+  install.mockImplementationOnce(async () => {
+    throw new CliError('session_bound', 'puddled cannot outlive this SSH session');
+  });
+  await expect(ensureDaemon(transport, {})).rejects.toMatchObject({ code: 'session_bound' });
+});
+
 it('installs exactly the archive a caller names', async () => {
   const transport = new LocalTransport({ platform: 'win32' });
   await expect(ensureDaemon(transport, { tarball: 'C:\\dl\\x.zip' })).rejects.toThrow(

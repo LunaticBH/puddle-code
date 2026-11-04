@@ -1,13 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { LocalTransport } from '../../src/lib/transport/local.js';
-import { SshTransport } from '../../src/lib/transport/ssh.js';
-import { isWindowsHostFailure, windowsHostRefusal } from '../../src/lib/transport/windows-host.js';
+import { isWindowsHostFailure } from '../../src/lib/transport/windows-host.js';
 
-const ssh = new SshTransport('alice@winbox', { platform: 'darwin' });
 const failed = (stderr: string, code = 1, stdout = '') => ({ code, stdout, stderr });
 
-describe('SSH to a Windows host is refused clearly', () => {
-  it('recognises cmd.exe, PowerShell and Git Bash answers to a POSIX command', () => {
+describe('how a Windows host answers a POSIX command', () => {
+  it('recognises cmd.exe, PowerShell, Git Bash and a Windows node.exe', () => {
     expect(
       isWindowsHostFailure(
         failed(
@@ -33,6 +30,10 @@ describe('SSH to a Windows host is refused clearly', () => {
       ),
     ).toBe(true);
     expect(isWindowsHostFailure(failed('', 1, 'MSYS_NT-10.0-26200\n'))).toBe(true);
+    // The POSIX helper stage, run by a Git Bash default shell's node.exe.
+    expect(
+      isWindowsHostFailure(failed('TypeError: process.getuid is not a function\n    at [eval]:4')),
+    ).toBe(true);
   });
 
   it('leaves ordinary POSIX failures alone', () => {
@@ -41,14 +42,5 @@ describe('SSH to a Windows host is refused clearly', () => {
     ).toBe(false);
     expect(isWindowsHostFailure(failed('puddled install: error: download failed\n'))).toBe(false);
     expect(isWindowsHostFailure({ code: 0, stdout: 'MINGW64_NT', stderr: '' })).toBe(false);
-  });
-
-  it('turns a recognised failure into an unsupported-platform error, for SSH transports only', () => {
-    const result = failed("'sh' is not recognized as an internal or external command");
-    expect(windowsHostRefusal(ssh, result)).toMatchObject({
-      code: 'unsupported_platform',
-      message: expect.stringContaining('alice@winbox looks like a Windows host'),
-    });
-    expect(windowsHostRefusal(new LocalTransport({ platform: 'linux' }), result)).toBeNull();
   });
 });

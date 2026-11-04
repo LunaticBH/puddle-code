@@ -7,15 +7,10 @@ import {
   type CockpitRemoteStatus,
   type RemoteAdminResponse,
 } from '@puddle/shared';
-import { readCurrentVersion } from '../installation/current-link.js';
-import {
-  runWindowsConnector,
-  windowsConnectorInstalled,
-  type WindowsConnectorRunner,
-} from '../installation/windows-connector.js';
-import { clientHome, hostPaths } from '../paths.js';
-import { isLocalWindows } from '../transport/local.js';
+import type { WindowsConnectorRunner } from '../installation/windows-connector.js';
+import { hostPaths } from '../paths.js';
 import type { Transport } from '../transport/transport.js';
+import { windowsOps, type WindowsHostOps } from './windows-ops.js';
 
 const binary = `${hostPaths.current}/bin/node ${hostPaths.current}/daemon/connector.mjs`;
 
@@ -31,8 +26,9 @@ const capabilitiesOf = (version: string): Capabilities => ({
 
 /**
  * Fixed host commands only; browser values travel exclusively through JSON
- * stdin. On this Windows machine the installed node.exe runs the connector
- * directly (docs/windows.md): there is no shell to give a command line to.
+ * stdin. On a Windows host, this machine or an SSH one, the installed
+ * node.exe runs the connector directly (docs/windows.md): there is no shell
+ * to give a command line to.
  */
 export class RemoteAccessControl {
   /** Windows: `--version` answers once per installed release, not on every status poll. */
@@ -43,8 +39,9 @@ export class RemoteAccessControl {
     private readonly windows: { run?: WindowsConnectorRunner; home?: () => string } = {},
   ) {}
 
-  private home(): string {
-    return this.windows.home?.() ?? clientHome();
+  /** The host's Windows operations; null for a POSIX host. */
+  private windowsHost(): WindowsHostOps | null {
+    return windowsOps(this.transport, this.windows);
   }
 
   /** One connector mode (`flag`) with JSON on stdin. */
@@ -52,14 +49,14 @@ export class RemoteAccessControl {
     flag: string,
     opts: { stdin?: string; timeoutMs: number },
   ): Promise<{ code: number; stdout: string }> {
-    if (isLocalWindows(this.transport)) {
-      return (this.windows.run ?? runWindowsConnector)(this.home(), [flag], opts);
-    }
+    const windows = this.windowsHost();
+    if (windows) return windows.connector([flag], opts);
     return this.transport.exec(`${binary} ${flag}`, opts);
   }
 
   private async capabilities(): Promise<Capabilities> {
-    if (isLocalWindows(this.transport)) return this.localWindowsCapabilities();
+    const windows = this.windowsHost();
+    if (windows) return this.windowsHostCapabilities(windows);
     const result = await this.transport.exec(
       `if test -f ${hostPaths.current}/daemon/connector.mjs; then ${binary} --version; else exit 44; fi`,
       { timeoutMs: 10_000 },
@@ -70,20 +67,19 @@ export class RemoteAccessControl {
     return capabilitiesOf(result.stdout);
   }
 
-  private async localWindowsCapabilities(): Promise<Capabilities> {
-    const home = this.home();
-    if (!windowsConnectorInstalled(home)) {
+  private async windowsHostCapabilities(windows: WindowsHostOps): Promise<Capabilities> {
+    const { installed, version } = await windows.connectorInstalled();
+    if (!installed) {
       return { availability: 'not_installed', canDeleteRegistration: false };
     }
-    const version = readCurrentVersion(home, 'win32');
-    if (version !== undefined && this.windowsCapabilities?.version === version) {
+    if (version !== null && this.windowsCapabilities?.version === version) {
       return this.windowsCapabilities.value;
     }
     const result = await this.run('--version', { timeoutMs: 10_000 });
     if (result.code !== 0)
       throw new Error('Host control is unavailable. Check the host connection.');
     const value = capabilitiesOf(result.stdout);
-    this.windowsCapabilities = version === undefined ? undefined : { version, value };
+    this.windowsCapabilities = version === null ? undefined : { version, value };
     return value;
   }
 
@@ -131,7 +127,7 @@ export class RemoteAccessControl {
     const result = await this.run(flag, {
       stdin: JSON.stringify(payload) + '\n',
       // A Windows enable may start the home's supervisor first.
-      timeoutMs: isLocalWindows(this.transport) && request.t === 'enable' ? 120_000 : 30_000,
+      timeoutMs: this.windowsHost() && request.t === 'enable' ? 120_000 : 30_000,
     });
     // Do not reflect subprocess output: it can contain a registration code or invitation.
     if (result.code !== 0)

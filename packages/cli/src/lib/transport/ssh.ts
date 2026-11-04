@@ -1,10 +1,24 @@
-import { Duplex } from 'node:stream';
+import { Duplex, Readable } from 'node:stream';
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
-import { clientHome } from '../paths.js';
+import { StringDecoder } from 'node:string_decoder';
+import { clientHome, hostPaths } from '../paths.js';
 import { CliError } from '../types.js';
 import { spawnClient } from './spawn.js';
 import type { ExecOptions, ExecResult, Transport } from './transport.js';
+import { isWindowsHostFailure } from './windows-host.js';
+import {
+  frame,
+  languageModeRefusal,
+  parseProbe,
+  parseTrailer,
+  PROBE_SCRIPT,
+  readHomeFileScript,
+  WINDOWS_HOME_FILES,
+  windowsRemoteCommand,
+  windowsScript,
+  type WindowsProbe,
+} from './windows-remote.js';
 
 /** A remote command whose SSH channel deliberately stays open with it. */
 export interface RunningSshCommand {
@@ -31,6 +45,27 @@ export interface SshOptions {
    * which has no terminal and, without ControlMaster, no master to reuse.
    */
   batchMode?: boolean;
+  /**
+   * The host's platform as an earlier connection found it: a background
+   * cockpit is told its launcher's, so it never sends a Windows host `true`.
+   */
+  remotePlatform?: 'win32';
+  /**
+   * Test seam: the PUDDLE_HOME a Windows host uses for this connection (an
+   * isolated home on a real host). Hosts otherwise use their own environment.
+   */
+  windowsHome?: string;
+}
+
+/** Options for one PowerShell operation on a Windows host. */
+export interface WindowsExecOptions {
+  /** Bytes that follow the script on the same standard input. */
+  payload?: string | Buffer | Readable;
+  timeoutMs?: number;
+  /** Standard output as it arrives, decoded as UTF-8. */
+  onStdout?: (chunk: string) => void;
+  /** Ends the operation (its SSH channel, and with it the session's processes). */
+  signal?: AbortSignal;
 }
 
 /**
@@ -40,16 +75,26 @@ export interface SshOptions {
  * inheriting the TTY so password/2FA prompts are typed at most once; every
  * exec, the tunnel, and scp then reuse it. ControlPersist keeps the master
  * for a quick next connect; we never -O exit it.
+ *
+ * A Windows host (docs/windows.md) is recognised only when POSIX `true`
+ * fails on an authenticated connection: one PowerShell probe then decides,
+ * and the answer is sticky. From then on the host takes only PowerShell
+ * operations (execWindows and its channel forms, windows-remote.ts); a POSIX
+ * command sent to it is refused, never run by whichever shell answers.
  */
 export class SshTransport implements Transport {
   readonly kind = 'ssh' as const;
   readonly label: string;
+  /** Set once the host is recognised as Windows; never cleared. */
+  remotePlatform: 'win32' | undefined;
   private readonly ssh: string;
   private readonly scp: string;
   private readonly controlArgs: string[];
   private readonly keepaliveArgs: string[];
   private readonly askpassProgram: string | undefined;
   private readonly batchMode: boolean;
+  private readonly windowsHome: string | undefined;
+  private probe: WindowsProbe | undefined;
 
   constructor(
     readonly host: string,
@@ -60,6 +105,8 @@ export class SshTransport implements Transport {
     this.scp = opts.scpBinary ?? 'scp';
     this.askpassProgram = opts.askpassProgram;
     this.batchMode = opts.batchMode ?? false;
+    this.remotePlatform = opts.remotePlatform;
+    this.windowsHome = opts.windowsHome;
     const platform = opts.platform ?? process.platform;
     if (platform === 'win32') {
       // Windows OpenSSH has no multiplexing: every spawn may prompt again.
@@ -138,8 +185,15 @@ export class SshTransport implements Transport {
    * Open the master through the caller's authentication surface: the CLI's
    * inherited TTY or a graphical embedder's askpass helper. Exit 0 leaves a
    * live control socket behind.
+   *
+   * Status 255 is ssh's own failure. Any other failure of `true` happened on
+   * an authenticated connection, as on a Windows host, whose default shell
+   * (cmd.exe or PowerShell) has no `true`: one PowerShell probe tells, and a
+   * host that does not answer it fails exactly as before. A host already
+   * known to be Windows is opened with the probe alone.
    */
   open(): Promise<void> {
+    if (this.remotePlatform === 'win32') return this.openWindows();
     return new Promise((resolve, reject) => {
       const child = this.spawn(this.ssh, this.args(this.host, 'true'), {
         // A GUI has no useful inherited terminal; OpenSSH calls its askpass
@@ -150,18 +204,56 @@ export class SshTransport implements Transport {
         reject(new CliError('ssh_unreachable', `could not run ${this.ssh}: ${err.message}`)),
       );
       child.on('close', (code) => {
-        if (code === 0) resolve();
-        else {
-          reject(
-            new CliError(
-              'ssh_unreachable',
-              `could not open an SSH connection to ${this.host}`,
-              `check that '${this.ssh} ${this.host}' works on its own`,
-            ),
-          );
-        }
+        if (code === 0) return resolve();
+        const unreachable = this.unreachable();
+        if (code === null || code === 255) return reject(unreachable);
+        this.recogniseWindows().then(
+          (windows) => (windows ? resolve() : reject(unreachable)),
+          (err: unknown) => reject(err instanceof CliError ? err : unreachable),
+        );
       });
     });
+  }
+
+  private unreachable(): CliError {
+    return new CliError(
+      'ssh_unreachable',
+      `could not open an SSH connection to ${this.host}`,
+      `check that '${this.ssh} ${this.host}' works on its own`,
+    );
+  }
+
+  /**
+   * The PowerShell probe; true (and the transport switched to win32) when
+   * the host answers it as a Windows host. A ConstrainedLanguage session
+   * rejects with a clear refusal.
+   */
+  private async recogniseWindows(): Promise<boolean> {
+    const result = await this.execWindows(PROBE_SCRIPT, { timeoutMs: 60_000 });
+    const probe = result.code === 0 ? parseProbe(result.stdout) : null;
+    if (probe === null) return false;
+    this.probe = probe;
+    this.remotePlatform = 'win32';
+    return true;
+  }
+
+  private async openWindows(): Promise<void> {
+    await this.windowsProbe(true);
+  }
+
+  /**
+   * What the Windows host reports about itself (windows-remote.ts); asked
+   * again with `refresh`, since installation changes it.
+   */
+  async windowsProbe(refresh = false): Promise<WindowsProbe> {
+    if (this.remotePlatform !== 'win32') throw new Error(`${this.host} is not a Windows host`);
+    if (refresh || this.probe === undefined) {
+      const result = await this.execWindows(PROBE_SCRIPT, { timeoutMs: 60_000 });
+      const probe = result.code === 0 ? parseProbe(result.stdout) : null;
+      if (probe === null) throw this.unreachable();
+      this.probe = probe;
+    }
+    return this.probe;
   }
 
   /** Whether the master connection is still alive (-O check). */
@@ -196,7 +288,33 @@ export class SshTransport implements Transport {
     });
   }
 
+  /**
+   * `sh -c <command>` on a POSIX host. A failure that reads as Windows
+   * answering it (a Git Bash default shell passes `true`, then its node.exe
+   * or `uname` gives the host away) is confirmed with the PowerShell probe;
+   * the result is returned unchanged either way, and the caller re-dispatches
+   * on the transport's platform.
+   */
   exec(command: string, opts: ExecOptions = {}): Promise<ExecResult> {
+    if (this.remotePlatform === 'win32') return Promise.reject(this.posixRefusal());
+    return this.execPosix(command, opts).then(async (result) => {
+      if (result.code !== 0 && isWindowsHostFailure(result)) {
+        await this.recogniseWindows().catch(() => false);
+      }
+      return result;
+    });
+  }
+
+  /** A POSIX command meant for this host after it was recognised as Windows. */
+  private posixRefusal(): CliError {
+    return new CliError(
+      'unsupported_platform',
+      `a POSIX host command was about to be sent to ${this.host}, a Windows host`,
+      'report it with the command you ran',
+    );
+  }
+
+  private execPosix(command: string, opts: ExecOptions): Promise<ExecResult> {
     return new Promise((resolve) => {
       const child = this.spawn(
         this.ssh,
@@ -238,6 +356,7 @@ export class SshTransport implements Transport {
    * children when an SSH exec channel closes.
    */
   runAttached(command: string): RunningSshCommand {
+    if (this.remotePlatform === 'win32') throw this.posixRefusal();
     const child = this.spawn(this.ssh, this.args(this.host, '--', `sh -c ${shellQuote(command)}`), {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -257,12 +376,25 @@ export class SshTransport implements Transport {
     };
   }
 
+  /**
+   * A host file. On a Windows host only the home files the host-path
+   * constants name can be read (paths.ts): the host resolves its own home.
+   */
   async readFile(path: string): Promise<string | null> {
+    if (this.remotePlatform === 'win32') {
+      const prefix = `${hostPaths.home}/`;
+      const name = path.startsWith(prefix) ? path.slice(prefix.length) : '';
+      if (!WINDOWS_HOME_FILES.includes(name)) throw this.posixRefusal();
+      const result = await this.execWindows(readHomeFileScript(name), { timeoutMs: 15_000 });
+      return result.code === 0 ? result.stdout : null;
+    }
     const result = await this.exec(`cat ${path}`, { timeoutMs: 15_000 });
     return result.code === 0 ? result.stdout : null;
   }
 
+  /** POSIX hosts only: a Windows host receives archives on an operation's own stdin. */
   async copyTo(localPath: string, destPath: string): Promise<void> {
+    if (this.remotePlatform === 'win32') throw this.posixRefusal();
     await this.exec(`mkdir -p $(dirname ${destPath})`, { timeoutMs: 15_000 });
     await new Promise<void>((resolve, reject) => {
       const child = this.spawn(
@@ -281,11 +413,127 @@ export class SshTransport implements Transport {
   }
 
   openChannel(command: string): Duplex {
+    if (this.remotePlatform === 'win32') throw this.posixRefusal();
     const child = this.spawn(
       this.ssh,
       this.args('-T', this.host, '--', `sh -c ${shellQuote(command)}`),
       { stdio: ['pipe', 'pipe', 'pipe'] },
     );
+    const stream = Duplex.from({ readable: child.stdout!, writable: child.stdin! });
+    child.stderr!.resume(); // diagnostics must not enter the credential protocol
+    child.once('error', () => stream.destroy(new Error('SSH control channel failed')));
+    child.once('close', () => stream.destroy());
+    stream.once('close', () => child.kill('SIGTERM'));
+    return stream;
+  }
+
+  /** One ssh child running the Windows loader, its script already framed on stdin. */
+  private spawnWindows(script: string, extra: string[] = []): ChildProcess {
+    const child = this.spawn(
+      this.ssh,
+      this.args(...extra, this.host, '--', windowsRemoteCommand()),
+      {
+        stdio: ['pipe', 'pipe', 'pipe'],
+      },
+    );
+    child.stdin!.on('error', () => {}); // EPIPE is reported by the operation's status.
+    child.stdin!.write(frame(windowsScript(script, { home: this.windowsHome })));
+    return child;
+  }
+
+  /**
+   * One PowerShell operation on a Windows host (windows-remote.ts), resolving
+   * with the script's own status from the loader's trailer. Like exec, it
+   * never rejects on a non-zero status, except for a ConstrainedLanguage
+   * session, where no operation can run.
+   */
+  execWindows(script: string, opts: WindowsExecOptions = {}): Promise<ExecResult> {
+    return new Promise((resolve, reject) => {
+      const child = this.spawnWindows(script);
+      const out: Buffer[] = [];
+      const decoder = new StringDecoder('utf8');
+      let stderr = '';
+      let timer: NodeJS.Timeout | undefined;
+      if (opts.timeoutMs !== undefined) {
+        timer = setTimeout(() => child.kill('SIGKILL'), opts.timeoutMs);
+        timer.unref();
+      }
+      const abort = () => child.kill('SIGTERM');
+      if (opts.signal?.aborted) abort();
+      opts.signal?.addEventListener('abort', abort, { once: true });
+      child.once('close', () => opts.signal?.removeEventListener('abort', abort));
+      child.stdout!.on('data', (chunk: Buffer) => {
+        out.push(chunk);
+        if (opts.onStdout) {
+          const text = decoder.write(chunk);
+          if (text !== '') opts.onStdout(text);
+        }
+      });
+      child.stderr!.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
+      child.on('error', (err) => {
+        if (timer) clearTimeout(timer);
+        resolve({ code: -1, stdout: Buffer.concat(out).toString('utf8'), stderr: String(err) });
+      });
+      child.on('close', (code) => {
+        if (timer) clearTimeout(timer);
+        const trailer = parseTrailer(stderr);
+        const refusal =
+          trailer.code === null || /puddle-language-mode:/.test(trailer.stderr)
+            ? languageModeRefusal(this.host, trailer.stderr)
+            : null;
+        if (refusal) return reject(refusal);
+        resolve({
+          code: trailer.code ?? code ?? -1,
+          stdout: Buffer.concat(out).toString('utf8'),
+          stderr: trailer.stderr,
+        });
+      });
+      const payload = opts.payload;
+      if (payload instanceof Readable) {
+        payload.on('error', () => child.kill('SIGKILL'));
+        payload.pipe(child.stdin!);
+      } else child.stdin!.end(payload);
+    });
+  }
+
+  /**
+   * A PowerShell operation whose SSH channel stays open with it (the
+   * Windows counterpart of runAttached): the session's kill-on-close job
+   * ends whatever it started when the channel closes.
+   */
+  runAttachedWindows(
+    script: string,
+    opts: { onStdout?: (chunk: string) => void } = {},
+  ): RunningSshCommand {
+    const child = this.spawnWindows(script);
+    child.stdin!.end();
+    let stdout = '';
+    let stderr = '';
+    const decoder = new StringDecoder('utf8');
+    const result = new Promise<ExecResult>((resolve) => {
+      child.stdout!.on('data', (chunk: Buffer) => {
+        const text = decoder.write(chunk);
+        stdout += text;
+        if (text !== '') opts.onStdout?.(text);
+      });
+      child.stderr!.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
+      child.on('error', (err) => resolve({ code: -1, stdout, stderr: stderr + String(err) }));
+      child.on('close', (code) => {
+        const trailer = parseTrailer(stderr);
+        resolve({ code: trailer.code ?? code ?? -1, stdout, stderr: trailer.stderr });
+      });
+    });
+    return {
+      result,
+      terminate() {
+        child.kill('SIGTERM');
+      },
+    };
+  }
+
+  /** A credential channel to a Windows host: openChannel's counterpart, framed. */
+  openWindowsChannel(script: string): Duplex {
+    const child = this.spawnWindows(script, ['-T']);
     const stream = Duplex.from({ readable: child.stdout!, writable: child.stdin! });
     child.stderr!.resume(); // diagnostics must not enter the credential protocol
     child.once('error', () => stream.destroy(new Error('SSH control channel failed')));

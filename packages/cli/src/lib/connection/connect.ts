@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import { AttachedDaemon } from './attached-daemon.js';
+import { WindowsAttachedDaemon } from './windows-attached-daemon.js';
 import { DaemonClient, readDaemonPort } from './daemon-client.js';
 import { ensureDaemon, type RunningCockpit } from './cockpit.js';
 import { verifyDaemonVersion, type ConfirmDaemonUpgrade } from './handshake.js';
@@ -53,6 +54,10 @@ export interface ConnectOptions {
   sshAskpassProgram?: string;
   /** Never prompt: a Windows background cockpit, with no terminal and no ControlMaster. */
   sshBatchMode?: boolean;
+  /** The host's platform as the launcher found it (a background cockpit's handover). */
+  remotePlatform?: 'win32';
+  /** Test seam: the PUDDLE_HOME a Windows host uses for this connection. */
+  sshWindowsHome?: string;
 }
 
 /**
@@ -71,6 +76,8 @@ export async function connectRemote(opts: ConnectOptions): Promise<RunningCockpi
     platform,
     askpassProgram: opts.sshAskpassProgram,
     ...(opts.sshBatchMode ? { batchMode: true } : {}),
+    ...(opts.remotePlatform ? { remotePlatform: opts.remotePlatform } : {}),
+    ...(opts.sshWindowsHome !== undefined ? { windowsHome: opts.sshWindowsHome } : {}),
   });
   if (platform === 'win32' && !opts.sshBatchMode) {
     logger.warn(
@@ -93,9 +100,12 @@ export async function connectRemote(opts: ConnectOptions): Promise<RunningCockpi
       confirmDaemonUpgrade: opts.confirmDaemonUpgrade,
     };
     const attachedDaemon = new AttachedDaemon(ssh, logger);
+    // A Windows host may be recognised only during ensureDaemon (Git Bash default shells).
+    const attachedWindowsDaemon = new WindowsAttachedDaemon(ssh, logger);
     const endpoint = await ensureDaemon(ssh, {
       ...bootstrap,
-      attachedFallback: () => attachedDaemon.start(),
+      attachedFallback: () =>
+        ssh.remotePlatform === 'win32' ? attachedWindowsDaemon.start() : attachedDaemon.start(),
     });
     endpointResource = endpoint;
     let remotePort = opts.remotePort ?? endpoint.port;

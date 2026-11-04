@@ -104,3 +104,29 @@ await build({
     '@puddle/shared': join(repoRoot, 'packages/shared/src/index.ts'),
   },
 });
+
+// The Windows SSH host helper (docs/windows.md): staged on a Windows host
+// and run by its own node.exe, the release the host has installed, so it
+// targets that runtime and is told the version and repository it acts for.
+await build({
+  entryPoints: [join(pkgRoot, 'src/windows-host.ts')],
+  outfile: join(pkgRoot, 'dist/windows-host.mjs'),
+  bundle: true,
+  platform: 'node',
+  target: 'node22',
+  format: 'esm',
+  alias: {
+    '@puddle/shared/node/platform': join(repoRoot, 'packages/shared/src/node/platform.ts'),
+    '@puddle/shared/node/host-control': join(repoRoot, 'packages/shared/src/node/host-control.ts'),
+    '@puddle/shared/node': join(repoRoot, 'packages/shared/src/node/security.ts'),
+    '@puddle/shared': join(repoRoot, 'packages/shared/src/index.ts'),
+  },
+  define: {
+    __PUDDLE_CLI_VERSION__: JSON.stringify(version),
+    ...(slug ? { __PUDDLE_REPO_SLUG__: JSON.stringify(slug) } : {}),
+  },
+  banner: {
+    js: "import { createRequire as __puddleCreateRequire } from 'node:module';\nconst require = __puddleCreateRequire(import.meta.url);",
+  },
+  logLevel: 'warning',
+});

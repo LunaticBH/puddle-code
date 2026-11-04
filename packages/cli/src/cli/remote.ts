@@ -9,13 +9,14 @@ import {
   remoteOriginSchema,
   remoteSecretSchema,
 } from '@puddle/shared';
+import { remoteWindowsHost } from '../lib/host/windows-remote-host.js';
+import { windowsOps } from '../lib/host/windows-ops.js';
 import {
   connectorEnvironment,
-  runWindowsConnector,
-  windowsConnectorInstalled,
   windowsConnectorPaths,
   type WindowsConnectorRunner,
 } from '../lib/installation/windows-connector.js';
+import { remoteWindows } from '../lib/transport/host-platform.js';
 import { isLocalWindows, LocalTransport } from '../lib/transport/local.js';
 import { SshTransport } from '../lib/transport/ssh.js';
 import { clientHome, hostPaths } from '../lib/paths.js';
@@ -153,13 +154,16 @@ export async function runRemote(
     const localWindows = isLocalWindows(transport);
     const home = windows.home ?? clientHome();
     const base = `${hostPaths.current}/bin/node ${hostPaths.current}/daemon/connector.mjs`;
-    // Windows has no shell for the fixed commands: the installed node.exe runs the connector.
+    // A Windows host (this machine or an SSH one) has no shell for the fixed
+    // commands: its installed node.exe runs the connector.
+    const hostOps = windowsOps(transport, {
+      home: () => home,
+      ...(windows.run ? { run: windows.run } : {}),
+    });
     const connector = (flag: string, opts: { stdin?: string; timeoutMs?: number }) =>
-      localWindows
-        ? (windows.run ?? runWindowsConnector)(home, [flag], opts)
-        : transport.exec(`${base} ${flag}`, opts);
-    const installed = localWindows
-      ? windowsConnectorInstalled(home)
+      hostOps ? hostOps.connector([flag], opts) : transport.exec(`${base} ${flag}`, opts);
+    const installed = hostOps
+      ? (await hostOps.connectorInstalled()).installed
       : (await transport.exec(`test -f ${hostPaths.current}/daemon/connector.mjs`)).code === 0;
     if (!installed)
       throw new CliError(
@@ -175,7 +179,10 @@ export async function runRemote(
       );
     if (command.action === 'run') {
       if (localWindows) return await runWindowsConnectorForeground(home);
-      const result = await transport.exec(base, { onStdout: (text) => process.stdout.write(text) });
+      const write = (text: string) => process.stdout.write(text);
+      const ssh = remoteWindows(transport);
+      if (ssh) return await remoteWindowsHost(ssh).connectorForeground(write);
+      const result = await transport.exec(base, { onStdout: write });
       return result.code;
     }
     if (command.action === 'reset') {
@@ -207,7 +214,7 @@ export async function runRemote(
             : { profile: command.profile, request: payload },
         ) + '\n',
       // A Windows enable may start the home's supervisor first.
-      timeoutMs: localWindows && command.action === 'enable' ? 120_000 : 30_000,
+      timeoutMs: hostOps && command.action === 'enable' ? 120_000 : 30_000,
     });
     if (result.code !== 0)
       throw new CliError('bad_arguments', result.stderr.trim() || 'Remote operation failed');

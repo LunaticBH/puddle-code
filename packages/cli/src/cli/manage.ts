@@ -29,6 +29,7 @@ import { latestReleaseVersion } from '../lib/installation/releases.js';
 import { removeDaemon, sweepDirtyWorktrees } from '../lib/installation/remove-daemon.js';
 import { checkCockpit, readCockpitRecord, removeCockpitRecord } from '../lib/registry.js';
 import { openTunnel } from '../lib/transport/tunnel.js';
+import { isWindowsHost } from '../lib/transport/host-platform.js';
 import { LocalTransport } from '../lib/transport/local.js';
 import { SshTransport } from '../lib/transport/ssh.js';
 import type { Transport } from '../lib/transport/transport.js';
@@ -55,6 +56,11 @@ function assertLocal(what: Component, host: string | undefined, verb: string): v
     `puddle ${verb} ${what} runs on the machine it ${verb}s`,
     `ssh into ${host} and run it there — user@host targets the daemon only`,
   );
+}
+
+/** How messages name the target's Puddle home. */
+function homeName(transport: Transport): string {
+  return isWindowsHost(transport) ? '%USERPROFILE%\\.puddle' : '~/.puddle';
 }
 
 async function openTransport(host: string | undefined): Promise<Transport> {
@@ -460,7 +466,7 @@ async function removeDaemonCmd(
     if (installed === null) {
       logger.info(
         `no bootstrap-managed daemon on ${transport.label} — nothing to remove` +
-          ` (its data, if any, stays under ~/.puddle)`,
+          ` (its data, if any, stays under ${homeName(transport)})`,
       );
       return 0;
     }
@@ -515,7 +521,7 @@ async function removeDaemonCmd(
     let purge = cmd.purge;
     if (!purge && !cmd.yes) {
       purge = await confirm(
-        `Also delete ~/.puddle on ${transport.label} — profiles, session history, agent ` +
+        `Also delete ${homeName(transport)} on ${transport.label} — profiles, session history, agent ` +
           `credentials, and WORKTREES?`,
       );
     }
@@ -529,7 +535,7 @@ async function removeDaemonCmd(
           : await confirm('Delete them anyway?');
         if (!anyway) {
           purge = false;
-          logger.info('keeping ~/.puddle — only the install is removed');
+          logger.info(`keeping ${homeName(transport)} — only the install is removed`);
         }
       }
     }
@@ -549,7 +555,7 @@ async function removeDaemonCmd(
     await removeDaemon(transport, { purge, logger });
     logger.info(
       purge
-        ? `puddled removed from ${transport.label}; ~/.puddle deleted`
+        ? `puddled removed from ${transport.label}; ${homeName(transport)} deleted`
         : `puddled removed from ${transport.label}; data kept — \`puddle launch\` reinstalls and resumes`,
     );
     return 0;
