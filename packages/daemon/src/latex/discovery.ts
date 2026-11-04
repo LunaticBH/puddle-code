@@ -111,10 +111,13 @@ function candidateDirectories(
 
 /**
  * Windows: PATH (unquoted; relative and unexpanded `%VAR%` entries dropped),
- * the TeX variables, then MiKTeX per user and for all users, TeX Live and
- * TinyTeX (whose `bin\windows`, `win32` or `win64` architecture directory is
- * found by listing), Tectonic from cargo or scoop, and Strawberry Perl, which
- * MiKTeX's latexmk needs on its PATH.
+ * the TeX variables, then MiKTeX per user and for all users, TeX Live in the
+ * user profile and TinyTeX (whose `bin\windows`, `win32` or `win64`
+ * architecture directory is found by listing), and Tectonic from cargo or
+ * scoop. Folders any local account may create at the system drive's root are
+ * never searched, since another user could plant a TeX engine or the Perl
+ * that MiKTeX's latexmk runs on there: TeX Live's default `C:\texlive` and
+ * Strawberry Perl are found through PATH, where their installers put them.
  */
 function windowsCandidateDirectories(env: NodeJS.ProcessEnv, home: string): string[] {
   const variable = (name: string) => getEnv(env, name, 'win32');
@@ -127,20 +130,16 @@ function windowsCandidateDirectories(env: NodeJS.ProcessEnv, home: string): stri
 
   const localAppData = variable('LOCALAPPDATA');
   const programFiles = variable('ProgramFiles');
-  const systemDrive = variable('SystemDrive');
-  const driveRoot = systemDrive ? `${systemDrive.replace(/[\\/]+$/, '')}${sep}` : undefined;
   if (localAppData) add(join(localAppData, 'Programs', 'MiKTeX', 'miktex', 'bin', 'x64'));
   if (programFiles) {
     add(join(programFiles, 'MiKTeX', 'miktex', 'bin', 'x64'));
     add(join(programFiles, 'MiKTeX 2.9', 'miktex', 'bin', 'x64'));
   }
-  if (driveRoot) addVersionedTeXLiveDirs(dirs, join(driveRoot, 'texlive'), 'win32');
   addVersionedTeXLiveDirs(dirs, join(home, 'texlive'), 'win32');
   const appData = variable('APPDATA');
   if (appData) addArchitectureDirs(dirs, join(appData, 'TinyTeX', 'bin'), 'win32');
   add(join(home, '.cargo', 'bin'));
   add(join(home, 'scoop', 'shims'));
-  if (driveRoot) add(join(driveRoot, 'Strawberry', 'perl', 'bin'));
   return [...dirs];
 }
 

@@ -289,6 +289,30 @@ describe('code tool discovery and process bounds', () => {
     expect(dirs).not.toContain('/usr/bin');
   });
 
+  it('never searches Windows folders another local account could create', () => {
+    const home = directory();
+    const drive = directory();
+    const programData = directory();
+    const planted = [
+      join(drive, 'Python399'),
+      join(drive, 'msys64', 'ucrt64', 'bin'),
+      join(drive, 'Strawberry', 'perl', 'bin'),
+      join(drive, 'Ruby33-x64', 'bin'),
+      join(programData, 'chocolatey', 'bin'),
+    ];
+    for (const dir of planted) mkdirSync(dir, { recursive: true });
+    writeFileSync(join(drive, 'Python399', 'python.exe'), '');
+    writeFileSync(join(drive, 'msys64', 'ucrt64', 'bin', 'gcc.exe'), '');
+    const env = { SystemDrive: drive, ProgramData: programData };
+    const dirs = codeSearchDirectories(env, home, 'win32');
+    expect(dirs.filter((dir) => dir.startsWith(drive) || dir.startsWith(programData))).toEqual([]);
+    expect(findCodeExecutable(['python'], dirs, 'win32')).toBeNull();
+    expect(findCodeExecutable(['gcc'], dirs, 'win32')).toBeNull();
+    // An installation the user put on PATH is still found.
+    const msys = join(drive, 'msys64', 'ucrt64', 'bin');
+    expect(codeSearchDirectories({ ...env, Path: msys }, home, 'win32')[0]).toBe(msys);
+  });
+
   it('chooses Windows executable names and an .exe managed binary on Windows', () => {
     expect(recipeExecutables(recipe('python'), 'win32')).toEqual(['python', 'py', 'python3']);
     expect(recipeExecutables(recipe('c'), 'win32')).not.toContain('cc');

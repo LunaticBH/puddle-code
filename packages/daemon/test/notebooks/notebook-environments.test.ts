@@ -107,6 +107,41 @@ it('resolves Windows venvs, Conda prefixes and home paths in the Windows layout'
   await expect(environments.resolvePython('$(touch wrong)', f.root)).rejects.toThrow();
 });
 
+it('never probes interpreters in Windows folders another local account could create', async () => {
+  const f = fixture('win32');
+  const drive = join(f.root, 'drive');
+  const programData = join(f.root, 'ProgramData');
+  const planted = [
+    join(programData, 'miniconda3', 'python.exe'),
+    join(programData, 'anaconda3', 'envs', 'x', 'python.exe'),
+    join(drive, 'Python399', 'python.exe'),
+  ];
+  for (const path of planted) {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, '');
+  }
+  const home = join(f.root, 'home');
+  mkdirSync(join(f.root, 'project'));
+  mkdirSync(home);
+  const runner = vi.fn(async (_command: CompilationCommand) => ({
+    exitCode: 0,
+    stdout: '{"ipykernel":false,"nbconvert":false}',
+    stderr: '',
+  }));
+  const environments = new NotebookEnvironments(
+    home,
+    { PATH: '', ProgramData: programData, SystemDrive: drive },
+    runner,
+    'win32',
+  );
+  const discovered = await environments.discover(
+    join(f.root, 'project', 'new.ipynb'),
+    join(f.root, 'project'),
+  );
+  expect(runner.mock.calls.map(([command]) => command.file)).toEqual([]);
+  expect(discovered).toEqual([]);
+});
+
 it('lists the interpreters the Windows py launcher reports', () => {
   expect(
     launcherInterpreters(

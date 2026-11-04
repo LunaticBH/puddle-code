@@ -65,8 +65,13 @@ export class NotebookEnvironments {
         '.local/share/mamba',
         '.local/share/micromamba',
       ].map((name) => join(this.home, name)),
+      // Windows has no root-owned equivalent of /opt: any local account may
+      // create %ProgramData%\miniconda3 and plant the python.exe this probe
+      // would run. An all-user Conda install is found when it registers with
+      // the py launcher (PEP 514), and a user's own environments through
+      // ~\.conda\environments.txt.
       ...(this.platform === 'win32'
-        ? this.windowsPrefixes()
+        ? []
         : [
             '/opt/conda',
             '/opt/miniconda3',
@@ -233,13 +238,6 @@ export class NotebookEnvironments {
 
   private variable(name: string): string | undefined {
     return getEnv(this.env, name, this.platform);
-  }
-
-  /** All-user Conda installations, which Windows installers place under ProgramData. */
-  private windowsPrefixes(): string[] {
-    const programData = this.variable('ProgramData');
-    if (!programData) return [];
-    return ['miniconda3', 'anaconda3', 'miniforge3'].map((name) => join(programData, name));
   }
 
   /**
