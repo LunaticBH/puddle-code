@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import {
   chmodSync,
@@ -17,11 +16,18 @@ import {
   type Stats,
 } from 'node:fs';
 import { connect, createServer, type Server, type Socket } from 'node:net';
-import { dirname, join, resolve } from 'node:path';
+import { homedir } from 'node:os';
+import { dirname, join, resolve, win32 } from 'node:path';
 import { CONTROL_MAX_BYTES } from '../api/connection/connection-auth.js';
 import { normaliseHostPath } from '../host-path.js';
-import { system32Path } from './environment.js';
 import { renameWithRetrySync } from './rename.js';
+import {
+  currentWindowsUserSid,
+  foreignPrincipals,
+  readWindowsAcl,
+  restrictWindowsDirectory,
+  windowsAclProblem,
+} from './windows-acl.js';
 
 export const digest = (value: string): string => createHash('sha256').update(value).digest('hex');
 export const secret = (prefix = ''): string => prefix + randomBytes(32).toString('hex');
@@ -83,11 +89,17 @@ export function initialisePrivateHome(home: string): void {
 }
 
 /**
- * Windows has no mode bits: the profile's inherited ACL is owner-only, and
- * a home this call creates additionally receives a protected DACL for the
- * owner, SYSTEM and Administrators (docs/windows.md, decision 2). Reparse
- * points are refused as the POSIX symlink rule refuses symlinks; Node
- * reports junctions as symbolic links.
+ * Windows has no mode bits. A home this call creates receives a protected
+ * DACL for the owner, SYSTEM and Administrators (docs/windows.md, decision
+ * 2; best effort, warned on failure). Inside the user's profile, whose
+ * inherited ACL is owner-only, no other account can have created or opened
+ * an existing home. Anywhere else (a `PUDDLE_HOME` such as `D:\puddle`) an
+ * existing home is checked once per process, as the POSIX branch checks
+ * one: another account's is refused, and one shared with other principals,
+ * typically through a drive root's inherited ACL, receives the protected
+ * DACL or is refused when it cannot. Reparse points are refused as the
+ * POSIX symlink rule refuses symlinks; Node reports junctions as symbolic
+ * links.
  */
 function initialiseWindowsHome(path: string): void {
   let existing: Stats | null = null;
@@ -101,28 +113,23 @@ function initialiseWindowsHome(path: string): void {
   }
   mkdirSync(path, { recursive: true, mode: 0o700 });
   privatePath(path, true);
-  if (!existing) restrictWindowsDirectory(path);
+  if (!existing) restrictNewWindowsHome(path);
+  // ipcPath runs this for every pipe name: PowerShell runs once per home.
+  const identity = realpathSync.native(path).toLowerCase();
+  if (verifiedWindowsHomes.has(identity)) return;
+  if (!insideWindowsProfile(identity)) assertPrivateWindowsHome(path);
+  verifiedWindowsHomes.add(identity);
 }
 
+const verifiedWindowsHomes = new Set<string>();
 let windowsUserSid: string | undefined;
 let windowsAclWarned = false;
 
 /** Best effort: a failure is reported once as a process warning and never thrown. */
-function restrictWindowsDirectory(path: string): void {
+function restrictNewWindowsHome(path: string): void {
   try {
     windowsUserSid ??= currentWindowsUserSid();
-    execFileSync(
-      system32Path('icacls.exe'),
-      [
-        path,
-        '/inheritance:r',
-        '/grant:r',
-        `*${windowsUserSid}:(OI)(CI)F`,
-        '*S-1-5-18:(OI)(CI)F',
-        '*S-1-5-32-544:(OI)(CI)F',
-      ],
-      { windowsHide: true, timeout: 10_000, stdio: 'ignore' },
-    );
+    restrictWindowsDirectory(path, windowsUserSid);
   } catch (err) {
     if (windowsAclWarned) return;
     windowsAclWarned = true;
@@ -134,17 +141,38 @@ function restrictWindowsDirectory(path: string): void {
   }
 }
 
-function currentWindowsUserSid(): string {
-  const output = execFileSync(system32Path('whoami.exe'), ['/user', '/fo', 'csv', '/nh'], {
-    windowsHide: true,
-    timeout: 10_000,
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'ignore'],
-  });
-  // `"host\user","S-1-5-21-…"`
-  const sid = /"(S-1-\d+(?:-\d+)+)"\s*$/.exec(output.trim())?.[1];
-  if (!sid) throw new Error('whoami did not report a user SID');
-  return sid;
+/** `home` is the lower-cased real path. */
+function insideWindowsProfile(home: string): boolean {
+  let profile: string;
+  try {
+    profile = realpathSync.native(homedir()).toLowerCase();
+  } catch {
+    return false;
+  }
+  const relative = win32.relative(profile, home);
+  return relative !== '' && !relative.startsWith('..') && !win32.isAbsolute(relative);
+}
+
+/** Never adopt a home another account owns or can open. */
+function assertPrivateWindowsHome(path: string): void {
+  const refusal = `Puddle home must be owned by the current user and not shared with other users: ${path}`;
+  let problem: ReturnType<typeof windowsAclProblem>;
+  try {
+    windowsUserSid ??= currentWindowsUserSid();
+    const acl = readWindowsAcl(path);
+    problem = windowsAclProblem(acl, windowsUserSid);
+    if (problem === 'shared') {
+      restrictWindowsDirectory(path, windowsUserSid, foreignPrincipals(acl, windowsUserSid));
+      problem = windowsAclProblem(readWindowsAcl(path), windowsUserSid);
+    }
+  } catch (err) {
+    throw new Error(
+      `Could not check the permissions of the Puddle home (${(err as Error).message}); ` +
+        `a home inside your user profile needs no check: ${path}`,
+      { cause: err },
+    );
+  }
+  if (problem !== null) throw new Error(refusal);
 }
 
 export function atomicPrivateJson(path: string, value: unknown): void {

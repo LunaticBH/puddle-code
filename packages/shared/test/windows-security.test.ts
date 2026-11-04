@@ -11,7 +11,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   atomicPrivateJson,
   initialisePrivateHome,
@@ -47,12 +47,56 @@ describe.skipIf(process.platform !== 'win32')('Windows Puddle home', () => {
     expect(icacls(join(home, 'file')).match(/\(I\)\(F\)/g)).toHaveLength(3);
   });
 
-  it('leaves the ACL of an existing home alone', () => {
+  it('leaves the ACL of an existing home in the profile alone', () => {
     const { home } = fixture();
     mkdirSync(home);
     const before = icacls(home);
     initialisePrivateHome(home);
     expect(icacls(home)).toBe(before);
+  });
+
+  describe('outside the profile', () => {
+    // tmpdir() is inside the profile, so another folder plays the profile here.
+    const savedProfile = process.env.USERPROFILE;
+    beforeEach(() => {
+      process.env.USERPROFILE = mkdtempSync(join(tmpdir(), 'puddle-other-profile-'));
+      temporary.push(process.env.USERPROFILE);
+    });
+    afterEach(() => {
+      process.env.USERPROFILE = savedProfile;
+    });
+    const grant = (path: string, ...entries: string[]) =>
+      execFileSync(
+        join(process.env.SystemRoot!, 'System32', 'icacls.exe'),
+        [path, '/grant', ...entries],
+        {
+          windowsHide: true,
+        },
+      );
+
+    it('leaves an existing owner-only home alone', () => {
+      const { home } = fixture();
+      mkdirSync(home);
+      const before = icacls(home);
+      initialisePrivateHome(home);
+      expect(icacls(home)).toBe(before);
+    });
+
+    it('gives a home that others can open the protected DACL, inside it too', () => {
+      // As under C:\ or D:\: inherited Authenticated Users Modify, plus an explicit Everyone read.
+      const { parent, home } = fixture();
+      grant(parent, '*S-1-5-11:(OI)(CI)M');
+      mkdirSync(join(home, 'logs'), { recursive: true });
+      writeFileSync(join(home, 'logs', 'cockpit.log'), '');
+      grant(home, '*S-1-1-0:(OI)(CI)R');
+      expect(icacls(home)).toMatch(/\(M\)/);
+      initialisePrivateHome(home);
+      const acl = icacls(home);
+      expect(acl).not.toContain('(I)');
+      expect(acl.match(/\(OI\)\(CI\)\(F\)/g)).toHaveLength(3);
+      expect(acl).not.toMatch(/\((M|R)\)/);
+      expect(icacls(join(home, 'logs', 'cockpit.log')).match(/\(I\)\(F\)/g)).toHaveLength(3);
+    });
   });
 
   it('names the same pipes for every spelling of the home', () => {
