@@ -127,14 +127,20 @@ export async function installWindowsDaemon(opts: WindowsInstallOptions = {}): Pr
   let lock = await acquireInstallLock(home, logger);
   try {
     const runtime = windowsRuntime(home, version);
-    if (existsSync(runtime.dir) && (await smokeTest(runtime, version, home))) {
+    // Development builds share a version: a local archive replaces a tree of
+    // its version that was built before the supervisor.
+    const outdated =
+      local !== undefined && existsSync(runtime.dir) && !shipsSupervisor(runtime.dir);
+    if (existsSync(runtime.dir) && !outdated && (await smokeTest(runtime, version, home))) {
       logger.info(`version ${version} already installed`);
     } else {
       const archive = local ?? (await download(home, version, opts.fetchFn ?? fetch, logger));
       if (local !== undefined) await verifyLocalArchive(local, logger);
       if (existsSync(runtime.dir)) {
         // A broken tree may still be the running daemon's: its files are locked.
-        logger.info(`existing version ${version} failed validation — reinstalling`);
+        logger.info(
+          `existing version ${version} ${outdated ? 'predates the Windows supervisor' : 'failed validation'} — reinstalling`,
+        );
         await stopWindowsDaemon(home, { logger });
         rmSync(runtime.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
       }

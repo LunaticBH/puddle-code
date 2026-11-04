@@ -158,8 +158,9 @@ const install = (opts: Parameters<typeof installWindowsDaemon>[0]) =>
  * `dir`: this machine's node.exe as the runtime and, as the daemon, a fixture
  * that runs the built daemon. PUDDLE_FIXTURE_VERSION_DELAY_MS slows its
  * `--version`, PUDDLE_FIXTURE_START_DELAY_MS the start before it binds.
+ * Without `supervised`, it is a release from before the Windows supervisor.
  */
-function releaseZip(dir: string, version: string): string {
+function releaseZip(dir: string, version: string, supervised = true): string {
   const tree = join(dir, `stage-${version}`, `puddled-v${version}`);
   mkdirSync(join(tree, 'bin'), { recursive: true });
   mkdirSync(join(tree, 'daemon'), { recursive: true });
@@ -184,10 +185,12 @@ function releaseZip(dir: string, version: string): string {
       '',
     ].join('\n'),
   );
-  writeFileSync(
-    join(tree, 'daemon', 'supervisor.mjs'),
-    `await import(${JSON.stringify(pathToFileURL(supervisorDist).href)});\n`,
-  );
+  if (supervised) {
+    writeFileSync(
+      join(tree, 'daemon', 'supervisor.mjs'),
+      `await import(${JSON.stringify(pathToFileURL(supervisorDist).href)});\n`,
+    );
+  }
   writeFileSync(
     join(tree, 'daemon', 'connector.mjs'),
     `await import(${JSON.stringify(pathToFileURL(connectorDist).href)});\n`,
@@ -298,6 +301,32 @@ describe.runIf(
     expect(await controlPipePresent(home)).toBe(false);
     expect((await supervisorRequest(home, 'status')).kind).toBe('absent');
     expect(existsSync(join(home, 'puddled.pid'))).toBe(false);
+  }, 180_000);
+
+  it('runs a release from before the supervisor detached, until an archive replaces it', async () => {
+    const at = freshHome();
+    const legacyDir = join(root, 'legacy');
+    mkdirSync(legacyDir, { recursive: true });
+    const legacy = releaseZip(legacyDir, '1.2.3', false);
+    const scheduler = taskScheduler(true);
+    await installWindowsDaemon({ home: at, tarball: legacy, supervision: scheduler.supervision });
+    expect(readFileSync(join(at, 'supervisor'), 'utf8')).toBe('detached\n');
+    // No task names a supervisor this release does not ship.
+    expect(scheduler.calls.filter((env) => 'PUDDLE_TASK_XML' in env)).toEqual([]);
+    (await waitForStartedDaemon(new LocalTransport(), 60_000)).authority.close();
+    expect((await supervisorRequest(at, 'status')).kind).toBe('absent');
+
+    const { lines, ...log } = logger();
+    await install({ home: at, tarball: zip, logger: log });
+    expect(lines).toContain(
+      'existing version 1.2.3 predates the Windows supervisor — reinstalling',
+    );
+    (await waitForStartedDaemon(new LocalTransport(), 60_000)).authority.close();
+    expect(await supervisorRequest(at, 'status')).toMatchObject({
+      kind: 'answered',
+      state: { daemon: pid(at) },
+    });
+    await stopWindowsDaemon(at);
   }, 180_000);
 
   it('registers the logon task, and restarts a daemon that crashes', async () => {
