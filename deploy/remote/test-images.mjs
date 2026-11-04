@@ -116,7 +116,20 @@ try {
   assert.ok(script.body.includes('Standalone CLI installer'));
   assert.ok(!script.body.includes('@@REPO@@'));
   execFileSync('sh', ['-n'], { input: script.body });
-  for (const name of ['install-cli.sh', 'install-daemon.sh', 'install-missing.sh']) {
+  // `irm …/install.ps1 | iex` must receive the script itself, never the SPA.
+  const windowsScript = await get(`${app.base}/install.ps1`);
+  assert.equal(windowsScript.status, 200);
+  assert.match(windowsScript.headers['content-type'], /^text\/plain/);
+  assert.equal(windowsScript.headers['cache-control'], 'no-store');
+  assert.ok(windowsScript.body.startsWith('# Standalone CLI installer for Windows'));
+  assert.ok(!windowsScript.body.includes('@@REPO@@'));
+  for (const name of [
+    'install-cli.sh',
+    'install-daemon.sh',
+    'install-missing.sh',
+    'install-cli.ps1',
+    'install-missing.ps1',
+  ]) {
     assert.equal((await get(`${app.base}/${name}`)).status, 404);
   }
   const assets = docker('exec', app.id, 'find', '/srv', '-type', 'f').split('\n');
