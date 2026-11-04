@@ -6,12 +6,7 @@ import { SearchAddon, type ISearchOptions } from '@xterm/addon-search';
 import '@xterm/xterm/css/xterm.css';
 import { HOME_STREAM, type SessionStatus } from '@puddle/shared';
 import { useClientSettings } from '../../lib/settings/client-settings';
-import {
-  actionForBinding,
-  eventBinding,
-  getHotkeyAction,
-  getHotkeyHandler,
-} from '../../lib/navigation/hotkeys';
+import { eventBinding, terminalAppShortcut } from '../../lib/navigation/hotkeys';
 import { daemonAnswersColourQueries } from '../../lib/transport/protocol-support';
 import { useDaemonVersion, useHostPathStyle, useProfileSettings } from '../../lib/queries/queries';
 import { useCurrentProfileId } from '../profile/profile-store';
@@ -494,21 +489,15 @@ export function Terminal({
       // WITHOUT preventDefault makes xterm skip the key entirely, so the
       // event bubbles to the window dispatcher (HotkeysHost) that runs the
       // action. Actions the registry marks terminal-owned (`deferInTerminal`,
-      // e.g. ⌃A/⌃`) or editor-bound stay with the terminal, exactly as the
-      // dispatcher itself would yield them.
-      if (e.type === 'keydown' && appShortcutsRef.current) {
-        const binding = eventBinding(e);
-        const id = binding !== null ? actionForBinding(binding) : undefined;
-        const action = id !== undefined ? getHotkeyAction(id) : undefined;
-        if (
-          id !== undefined &&
-          action !== undefined &&
-          !action.editor &&
-          !action.deferInTerminal &&
-          getHotkeyHandler(id) !== undefined
-        ) {
-          return false;
-        }
+      // e.g. ⌃A/⌃`), editor-bound ones and, on a Windows client, plain
+      // Ctrl+letter chords (`terminalKeepsChord`) stay with the terminal,
+      // exactly as the dispatcher itself would yield them.
+      if (
+        e.type === 'keydown' &&
+        appShortcutsRef.current &&
+        terminalAppShortcut(eventBinding(e)) !== undefined
+      ) {
+        return false;
       }
       if (!IS_MAC) return true;
       const seq = macLineEditSequence(e);

@@ -6,8 +6,12 @@ import {
   formatPrimaryShortcut,
   hotkeyNeedsCapture,
   HOTKEY_ACTIONS,
+  registerHotkey,
   setHotkeyOverrides,
   shellDefaultBinding,
+  terminalAppShortcut,
+  terminalKeepsChord,
+  yieldsToTerminal,
 } from '../../../src/lib/navigation/hotkeys';
 
 const byId = (id: string) => HOTKEY_ACTIONS.find((a) => a.id === id)!;
@@ -129,7 +133,7 @@ describe('capture-phase ownership', () => {
   });
 });
 
-describe('Windows and Linux clients', () => {
+describe('Windows clients', () => {
   it('moves every default written for ⌘ onto Ctrl on Windows, in canonical order', () => {
     expect(shellDefaultBinding(byId('palette.toggle'), false, 'windows')).toBe('ctrl+KeyK');
     expect(shellDefaultBinding(byId('editor.save'), false, 'windows')).toBe('ctrl+KeyS');
@@ -161,42 +165,141 @@ describe('Windows and Linux clients', () => {
     }
   });
 
-  it('spells bindings out off a Mac', () => {
+  it('spells bindings out on Windows', () => {
     expect(formatBinding('ctrl+alt+KeyW', 'windows')).toBe('Ctrl+Alt+W');
     expect(formatBinding('ctrl+shift+KeyT', 'windows')).toBe('Ctrl+Shift+T');
     expect(formatBinding('meta+KeyK', 'windows')).toBe('Win+K');
-    expect(formatBinding('meta+KeyK', 'other')).toBe('Super+K');
-    expect(formatBinding('ctrl+Backquote', 'other')).toBe('Ctrl+`');
+    expect(formatBinding('ctrl+Backquote', 'windows')).toBe('Ctrl+`');
     expect(formatBinding('ctrl+Tab', 'windows')).toBe('Ctrl+Tab');
     expect(formatBinding('alt+Space', 'windows')).toBe('Alt+Space');
-    expect(formatBinding('ctrl+Enter', 'other')).toBe('Ctrl+Enter');
+    expect(formatBinding('ctrl+Enter', 'windows')).toBe('Ctrl+Enter');
     expect(formatBinding('', 'windows')).toBe('—');
-    // A Mac keeps its glyphs.
-    expect(formatBinding('ctrl+alt+KeyW', 'mac')).toBe('⌃⌥W');
-    expect(formatBinding('shift+meta+KeyT', 'mac')).toBe('⇧⌘T');
   });
 
-  it('labels fixed ⌘ shortcuts with Ctrl off a Mac', () => {
-    expect(formatPrimaryShortcut('meta+KeyX', 'mac')).toBe('⌘X');
-    expect(formatPrimaryShortcut('alt+shift+meta+KeyC', 'mac')).toBe('⌥⇧⌘C');
+  it('keeps the glyph labels on Mac and Linux clients', () => {
+    for (const client of ['mac', 'other'] as const) {
+      expect(formatBinding('ctrl+alt+KeyW', client)).toBe('⌃⌥W');
+      expect(formatBinding('shift+meta+KeyT', client)).toBe('⇧⌘T');
+      expect(formatBinding('meta+KeyK', client)).toBe('⌘K');
+      expect(formatBinding('ctrl+Tab', client)).toBe('⌃⇥');
+      expect(formatBinding('alt+Space', client)).toBe('⌥␣');
+      expect(formatBinding('', client)).toBe('—');
+    }
+  });
+
+  it('labels fixed ⌘ shortcuts with Ctrl on Windows only', () => {
     expect(formatPrimaryShortcut('meta+KeyX', 'windows')).toBe('Ctrl+X');
-    expect(formatPrimaryShortcut('alt+meta+KeyC', 'other')).toBe('Ctrl+Alt+C');
+    expect(formatPrimaryShortcut('alt+meta+KeyC', 'windows')).toBe('Ctrl+Alt+C');
     expect(formatPrimaryShortcut('alt+shift+meta+KeyC', 'windows')).toBe('Ctrl+Alt+Shift+C');
+    // The explorer's historical labels, unchanged on Mac and Linux.
+    for (const client of ['mac', 'other'] as const) {
+      expect(formatPrimaryShortcut('meta+KeyX', client)).toBe('⌘X');
+      expect(formatPrimaryShortcut('alt+meta+KeyC', client)).toBe('⌥⌘C');
+      expect(formatPrimaryShortcut('alt+shift+meta+KeyC', client)).toBe('⌥⇧⌘C');
+    }
   });
 
-  it('never fires a shortcut for an AltGr character off a Mac', () => {
+  it('never fires a shortcut for an AltGr character on Windows', () => {
     // Windows reports AltGr as Ctrl+Alt: AltGr+E types € on a German layout.
     const altGr = keydown('KeyE', { ctrl: true, alt: true, altGraph: true });
     expect(eventBinding(altGr, 'windows')).toBeNull();
-    expect(eventBinding(altGr, 'other')).toBeNull();
     // A real Ctrl+Alt+E is still a shortcut.
     expect(eventBinding(keydown('KeyE', { ctrl: true, alt: true }), 'windows')).toBe(
       'ctrl+alt+KeyE',
     );
   });
 
-  it('leaves Mac key handling unchanged', () => {
+  it('leaves Mac and Linux key handling unchanged', () => {
     const option = keydown('KeyE', { alt: true, meta: true, altGraph: true });
     expect(eventBinding(option, 'mac')).toBe('alt+meta+KeyE');
+    const linuxAltGr = keydown('KeyE', { ctrl: true, alt: true, altGraph: true });
+    expect(eventBinding(linuxAltGr, 'other')).toBe('ctrl+alt+KeyE');
+  });
+});
+
+describe('plain Ctrl+letter in a Windows terminal', () => {
+  it('keeps exactly the plain Ctrl+letter chords for the terminal', () => {
+    for (const code of ['KeyA', 'KeyB', 'KeyK', 'KeyN', 'KeyR', 'KeyS', 'KeyT', 'KeyW']) {
+      expect(terminalKeepsChord(`ctrl+${code}`, 'windows'), code).toBe(true);
+    }
+    // Shift or Alt makes it an app chord again; so does any key but a letter.
+    expect(terminalKeepsChord('ctrl+shift+KeyT', 'windows')).toBe(false);
+    expect(terminalKeepsChord('ctrl+alt+KeyE', 'windows')).toBe(false);
+    expect(terminalKeepsChord('ctrl+Tab', 'windows')).toBe(false);
+    expect(terminalKeepsChord('ctrl+Backquote', 'windows')).toBe(false);
+    expect(terminalKeepsChord('ctrl+Digit1', 'windows')).toBe(false);
+    expect(terminalKeepsChord('ctrl+meta+KeyK', 'windows')).toBe(false);
+  });
+
+  it('never applies on Mac or Linux clients', () => {
+    for (const client of ['mac', 'other'] as const) {
+      expect(terminalKeepsChord('ctrl+KeyK', client)).toBe(false);
+      expect(terminalKeepsChord('ctrl+KeyW', client)).toBe(false);
+      expect(yieldsToTerminal(byId('palette.toggle'), 'ctrl+KeyK', client)).toBe(false);
+    }
+  });
+
+  it('still yields actions the registry marks terminal-owned', () => {
+    const owned = { ...byId('session.newTerminal'), deferInTerminal: true };
+    for (const client of ['mac', 'other', 'windows'] as const) {
+      expect(yieldsToTerminal(owned, 'ctrl+Backquote', client)).toBe(true);
+    }
+  });
+
+  it('sends Ctrl+letter shortcuts to the terminal and Ctrl+Shift or Ctrl+Alt ones to the app', () => {
+    // The desktop shell's Windows defaults, as a Windows window merges them.
+    setHotkeyOverrides(
+      Object.fromEntries(
+        HOTKEY_ACTIONS.map((a) => [a.id, shellDefaultBinding(a, true, 'windows')]),
+      ),
+    );
+    const ids = [
+      'palette.toggle',
+      'tab.close',
+      'tab.reopen',
+      'tab.next',
+      'sidebar.left',
+      'nav.files',
+    ];
+    const unregister = ids.map((id) => registerHotkey(id, () => undefined));
+    const chord = (code: string, mods: Parameters<typeof keydown>[1]) =>
+      terminalAppShortcut(eventBinding(keydown(code, mods), 'windows'), 'windows');
+    try {
+      // Ctrl+K (kill line), Ctrl+W (rub out a word), Ctrl+B: the terminal's.
+      expect(chord('KeyK', { ctrl: true })).toBeUndefined();
+      expect(chord('KeyW', { ctrl: true })).toBeUndefined();
+      expect(chord('KeyB', { ctrl: true })).toBeUndefined();
+      // Ctrl+Shift+T, Ctrl+Alt+E and Ctrl+Tab still reach the app.
+      expect(chord('KeyT', { ctrl: true, shift: true })).toBe('tab.reopen');
+      expect(chord('KeyE', { ctrl: true, alt: true })).toBe('nav.files');
+      expect(chord('Tab', { ctrl: true })).toBe('tab.next');
+    } finally {
+      unregister.forEach((off) => off());
+      setHotkeyOverrides(undefined);
+    }
+  });
+
+  it('keeps the Mac and Linux terminal rule exactly as before', () => {
+    // ⌘K and the desktop ⌃⇥ are app shortcuts over a focused terminal.
+    setHotkeyOverrides({ 'tab.next': shellDefaultBinding(byId('tab.next'), true) });
+    const unregister = ['palette.toggle', 'tab.next'].map((id) =>
+      registerHotkey(id, () => undefined),
+    );
+    try {
+      for (const client of ['mac', 'other'] as const) {
+        expect(terminalAppShortcut('meta+KeyK', client)).toBe('palette.toggle');
+        expect(terminalAppShortcut('ctrl+Tab', client)).toBe('tab.next');
+        // A chord no action holds, an editor action, or no key at all: the terminal's.
+        expect(terminalAppShortcut('ctrl+KeyK', client)).toBeUndefined();
+        expect(terminalAppShortcut('meta+KeyS', client)).toBeUndefined();
+        expect(terminalAppShortcut(null, client)).toBeUndefined();
+      }
+      // An action with no live handler leaves the key to the terminal too.
+      unregister[0]!();
+      expect(terminalAppShortcut('meta+KeyK', 'mac')).toBeUndefined();
+    } finally {
+      unregister.forEach((off) => off());
+      setHotkeyOverrides(undefined);
+    }
   });
 });

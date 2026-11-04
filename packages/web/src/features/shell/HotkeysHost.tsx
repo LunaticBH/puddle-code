@@ -8,11 +8,16 @@ import {
   hotkeyNeedsCapture,
   registerHotkey,
   setHotkeyOverrides,
+  terminalKeepsChord,
+  yieldsToTerminal,
 } from '../../lib/navigation/hotkeys';
 import { useProfileSettings } from '../../lib/queries/queries';
 import { useCurrentProfileId } from '../profile/profile-store';
 
-/** A focused terminal owns its keys — the dispatcher yields ⌃A/⌃` etc. to it. */
+/**
+ * A focused terminal owns its keys — the dispatcher yields ⌃A/⌃` etc. to it,
+ * and on a Windows client every plain Ctrl+letter (`yieldsToTerminal`).
+ */
 function terminalFocused(): boolean {
   const el = document.activeElement;
   return el instanceof Element && el.closest('.xterm') !== null;
@@ -77,6 +82,8 @@ export function HotkeysHost() {
       if (!id) return;
       const action = getHotkeyAction(id);
       if (!action || !hotkeyNeedsCapture(action, monacoFocused())) return;
+      // Save is captured everywhere, but a Windows client's terminal keeps Ctrl+S.
+      if (terminalKeepsChord(binding) && terminalFocused()) return;
       const handler = getHotkeyHandler(id);
       if (!handler) return;
       e.preventDefault();
@@ -91,7 +98,7 @@ export function HotkeysHost() {
       const action = getHotkeyAction(id);
       if (!action) return;
       if (action.editor && monacoFocused()) return; // the caret's editor owns them
-      if (action.deferInTerminal && terminalFocused()) return;
+      if (yieldsToTerminal(action, binding) && terminalFocused()) return;
       const handler = getHotkeyHandler(id);
       if (!handler) return;
       e.preventDefault();

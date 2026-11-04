@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { RotateCcw } from 'lucide-react';
+import { CLIENT_PLATFORM } from '../../../lib/client-platform';
 import { toastError } from '../../../lib/transport/errors';
 import {
   eventBinding,
@@ -13,6 +14,12 @@ import { cn } from '../../../lib/utils';
 import { Switch } from '../../../components/ui/switch';
 import { useCurrentProfileId } from '../../profile/profile-store';
 import { SectionTitle, SettingRow } from '../parts';
+
+// A Windows client's terminal keeps plain Ctrl+letter chords (`terminalKeepsChord`).
+const APP_SHORTCUTS_ON =
+  CLIENT_PLATFORM === 'windows'
+    ? 'The shortcuts below work while a terminal is focused, except plain Ctrl+letter keys, which the terminal keeps.'
+    : 'The shortcuts below work while a terminal is focused.';
 
 /** Capture a keystroke and report its canonical binding (Esc cancels). */
 function KeyRecorder({
@@ -103,13 +110,13 @@ export function HotkeysSection() {
       </p>
       {/* Where the shortcuts apply, beside what they are: with this on, the
           bindings below win over a focused terminal; off, the terminal
-          receives every key it handles. Terminal-owned keys (⌃A, ⌃`) go to
-          the terminal either way. */}
+          receives every key it handles. Terminal-owned keys (⌃A, ⌃`, and
+          plain Ctrl+letter on Windows) go to the terminal either way. */}
       <SettingRow
         label="App shortcuts in terminals"
         description={
           settings.data?.terminalAppShortcuts !== false
-            ? 'The shortcuts below work while a terminal is focused.'
+            ? APP_SHORTCUTS_ON
             : 'A focused terminal receives these keys instead.'
         }
         htmlFor="terminal-app-shortcuts"
