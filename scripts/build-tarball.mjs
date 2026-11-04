@@ -7,6 +7,7 @@
  * just produced correct binaries.
  *
  *   node scripts/build-tarball.mjs [--version X.Y.Z] [--out-dir dist-release] [--stage-only]
+ *                                  [--arch x64|arm64]
  *
  * Tarball tree (~27-34 MB gz; the pinned Node binary is >95% of it):
  *   puddled-v<v>/
@@ -25,6 +26,13 @@
  * bin\node.exe, node-pty's win32 prebuilds (conpty and winpty, no .pdb), and
  * puddled.cmd / puddle-connector.cmd for humans. The CLI and desktop start
  * bin\node.exe on daemon\puddled.mjs directly, never through cmd.exe.
+ * win32-x64 and win32-arm64 are each built natively on their own runner;
+ * every PE file in the tree must match the architecture
+ * (assertWindowsTreeArch), and unsigned ones are Authenticode-signed when
+ * PUDDLE_WINDOWS_SIGNING selects a mode (scripts/lib/windows-sign.mjs).
+ * `--arch` names the architecture; on Windows another one stages from
+ * node-pty's N-API prebuilds and better-sqlite3's prebuild, without the smoke
+ * tests, which only a native build can run, so release builds stay native.
  */
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -46,11 +54,13 @@ import { build } from 'esbuild';
 
 import {
   archiveTool,
+  assertWindowsTreeArch,
   NODE_RUNTIME_VERSION,
   nodeBinary,
   stageNodeRuntime,
 } from './lib/node-runtime.mjs';
 import { smokePuddlang } from './lib/puddlang-smoke.mjs';
+import { signWindowsTree } from './lib/windows-sign.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
@@ -81,7 +91,14 @@ const platform = windows ? 'win32' : process.platform === 'darwin' ? 'darwin' : 
 if (process.platform !== 'darwin' && process.platform !== 'linux' && !windows) {
   fail(`unsupported build platform ${process.platform}: archives target linux, darwin and win32`);
 }
-const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
+const nativeArch = process.arch === 'arm64' ? 'arm64' : 'x64';
+const arch = flag('--arch') ?? nativeArch;
+if (arch !== 'x64' && arch !== 'arm64')
+  fail(`unsupported --arch ${arch}: archives are x64 or arm64`);
+// Native modules are built here on POSIX; Windows can stage another
+// architecture's prebuilds, but cannot run them.
+const crossArch = arch !== nativeArch;
+if (crossArch && !windows) fail(`--arch ${arch} needs a ${platform}-${arch} machine`);
 const target = `${platform}-${arch}`;
 const name = `puddled-v${version}-${target}`;
 const stage = join(outDir, 'stage', `puddled-v${version}`);
@@ -180,7 +197,10 @@ function copyNativePackages() {
   }
   mkdirSync(join(bs3Dest, 'build', 'Release'), { recursive: true });
   cpSync(bs3Node, join(bs3Dest, 'build', 'Release', 'better_sqlite3.node'));
-  if (windows && process.versions.node.split('.')[0] !== NODE_RUNTIME_VERSION.split('.')[0]) {
+  if (
+    windows &&
+    (crossArch || process.versions.node.split('.')[0] !== NODE_RUNTIME_VERSION.split('.')[0])
+  ) {
     stageRuntimeSqlite(bs3, bs3Dest);
   }
 
@@ -200,14 +220,15 @@ function copyNativePackages() {
  * runtime, so pnpm built better-sqlite3 for the wrong ABI. Replace only the
  * staged copy (never pnpm's original: it is a hard link shared with every
  * other checkout) with the pinned runtime's prebuild, fetched by
- * better-sqlite3's own installer as `pnpm install` would. CI builds with the
- * pinned Node major, so it never takes this path.
+ * better-sqlite3's own installer as `pnpm install` would. A cross-architecture
+ * stage fetches the requested architecture's prebuild the same way. CI builds
+ * natively with the pinned Node major, so it never takes this path.
  */
 function stageRuntimeSqlite(bs3, bs3Dest) {
   const installer = createRequire(join(bs3, 'package.json')).resolve('prebuild-install/bin.js');
   log(
-    `better-sqlite3 was built for Node ${process.versions.node}; ` +
-      `staging its prebuild for the Node ${NODE_RUNTIME_VERSION} runtime`,
+    `better-sqlite3 was built for Node ${process.versions.node} (${process.arch}); ` +
+      `staging its prebuild for the Node ${NODE_RUNTIME_VERSION} ${arch} runtime`,
   );
   rmSync(join(bs3Dest, 'build'), { recursive: true, force: true });
   execFileSync(
@@ -224,14 +245,17 @@ function stageRuntimeSqlite(bs3, bs3Dest) {
  * node-pty's Windows post-install always leaves build/Release/conpty/ behind,
  * even when the binaries come from prebuilds, so the directory alone proves
  * nothing: look for the module itself. winpty stays for Windows builds that
- * predate conpty support; debug symbols (most of the 30 MB) never ship.
+ * predate conpty support; debug symbols (most of the 30 MB) never ship. A
+ * local build is this machine's architecture, so another one takes the
+ * prebuilds (N-API, with arm64's conpty.dll and OpenConsole.exe).
  */
 function copyWindowsPty(ptyBuild, ptyPrebuild, ptyDest) {
-  const source = existsSync(join(ptyBuild, 'conpty.node'))
-    ? [ptyBuild, join(ptyDest, 'build', 'Release')]
-    : existsSync(join(ptyPrebuild, 'conpty.node'))
-      ? [ptyPrebuild, join(ptyDest, 'prebuilds', target)]
-      : fail(`node-pty has no conpty.node in build/Release or prebuilds/${target}`);
+  const source =
+    !crossArch && existsSync(join(ptyBuild, 'conpty.node'))
+      ? [ptyBuild, join(ptyDest, 'build', 'Release')]
+      : existsSync(join(ptyPrebuild, 'conpty.node'))
+        ? [ptyPrebuild, join(ptyDest, 'prebuilds', target)]
+        : fail(`node-pty has no conpty.node in build/Release or prebuilds/${target}`);
   copyFiltered(source[0], source[1], (p) => !p.endsWith('.pdb'));
   if (!existsSync(join(source[1], 'conpty', 'conpty.dll'))) {
     fail('node-pty is missing conpty/conpty.dll — run pnpm install here');
@@ -427,7 +451,17 @@ await build({
 copyNativePackages();
 await stageNodeRuntime(repoRoot, stage, target, log);
 writeMetadata();
-smokeTest();
-await smokePuddlang(stage);
-log('puddlang runner smoke test passed');
+if (windows) {
+  // Signed before the smoke test, so it loads the shipped bytes, and before
+  // pack, so the checksum covers them.
+  log(`${assertWindowsTreeArch(stage, arch)} PE files are ${arch}`);
+  await signWindowsTree(stage, log);
+}
+if (crossArch) {
+  log(`staged a cross-architecture ${target} tree: its smoke tests need a ${target} machine`);
+} else {
+  smokeTest();
+  await smokePuddlang(stage);
+  log('puddlang runner smoke test passed');
+}
 if (!stageOnly) pack();
