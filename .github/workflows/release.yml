@@ -173,6 +173,7 @@ jobs:
           # published it (same as the npm CLI build).
           PUDDLE_REPO_SLUG: ${{ github.repository }}
       - name: package (ad-hoc signing without certificate secrets)
+        if: runner.os != 'Windows'
         working-directory: packages/desktop
         shell: bash
         env:
@@ -182,11 +183,7 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            # electron-builder would offer the Apple certificate to Authenticode.
-            unset CSC_LINK CSC_KEY_PASSWORD
-            pnpm exec electron-builder --publish never
-          elif [ "$RUNNER_OS" != "macOS" ]; then
+          if [ "$RUNNER_OS" != "macOS" ]; then
             pnpm exec electron-builder --publish never
           elif [ -n "$CSC_LINK" ]; then
             pnpm exec electron-builder --publish never -c.mac.notarize=true
@@ -199,24 +196,41 @@ jobs:
             # validation. Keep that runtime exclusive to Developer ID builds.
             pnpm exec electron-builder --publish never -c.mac.identity=- -c.mac.hardenedRuntime=false -c.mac.notarize=false
           fi
+      # PowerShell runs the Windows steps, as on a user's machine. No CSC_*
+      # variables: electron-builder would offer the Apple certificate to
+      # Authenticode, and the v1 installer is unsigned.
+      - name: package (Windows, unsigned)
+        if: runner.os == 'Windows'
+        working-directory: packages/desktop
+        shell: pwsh
+        run: pnpm exec electron-builder --publish never
       - name: verify macOS app signature
         if: runner.os == 'macOS'
         working-directory: packages/desktop
         run: codesign --verify --deep --strict --verbose=2 release/mac-arm64/Puddle.app
       - name: checksums
+        if: runner.os != 'Windows'
         working-directory: packages/desktop/release
         shell: bash
-        # Node on Windows: Git Bash's sha256sum marks binary mode with `*`,
-        # which install.ps1 and desktop-update compare against asset names.
         run: |
           for f in *.dmg *.zip *.AppImage *-setup.exe; do
             if [ ! -f "$f" ]; then continue; fi
-            if [ "$RUNNER_OS" = "Windows" ]; then
-              node -e "const f = process.argv[1]; console.log(require('crypto').createHash('sha256').update(require('fs').readFileSync(f)).digest('hex') + '  ' + f)" "$f"
-            else
-              shasum -a 256 "$f"
-            fi
+            shasum -a 256 "$f"
           done > desktop-${{ matrix.target }}.sha256
+      # shasum's `<lowercase sha256>  <name>` lines with LF endings, which
+      # install.ps1 and desktop-update compare against asset names.
+      - name: checksums (Windows)
+        if: runner.os == 'Windows'
+        working-directory: packages/desktop/release
+        shell: pwsh
+        run: |
+          $lines = foreach ($pattern in '*.zip', '*-setup.exe') {
+            foreach ($file in Get-ChildItem -File -Path $pattern) {
+              $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
+              "$hash  $($file.Name)`n"
+            }
+          }
+          [IO.File]::WriteAllText((Join-Path $PWD 'desktop-${{ matrix.target }}.sha256'), -join $lines)
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.target }}
