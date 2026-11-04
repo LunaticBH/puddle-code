@@ -345,6 +345,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
         notebooks,
         latex,
         puddlang,
+        onboarding,
       },
       ws: { gateway, upgradeWebSocket },
     });
