@@ -65,22 +65,25 @@ jobs:
 
   # Native Windows (docs/windows.md): the suite, the daemon and CLI zips with
   # their smoke tests, and install.ps1 end to end, including the user PATH
-  # edit this disposable runner allows. Docker, sshd and the mobile browser
-  # suite stay on Linux. Git Bash runs the steps; the product never needs it.
+  # edit this disposable runner allows. Docker, sshd, the process e2e and
+  # mobile browser suites stay on Linux. PowerShell runs every step, as on a
+  # user's machine, where Git's Unix tools are not on PATH and `bash` may be
+  # WSL's System32 stub: no test or script can come to depend on Git Bash.
   ci-windows:
     runs-on: windows-latest
     defaults:
       run:
-        shell: bash
+        shell: pwsh
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v4 # reads the pinned version from packageManager
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
       - run: node scripts/install-ci.mjs
         env:
+          # The suite never launches Electron - skip its ~100 MB binary download.
           ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
       - run: pnpm typecheck
       - run: pnpm build
@@ -89,16 +92,18 @@ jobs:
           python-version: '3.12'
       - name: install isolated Jupyter test environment
         run: |
-          python -m venv "$RUNNER_TEMP/notebook-python"
-          "$RUNNER_TEMP/notebook-python/Scripts/python.exe" -m pip install nbconvert==7.17.1 nbclient==0.11.0 jupyter-client==8.6.3 ipykernel==7.1.0 ipywidgets==8.1.8
-          echo "$RUNNER_TEMP/notebook-python/Scripts" >> "$GITHUB_PATH"
+          python -m venv "$env:RUNNER_TEMP\notebook-python"
+          & "$env:RUNNER_TEMP\notebook-python\Scripts\python.exe" -m pip install nbconvert==7.17.1 nbclient==0.11.0 jupyter-client==8.6.3 ipykernel==7.1.0 ipywidgets==8.1.8
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Add-Content -Path $env:GITHUB_PATH -Value "$env:RUNNER_TEMP\notebook-python\Scripts"
       - run: pnpm test
       - name: build the daemon zip
         run: pnpm build:tarball
-      - name: build and exercise standalone CLI without system Node or npm
-        run: |
-          pnpm build:cli-tarball
-          node scripts/test-cli-tarball.mjs
+      # Separate steps: pwsh would carry on past a failed native command.
+      - name: build the standalone CLI zip
+        run: pnpm build:cli-tarball
+      - name: exercise standalone CLI without system Node or npm
+        run: node scripts/test-cli-tarball.mjs
 
   # The ordinary build above proves packaging on the current hosted image.
   # This second job exercises the actual release container before a tag: native
