@@ -3,10 +3,14 @@ import { closeSync, openSync, readSync } from 'node:fs';
 import { getEnv, system32Path, type Environment } from './environment.js';
 
 /**
- * Windows architectures (docs/windows.md, decision 5). A release asset's
- * architecture is the OPERATING SYSTEM's, never the process's: Windows 11 on
- * Arm runs an x64 Node or Electron under emulation, and that process must
- * still choose the native arm64 build.
+ * Windows architectures (docs/windows.md, decision 15, "Packaging"). A
+ * release asset's architecture is the OPERATING SYSTEM's, never the
+ * process's: Windows 11 on Arm runs an x64 Node or Electron under emulation,
+ * and that process must still choose the native arm64 build.
+ *
+ * Import these helpers through `@puddle/shared/node/platform`, which
+ * re-exports them; the package has no `node/windows-arch` subpath (every
+ * bundler and vitest alias maps `@puddle/shared/node` by prefix).
  */
 export type WindowsArch = 'x64' | 'arm64';
 
