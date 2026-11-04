@@ -86,9 +86,6 @@ win:
 nsis:
   oneClick: true
   perMachine: false
-  # The 32-bit elevate.exe serves electron-updater's per-machine installs,
-  # which this per-user installer and lib/desktop-update never use.
-  packElevateHelper: false
   guid: 21877822-4423-5e9b-90ab-0b75b071b1b1
   # No spaces: GitHub renames them in asset names, which must match SHA256SUMS.
   artifactName: ${productName}-${version}-${arch}-setup.${ext}

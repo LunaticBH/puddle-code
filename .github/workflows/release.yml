@@ -396,7 +396,8 @@ jobs:
           pnpm exec electron-builder --win --${{ matrix.arch }} --publish never @sign
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: verify the installer architecture
-        run: node scripts/check-windows-arch.mjs packages/desktop/release/${{ matrix.unpacked }} ${{ matrix.arch }}
+        # electron-builder's resources\elevate.exe is x86 for every architecture.
+        run: node scripts/check-windows-arch.mjs packages/desktop/release/${{ matrix.unpacked }} ${{ matrix.arch }} --except resources/elevate.exe
       - name: verify Authenticode signatures
         if: env.PUDDLE_WINDOWS_SIGNING != 'none'
         working-directory: packages/desktop/release
