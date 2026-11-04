@@ -1,5 +1,5 @@
 import { execFile, spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   createReadStream,
   createWriteStream,
@@ -14,6 +14,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { copyFile } from 'node:fs/promises';
 import * as http from 'node:http';
 import type { Server } from 'node:net';
 import { basename, join, resolve, win32 } from 'node:path';
@@ -112,7 +113,7 @@ export async function installWindowsDaemon(opts: WindowsInstallOptions = {}): Pr
         rmSync(runtime.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
       }
       mkdirSync(runtime.dir, { recursive: true });
-      await extract(archive, runtime.dir);
+      await extract(home, archive, runtime.dir);
       if (!smokeTest(runtime, version, home)) {
         rmSync(runtime.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
         throw new CliError(
@@ -277,26 +278,51 @@ async function withEnvironmentProxy<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
-/** Unpack the archive's single top-level folder into `dest`. */
-function extract(archive: string, dest: string): Promise<void> {
+/**
+ * Unpack the archive's single top-level folder into `dest`, under `home`.
+ * System32's tar.exe reads its arguments in the ANSI code page, so a path
+ * outside it (a CJK profile name on an English install) would reach it as
+ * `?`. It runs in the home, whose name travels intact as the working
+ * directory, and is given only ASCII paths relative to it; an archive that
+ * has no such path is copied into the cache first.
+ */
+async function extract(home: string, archive: string, dest: string): Promise<void> {
   const tar = system32Path('tar.exe');
-  return new Promise((resolve, reject) => {
-    execFile(
-      tar,
-      ['-xf', archive, '--strip-components', '1', '-C', dest],
-      { windowsHide: true, timeout: 10 * 60_000, maxBuffer: 1024 * 1024 },
-      (error, _stdout, stderr) => {
-        if (!error) return resolve();
-        reject(
-          new CliError(
-            'not_installed',
-            `extraction failed: ${String(stderr).trim() || error.message}`,
-            existsSync(tar) ? undefined : 'tar.exe ships with Windows 10 1803 and later',
-          ),
-        );
-      },
-    );
-  });
+  let source = win32.relative(home, archive);
+  let copy: string | undefined;
+  if (!asciiInside(source)) {
+    copy = join(home, 'cache', `.extract-${randomBytes(8).toString('hex')}.zip`);
+    await copyFile(archive, copy);
+    source = win32.relative(home, copy);
+  }
+  try {
+    await new Promise<void>((resolve, reject) => {
+      execFile(
+        tar,
+        ['-xf', source, '--strip-components', '1', '-C', win32.relative(home, dest)],
+        { cwd: home, windowsHide: true, timeout: 10 * 60_000, maxBuffer: 1024 * 1024 },
+        (error, _stdout, stderr) => {
+          if (!error) return resolve();
+          reject(
+            new CliError(
+              'not_installed',
+              `extraction failed: ${String(stderr).trim() || error.message}`,
+              existsSync(tar) ? undefined : 'tar.exe ships with Windows 10 1803 and later',
+            ),
+          );
+        },
+      );
+    });
+  } finally {
+    if (copy !== undefined) rmSync(copy, { force: true });
+  }
+}
+
+/** A printable-ASCII path below the working directory: tar.exe receives it unchanged. */
+function asciiInside(relative: string): boolean {
+  return (
+    /^[\x20-\x7e]+$/.test(relative) && !relative.startsWith('..') && !win32.isAbsolute(relative)
+  );
 }
 
 /**

@@ -222,12 +222,26 @@ function Install-PuddleCli {
     } else {
       Write-PuddleStatus 'warning: -Archive without -Sums - checksum verification skipped'
     }
-    $stage = [IO.Path]::Combine($versions, "$Version." + [IO.Path]::GetRandomFileName().Replace('.', ''))
+    $stageName = "$Version." + [IO.Path]::GetRandomFileName().Replace('.', '')
+    $stage = [IO.Path]::Combine($versions, $stageName)
     [void][IO.Directory]::CreateDirectory($stage)
-    $tar = [IO.Path]::Combine($env:SystemRoot, 'System32\tar.exe')
-    if ((Invoke-PuddleNative $tar @('-xf', $Archive, '--strip-components=1', '-C', $stage)) -ne 0) {
-      Stop-Puddle 'extraction failed'
+    # tar.exe reads its arguments in the ANSI code page, which may not hold the
+    # profile's name: it runs in the root, which reaches it intact as the
+    # working directory, and receives ASCII paths relative to it.
+    $workName = [IO.Path]::GetFileName($work)
+    $source = [IO.Path]::GetFileName($Archive)
+    if (-not (Test-PuddleSamePath ([IO.Path]::GetDirectoryName($Archive)) $work) -or $source -notmatch '^[\x20-\x7e]+$') {
+      $source = 'archive.zip'
+      Copy-Item -LiteralPath $Archive -Destination ([IO.Path]::Combine($work, $source))
     }
+    $tar = [IO.Path]::Combine($env:SystemRoot, 'System32\tar.exe')
+    Push-Location -LiteralPath $Prefix
+    try {
+      $extracted = Invoke-PuddleNative $tar @('-xf', "$workName\$source", '--strip-components=1', '-C', "versions\$stageName")
+    } finally {
+      Pop-Location
+    }
+    if ($extracted -ne 0) { Stop-Puddle 'extraction failed' }
     $standalone = [IO.Path]::Combine($stage, 'STANDALONE')
     $stagedVersion = [IO.Path]::Combine($stage, 'VERSION')
     if (-not (Test-Path -LiteralPath $standalone -PathType Leaf) -or

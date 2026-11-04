@@ -6,6 +6,7 @@ import {
   linkSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   readlinkSync,
   utimesSync,
@@ -239,6 +240,24 @@ describe.runIf(process.platform === 'win32' && existsSync(daemonDist))(
       started.authority.close();
       await stopWindowsDaemon(at);
       expect(existsSync(join(at, 'puddled.pid'))).toBe(false);
+    }, 180_000);
+
+    it('unpacks under a profile whose name the ANSI code page cannot hold', async () => {
+      // CJK and Greek: neither fits cp1252, so tar.exe would read `?` for them.
+      const parent = join(root, '测试 Ελληνικά');
+      mkdirSync(parent);
+      const at = freshHome(parent);
+      // The archive itself sits under that name too, so it is copied first.
+      const archive = join(parent, basename(zip));
+      copyFileSync(zip, archive);
+      copyFileSync(`${zip}.sha256`, `${archive}.sha256`);
+      await installWindowsDaemon({ home: at, tarball: archive });
+      expect(readCurrentVersion(at)).toBe('1.2.3');
+      expect(readdirSync(join(at, 'cache')).filter((name) => name.startsWith('.extract-'))).toEqual(
+        [],
+      );
+      (await waitForStartedDaemon(new LocalTransport(), 60_000)).authority.close();
+      await stopWindowsDaemon(at);
     }, 180_000);
 
     it('renames the home’s pipes when another program squats the control pipe', async () => {
