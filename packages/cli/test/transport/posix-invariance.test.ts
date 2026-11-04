@@ -120,11 +120,23 @@ function posixHost(args: string[]): { code: number; stdout?: string } {
 
 const digest = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 16);
 
-function normalise(entries: Recorded[]): Array<{ file: string; args: string[]; stdin?: string }> {
+/** `-o ControlMaster=…`, `-o ControlPath=…` and `-o ControlPersist=…`, in place. */
+function withoutControlMaster(args: string[]): string[] {
+  return args.filter(
+    (arg, i) => !/^Control(Master|Path|Persist)=/.test(arg) && !/^Control/.test(args[i + 1] ?? ''),
+  );
+}
+
+function normalise(
+  entries: Recorded[],
+  // `puddle remote` opens its own transport, with or without a master by the client's OS.
+  clientNeutral = false,
+): Array<{ file: string; args: string[]; stdin?: string }> {
   // install.sh and the bundled helper are pinned by their own tests; the
   // scripts written here inline are pinned by digest.
   const installer = readInstallScript();
-  return entries.map(({ file, args, stdin }) => {
+  return entries.map(({ file, args: given, stdin }) => {
+    const args = clientNeutral ? withoutControlMaster(given) : given;
     const clean = (text: string) =>
       text
         .replaceAll(clientHome, '<client-home>')
@@ -148,7 +160,7 @@ it('sends a POSIX host exactly the commands it always received', async () => {
   const step = async (name: string, run: () => Promise<unknown>) => {
     recorded.length = 0;
     await run();
-    steps[name] = normalise(recorded);
+    steps[name] = normalise(recorded, name === 'puddle remote devices');
   };
 
   await step('open', () => ssh.open());
