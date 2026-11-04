@@ -4,7 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import headless from '@xterm/headless';
 import { describe, expect, it } from 'vitest';
-import { TerminalScreenStateStore } from '../../src/pty/terminal-screen-state.js';
+import {
+  TerminalScreenStateStore,
+  type TerminalScreenHost,
+} from '../../src/pty/terminal-screen-state.js';
+import { windowsBuildNumber } from '../../src/pty/windows-console.js';
+import { xtermWindowsPty } from '../../src/pty/xterm-windows-pty.js';
 
 const { Terminal } = headless;
 const require = createRequire(import.meta.url);
@@ -119,6 +124,77 @@ describe('TerminalScreenStateStore', () => {
       '9',
     ]);
     await store.closeAll();
+  });
+
+  describe('growing the rows over scrollback', () => {
+    const history = Array.from({ length: 60 }, (_, index) => `line ${index}`);
+    const prompt = 'PS C:\\> ';
+
+    /** 60 lines and a prompt at 80x24, then a viewer attaches at 80x40. */
+    function grown(host: TerminalScreenHost): TerminalScreenStateStore {
+      const store = new TerminalScreenStateStore(undefined, undefined, host);
+      store.resize('session-1', 'agent', 80, 24);
+      store.write('session-1', 'agent', [...history, prompt].join('\r\n'));
+      store.resize('session-1', 'agent', 80, 40);
+      return store;
+    }
+
+    async function replay(store: TerminalScreenStateStore) {
+      const terminal = new Terminal({
+        allowProposedApi: true,
+        cols: 80,
+        rows: 40,
+        scrollback: 1000,
+      });
+      const snapshot = (await store.snapshot('session-1', 'agent')) ?? '';
+      await new Promise<void>((resolve) => terminal.write(snapshot, resolve));
+      const buffer = terminal.buffer.active;
+      const lines: string[] = [];
+      for (let row = 0; row < buffer.length; row++) {
+        lines.push(buffer.getLine(row)?.translateToString(true) ?? '');
+      }
+      const cursorY = buffer.cursorY;
+      terminal.dispose();
+      return { lines, cursorY };
+    }
+
+    it('adds blank rows on a Windows host, so ConPTY’s repaint keeps every line', async () => {
+      const store = grown({ platform: 'win32', osBuild: 26100 });
+      // ConPTY after the resize: home, its own 24-row view again, erase below.
+      store.write(
+        'session-1',
+        'agent',
+        `\u001b[H${[...history.slice(37), prompt].join('\r\n')}\u001b[J`,
+      );
+      const { lines, cursorY } = await replay(store);
+      expect(lines.filter((line) => line.startsWith('line '))).toEqual(history);
+      expect(cursorY).toBe(23);
+      await store.closeAll();
+    });
+
+    it('pulls scrollback back into view on a POSIX host, as before', async () => {
+      const store = grown({ platform: 'linux' });
+      const { lines, cursorY } = await replay(store);
+      expect(lines.filter((line) => line.startsWith('line '))).toEqual(history);
+      expect(cursorY).toBe(39);
+      await store.closeAll();
+    });
+
+    it('passes xterm the ConPTY option only for a Windows host', () => {
+      expect(xtermWindowsPty('win32', 19045)).toEqual({
+        windowsPty: { backend: 'conpty', buildNumber: 19045 },
+      });
+      expect(xtermWindowsPty('win32', undefined)).toEqual({ windowsPty: { backend: 'conpty' } });
+      for (const platform of ['linux', 'darwin'] as const) {
+        expect(Object.keys(xtermWindowsPty(platform, 26100))).toEqual([]);
+      }
+    });
+
+    it('reads the build number from os.release() on Windows only', () => {
+      expect(windowsBuildNumber('win32', '10.0.26200')).toBe(26200);
+      expect(windowsBuildNumber('win32', '10.0')).toBeUndefined();
+      expect(windowsBuildNumber('linux', '6.6.87.2-microsoft-standard-WSL2')).toBeUndefined();
+    });
   });
 
   it('removes persisted state when a stream is permanently forgotten', async () => {
