@@ -186,6 +186,45 @@ describe('the detached Windows supervisor', () => {
     expect(lines[0]).toBe('stopping the Puddle supervisor on this machine');
   });
 
+  it('never terminates the pid a supervisor pipe reports unless its command line identifies it', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'puddle-windows-daemon-'));
+    // A live process that is no supervisor of this home.
+    const bystander = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], {
+      stdio: 'ignore',
+    });
+    await new Promise((resolve) => bystander.once('spawn', resolve));
+    try {
+      const server = await listenPrivate(ipcPath(home, 'supervisor'), (socket) => {
+        socket.on('error', () => {});
+        socket.once('data', (request: Buffer) => {
+          const { challenge } = JSON.parse(request.toString()) as { challenge: string };
+          socket.end(
+            JSON.stringify({
+              t: 'supervisor',
+              proof: ipcProof(home, 'supervisor', challenge),
+              pid: bystander.pid,
+              daemon: null,
+              connector: null,
+              stopping: true,
+            }) + '\n',
+          );
+        });
+      });
+      servers.push(server);
+      // It answers, but never stops, and the process table does not name it.
+      await expect(
+        stopWindowsSupervisor(home, {
+          list: async () => [],
+          supervisorGraceMs: 300,
+          terminateGraceMs: 300,
+        }),
+      ).rejects.toThrow('could not stop the Puddle supervisor');
+      expect(isPidAlive(bystander.pid!, process.platform)).toBe(true);
+    } finally {
+      bystander.kill();
+    }
+  });
+
   it('leaves no supervisor to stop when none runs or answers for this home', async () => {
     const home = mkdtempSync(join(tmpdir(), 'puddle-windows-daemon-'));
     await stopWindowsSupervisor(home, { list: async () => [] });

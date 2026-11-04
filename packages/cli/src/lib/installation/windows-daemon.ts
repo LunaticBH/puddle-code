@@ -182,21 +182,20 @@ export interface StopOptions {
  * End the home's supervisor, which would otherwise restart the daemon a
  * stop ends: asked over its pipe, it stops its daemon and connector itself.
  * One that does not stop in time, or cannot be asked, is terminated with its
- * children when its command line identifies it.
+ * children only when its command line identifies it (isHomeSupervisor): the
+ * pid its pipe reports is waited for, never terminated on that word alone.
  */
 export async function stopWindowsSupervisor(home: string, opts: StopOptions = {}): Promise<void> {
   const logger = opts.logger ?? silentLogger;
   const list = opts.list ?? listWindowsProcesses;
   const answer = await supervisorRequest(home, 'shutdown');
   let pids = await homeSupervisorPids(home, list).catch(() => [] as number[]);
-  if (answer.kind === 'answered') {
+  const reported = answer.kind === 'answered' ? answer.state.pid : undefined;
+  if (reported !== undefined) {
     logger.info('stopping the Puddle supervisor on this machine');
-    const asked = [...new Set([answer.state.pid, ...pids])];
+    const asked = [...new Set([reported, ...pids])];
     if (await supervisorsGone(home, asked, opts.supervisorGraceMs ?? SUPERVISOR_GRACE_MS)) return;
     pids = await homeSupervisorPids(home, list).catch(() => pids);
-    // Its pid is believed while its pipe still proves it.
-    const still = await supervisorRequest(home, 'status', 1000);
-    if (still.kind === 'answered') pids = [...new Set([still.state.pid, ...pids])];
   } else if (pids.length === 0) {
     return;
   }
@@ -205,10 +204,12 @@ export async function stopWindowsSupervisor(home: string, opts: StopOptions = {}
     await killProcessTree(pid, { platform: 'win32' });
   }
   if (await supervisorsGone(home, pids, opts.terminateGraceMs ?? TERMINATE_GRACE_MS)) return;
+  // Only an answering supervisor gets here without identified pids.
+  const named = pids.length > 0 ? pids.join(', ') : String(reported);
   throw new CliError(
     'daemon_unreachable',
     'could not stop the Puddle supervisor on this machine',
-    `stop it in Task Manager (pid ${pids.join(', ')}), then retry`,
+    `stop it in Task Manager (pid ${named}), then retry`,
   );
 }
 
