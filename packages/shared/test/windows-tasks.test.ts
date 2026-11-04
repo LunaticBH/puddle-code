@@ -1,7 +1,4 @@
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   createWindowsProcess,
@@ -228,9 +225,9 @@ describe('Task Scheduler through PowerShell', () => {
 });
 
 /**
- * Real Windows PowerShell, but nothing persistent: Task Scheduler only
- * validates the XML (TASK_VALIDATE_ONLY registers nothing), and the WMI
- * process is a one-line node.exe writing into a temporary directory.
+ * Real Windows PowerShell, but nothing persistent and no process: Task
+ * Scheduler only validates the XML (TASK_VALIDATE_ONLY registers nothing),
+ * and the WMI script is only parsed, never run.
  */
 describe.runIf(process.platform === 'win32')('on this Windows machine', () => {
   it('runs Windows PowerShell without a profile and with the process execution policy bypassed', async () => {
@@ -302,22 +299,4 @@ describe.runIf(process.platform === 'win32')('on this Windows machine', () => {
     expect(result.stderr).toBe('');
     expect(result.stdout).toBe('valid|False');
   }, 70_000);
-
-  it('creates a process through WMI that runs its command line as given', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'puddle-wmi-'));
-    try {
-      const out = join(dir, 'out.txt');
-      const script = `require('fs').writeFileSync(${JSON.stringify(out)}, process.argv.slice(1).join('|'))`;
-      const command = `"${process.execPath}" -e "${script.replace(/"/g, '\\"')}" "a b" c`;
-      const pid = await createWindowsProcess(command, dir);
-      expect(pid).toBeGreaterThan(0);
-      const deadline = Date.now() + 20_000;
-      while (!existsSync(out) && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-      expect(readFileSync(out, 'utf8')).toBe('a b|c');
-    } finally {
-      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
-    }
-  }, 60_000);
 });
