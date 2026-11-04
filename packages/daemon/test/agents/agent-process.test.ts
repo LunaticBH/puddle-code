@@ -74,4 +74,15 @@ describe('agent process spawning', () => {
       agentEnv({ PATH: 'new', CODEX_HOME: 'c' }, 'win32', { Path: 'old', codex_home: 'x' }),
     ).toEqual({ Path: 'new', codex_home: 'c' });
   });
+
+  it('leaves the daemon’s working-directory search setting out of a Windows agent’s environment', () => {
+    // An agent's batch scripts find a sibling tool by bare name, as in any console.
+    const base = { Path: 'p', NoDefaultCurrentDirectoryInExePath: 'puddle' };
+    expect(agentEnv({ CODEX_HOME: 'c' }, 'win32', base)).toEqual({ Path: 'p', CODEX_HOME: 'c' });
+    expect(agentEnv({}, 'linux', base)).toEqual(base);
+    // A value the user set themselves stays.
+    expect(agentEnv({}, 'win32', { NoDefaultCurrentDirectoryInExePath: '1' })).toEqual({
+      NoDefaultCurrentDirectoryInExePath: '1',
+    });
+  });
 });

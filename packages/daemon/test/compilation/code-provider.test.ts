@@ -360,6 +360,16 @@ describe('code tool discovery and process bounds', () => {
     expect(windows.options.detached).toBeUndefined();
   });
 
+  it('runs a Windows command with the user’s working-directory program search', () => {
+    // A build script the command starts may call a sibling tool by bare name.
+    const env = { Path: 'C:\\Windows', NoDefaultCurrentDirectoryInExePath: 'puddle' };
+    const command = { file: process.execPath, args: [], cwd: directory(), env };
+    expect(compilationSpawn(command, 'win32').options.env).toEqual({ Path: 'C:\\Windows' });
+    expect(compilationSpawn(command, 'linux').options.env).toBe(env);
+    const own = { ...command, env: { NoDefaultCurrentDirectoryInExePath: '1' } };
+    expect(compilationSpawn(own, 'win32').options.env).toEqual(own.env);
+  });
+
   it('refuses a Windows command missing from PATH instead of searching its working directory', () => {
     const cwd = directory();
     writeFileSync(join(cwd, 'planted.exe'), '');

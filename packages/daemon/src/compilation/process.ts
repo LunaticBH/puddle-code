@@ -5,7 +5,11 @@ import {
   type StdioPipe,
 } from 'node:child_process';
 import { win32 } from 'node:path';
-import { killProcessTree, resolveSpawn } from '@puddle/shared/node/platform';
+import {
+  killProcessTree,
+  resolveSpawn,
+  restoreCurrentDirectorySearch,
+} from '@puddle/shared/node/platform';
 import { withEnvironment } from './environment.js';
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -81,10 +85,12 @@ export function compilationSpawn(
       options: { cwd: command.cwd, env: command.env, detached: true, stdio },
     };
   }
-  const resolved = resolveSpawn(command.file, command.args, {
-    platform,
-    env: command.env ?? process.env,
-  });
+  // Without the daemon's own NoDefaultCurrentDirectoryInExePath setting, the
+  // command's children (a build script calling a sibling tool) find
+  // programmes in the working directory as they would in a console.
+  const env = { ...(command.env ?? process.env) };
+  restoreCurrentDirectorySearch(env, platform);
+  const resolved = resolveSpawn(command.file, command.args, { platform, env });
   if (!win32.isAbsolute(resolved.file)) {
     throw Object.assign(new Error(`spawn ${command.file} ENOENT`), {
       code: 'ENOENT',
@@ -97,7 +103,7 @@ export function compilationSpawn(
     args: resolved.args,
     options: {
       cwd: command.cwd,
-      env: resolved.env ? withEnvironment(resolved.env, command.env, platform) : command.env,
+      env: resolved.env ? withEnvironment(resolved.env, env, platform) : env,
       stdio,
       windowsHide: true,
       ...(resolved.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),

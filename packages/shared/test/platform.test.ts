@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -25,6 +25,7 @@ import {
   prependPathEntry,
   renameWithRetry,
   renameWithRetrySync,
+  restoreCurrentDirectorySearch,
   setEnv,
   system32Path,
   windowsExtensions,
@@ -167,11 +168,63 @@ describe('disableCurrentDirectorySearch', () => {
   it('sets NoDefaultCurrentDirectoryInExePath on Windows, keeping a value already there', () => {
     const env: Record<string, string | undefined> = { Path: 'C:\\Windows' };
     disableCurrentDirectorySearch(env, 'win32');
-    expect(env).toEqual({ Path: 'C:\\Windows', NoDefaultCurrentDirectoryInExePath: '1' });
+    expect(env).toEqual({ Path: 'C:\\Windows', NoDefaultCurrentDirectoryInExePath: 'puddle' });
     const own: Record<string, string | undefined> = { NODEFAULTCURRENTDIRECTORYINEXEPATH: 'yes' };
     disableCurrentDirectorySearch(own, 'win32');
     expect(own).toEqual({ NODEFAULTCURRENTDIRECTORYINEXEPATH: 'yes' });
   });
+});
+
+describe('restoreCurrentDirectorySearch', () => {
+  it('leaves POSIX untouched', () => {
+    const env: Record<string, string | undefined> = {
+      NoDefaultCurrentDirectoryInExePath: 'puddle',
+    };
+    restoreCurrentDirectorySearch(env, 'linux');
+    restoreCurrentDirectorySearch(env, 'darwin');
+    expect(env).toEqual({ NoDefaultCurrentDirectoryInExePath: 'puddle' });
+  });
+
+  it('takes out only the value Puddle set, in any spelling', () => {
+    const env: Record<string, string | undefined> = { Path: 'C:\\Windows' };
+    disableCurrentDirectorySearch(env, 'win32');
+    restoreCurrentDirectorySearch(env, 'win32');
+    expect(env).toEqual({ Path: 'C:\\Windows' });
+    // A daemon inherits the value from the CLI or desktop app that started it.
+    const inherited: Record<string, string | undefined> = {
+      NODEFAULTCURRENTDIRECTORYINEXEPATH: 'puddle',
+    };
+    restoreCurrentDirectorySearch(inherited, 'win32');
+    expect(inherited).toEqual({});
+    // The user's own setting (Claude Code's shells use 1) reaches their programmes.
+    for (const value of ['1', 'yes', '']) {
+      const own: Record<string, string | undefined> = { NoDefaultCurrentDirectoryInExePath: value };
+      disableCurrentDirectorySearch(own, 'win32');
+      restoreCurrentDirectorySearch(own, 'win32');
+      expect(own).toEqual({ NoDefaultCurrentDirectoryInExePath: value });
+    }
+  });
+
+  it.runIf(process.platform === 'win32')(
+    'lets cmd.exe run a batch file from its working directory again',
+    () => {
+      const cwd = directory();
+      writeFileSync(join(cwd, 'puddle-sibling.bat'), '@echo SIBLING\r\n');
+      const env: Record<string, string | undefined> = { ...process.env };
+      deleteEnv(env, 'NoDefaultCurrentDirectoryInExePath', 'win32');
+      disableCurrentDirectorySearch(env, 'win32');
+      const run = () =>
+        spawnSync(system32Path('cmd.exe'), ['/d', '/c', 'puddle-sibling'], {
+          cwd,
+          env,
+          encoding: 'utf8',
+          windowsHide: true,
+        }).stdout;
+      expect(run()).not.toContain('SIBLING');
+      restoreCurrentDirectorySearch(env, 'win32');
+      expect(run()).toContain('SIBLING');
+    },
+  );
 });
 
 describe('environment helpers', () => {

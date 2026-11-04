@@ -1,4 +1,9 @@
-import { resolveSpawn, setEnv, type Environment } from '@puddle/shared/node/platform';
+import {
+  resolveSpawn,
+  restoreCurrentDirectorySearch,
+  setEnv,
+  type Environment,
+} from '@puddle/shared/node/platform';
 
 /**
  * What PtyManager hands node-pty for one spawn. POSIX is the long-standing
@@ -20,7 +25,10 @@ import { resolveSpawn, setEnv, type Environment } from '@puddle/shared/node/plat
  *   node.exe, PowerShell and Git Bash all parse with.
  *
  * node-pty sets `TERM` to the terminal name only on Unix; Windows children get
- * the same value here, for TERM-sniffing CLIs and MSYS tools.
+ * the same value here, for TERM-sniffing CLIs and MSYS tools. The daemon's
+ * own `NoDefaultCurrentDirectoryInExePath` setting is taken out of the base
+ * environment, so `gradlew` or `build.bat` typed in a cmd.exe terminal, or
+ * called by an agent's batch file, still runs from the current directory.
  */
 export interface PtySpawnPlan {
   file: string;
@@ -42,6 +50,7 @@ export function planPtySpawn(
   }
   const env: Environment = {};
   for (const [key, value] of Object.entries(base)) if (value !== undefined) env[key] = value;
+  restoreCurrentDirectorySearch(env, platform);
   for (const [key, value] of Object.entries(overrides ?? {})) setEnv(env, key, value, platform);
   setEnv(env, 'TERM', 'xterm-256color', platform);
   const resolved = resolveSpawn(file, args, { platform, env });

@@ -182,6 +182,15 @@ it('runs Windows interpreters with UTF-8 stdio and their Conda prefix activated'
     'C:\\Windows',
   ]);
   expect(pythonEnvironment(plain, { Path: 'C:\\Windows' }, 'win32')!.Path).toBe('C:\\Windows');
+  // A kernel's `!make html` finds make.bat beside the notebook, as in any console;
+  // a value the user set themselves stays.
+  const daemon = { Path: 'C:\\Windows', NoDefaultCurrentDirectoryInExePath: 'puddle' };
+  expect(pythonEnvironment(plain, daemon, 'win32')).toEqual({
+    Path: 'C:\\Windows',
+    PYTHONIOENCODING: 'utf-8',
+  });
+  const own = { NoDefaultCurrentDirectoryInExePath: '1' };
+  expect(pythonEnvironment(plain, own, 'win32')).toMatchObject(own);
 });
 
 it('finds the interpreter behind Windows console-script launchers', () => {

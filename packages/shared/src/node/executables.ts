@@ -1,6 +1,6 @@
 import { statSync } from 'node:fs';
 import { isAbsolute, join, sep } from 'node:path';
-import { getEnv, setEnv, type Environment } from './environment.js';
+import { deleteEnv, getEnv, setEnv, type Environment } from './environment.js';
 
 export interface FindExecutableOptions {
   /** Search list in place of the environment's PATH. */
@@ -65,6 +65,16 @@ export function findExecutable(name: string, opts: FindExecutableOptions = {}): 
   return null;
 }
 
+const NO_CWD_SEARCH = 'NoDefaultCurrentDirectoryInExePath';
+
+/**
+ * The value Puddle gives `NoDefaultCurrentDirectoryInExePath`. Windows only
+ * asks whether the variable exists, so any value turns the search off; this
+ * one tells Puddle's setting from the user's in every process that inherits
+ * it, such as a daemon the CLI or the desktop app started.
+ */
+const PUDDLE_NO_CWD_SEARCH = 'puddle';
+
 /**
  * Turns off Windows' search of the working directory for a bare program name.
  * libuv (every Node spawn), cmd.exe and CreateProcess all look there before
@@ -72,17 +82,36 @@ export function findExecutable(name: string, opts: FindExecutableOptions = {}): 
  * that tracks `git.exe` would run as the user the moment a child starts in
  * it. Puddle resolves executables on PATH itself; this is the safety net for
  * a name that still reaches spawn unresolved, set once at process start-up.
- * Children that inherit the environment keep it. A value already present is
- * kept: any value disables the search. POSIX never searches the working
- * directory, so it is left untouched.
+ * libuv reads it from the spawning process's own environment, so programmes
+ * the user runs drop it again with `restoreCurrentDirectorySearch`. A value
+ * already present is kept: any value disables the search. POSIX never
+ * searches the working directory, so it is left untouched.
  */
 export function disableCurrentDirectorySearch(
   env: Environment = process.env,
   platform: NodeJS.Platform = process.platform,
 ): void {
-  const name = 'NoDefaultCurrentDirectoryInExePath';
-  if (platform !== 'win32' || getEnv(env, name, platform) !== undefined) return;
-  setEnv(env, name, '1', platform);
+  if (platform !== 'win32' || getEnv(env, NO_CWD_SEARCH, platform) !== undefined) return;
+  setEnv(env, NO_CWD_SEARCH, PUDDLE_NO_CWD_SEARCH, platform);
+}
+
+/**
+ * Takes `disableCurrentDirectorySearch`'s setting back out of `env`, the
+ * environment of a programme the user runs or works in: a terminal shell, an
+ * agent, a code run, a notebook kernel. There cmd.exe and batch files find
+ * `gradlew`, `make.bat` or a sibling tool in the current directory, as in any
+ * other console. The daemon's own spawns stay protected, since libuv consults
+ * the daemon's environment, not the child's. A value the user set is kept.
+ * POSIX is left untouched.
+ */
+export function restoreCurrentDirectorySearch(
+  env: Environment,
+  platform: NodeJS.Platform = process.platform,
+): void {
+  if (platform !== 'win32') return;
+  if (getEnv(env, NO_CWD_SEARCH, platform) === PUDDLE_NO_CWD_SEARCH) {
+    deleteEnv(env, NO_CWD_SEARCH, platform);
+  }
 }
 
 /**
