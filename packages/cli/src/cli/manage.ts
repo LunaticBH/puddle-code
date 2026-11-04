@@ -289,7 +289,11 @@ async function setDesktop(
       : `Puddle ${installed.version} → ${update.version}` +
         (isNewerVersion(update.version, installed.version) ? '' : ' (a downgrade)');
   logger.info(move);
-  const staged = await stageDesktopUpdate(update, { logger });
+  // A signed installed Puddle.exe accepts only an installer from the same publisher.
+  const staged = await stageDesktopUpdate(update, {
+    logger,
+    ...(windows && installed !== null ? { currentApp: installed.appPath } : {}),
+  });
   await applyDesktopUpdate(staged, { targetPath, detach: false, relaunch: false, logger });
   const installedPath = windows ? (await findInstalledDesktopApp())?.appPath : targetPath;
   if (installedPath === undefined) {

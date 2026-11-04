@@ -22,11 +22,20 @@
 # by scripts/render-icon.sh, and committed so CI needs no rasteriser. Windows
 # converts the same 1024² build/icon.png into the executable's .ico.
 #
-# Windows (docs/windows.md): a per-user one-click NSIS installer, unsigned in
-# v1. The appId doubles as the Start Menu shortcut's AppUserModelID, which
-# main.ts sets so toasts appear. lib/installation/desktop-update.ts reads the
+# Windows (docs/windows.md): per-user one-click NSIS installers for x64 and
+# arm64, one architecture per invocation (`--x64` or `--arm64`; without a flag
+# the host's): passing both would make one universal installer whose name has
+# no architecture. They share the GUID, so either replaces the other in
+# place. Authenticode signing is environment-driven, as on macOS: the release
+# workflow's desktop-windows job supplies WIN_CSC_LINK/WIN_CSC_KEY_PASSWORD or
+# `-c.win.azureSignOptions.*` (Azure Trusted Signing) with
+# `-c.forceCodeSigning=true` only when signing secrets exist; without them the
+# installer stays unsigned and the signtool options below are inert. The
+# appId doubles as the Start Menu shortcut's AppUserModelID, which main.ts
+# sets so toasts appear. lib/installation/desktop-update.ts reads the
 # installer's registry keys through the pinned GUID (electron-builder's
-# default for this appId) and selects `*-x64-setup.exe`, so keep both stable.
+# default for this appId) and selects `*-<arch>-setup.exe` by the operating
+# system's architecture, so keep both stable.
 appId: code.puddle.desktop
 productName: Puddle
 copyright: Copyright © 2026 Yiding Song
@@ -64,10 +73,16 @@ win:
   # Puddle.exe: code and the update flow look for this name and for the
   # uninstaller ("Uninstall Puddle.exe") beside it.
   executableName: Puddle
+  # No `arch:` list: a pinned one silently overrides --arm64.
   target:
-    - target: nsis
-      arch:
-        - x64
+    - nsis
+  # Electron's own DLLs (ffmpeg, libEGL, vk_swiftshader…) besides the .exe files.
+  signExts:
+    - .dll
+  signtoolOptions:
+    signingHashAlgorithms:
+      - sha256
+    rfc3161TimeStampServer: http://timestamp.digicert.com
 nsis:
   oneClick: true
   perMachine: false

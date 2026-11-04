@@ -24,6 +24,17 @@ export {
 export { isPidAlive, killProcessTree, type KillProcessTreeOptions } from './processes.js';
 export { renameWithRetry, renameWithRetrySync } from './rename.js';
 export {
+  isWindowsArch,
+  peImage,
+  peMachine,
+  windowsArchFromProcessor,
+  windowsHostArch,
+  type PeImage,
+  type PeMachine,
+  type WindowsArch,
+  type WindowsHostArchOptions,
+} from './windows-arch.js';
+export {
   quoteCmdArgument,
   resolveSpawn,
   UnsafeCmdArgumentError,

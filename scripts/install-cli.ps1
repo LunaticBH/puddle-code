@@ -175,8 +175,11 @@ function Install-PuddleCli {
     if ($Archive) {
       if (-not (Test-Path -LiteralPath $Archive -PathType Leaf)) { Stop-Puddle "archive not found: $Archive" }
       $Archive = (Resolve-Path -LiteralPath $Archive).ProviderPath
-      if (-not $Version -and [IO.Path]::GetFileName($Archive) -match "^puddle-cli-v(.*)-win32-$Arch\.zip$") {
-        $Version = $Matches[1]
+      if ([IO.Path]::GetFileName($Archive) -match '^puddle-cli-v(.*)-win32-(x64|arm64)\.zip$') {
+        if ($Matches[2] -ne $Arch) {
+          Stop-Puddle "this archive is the win32-$($Matches[2]) build; this machine needs win32-$Arch"
+        }
+        if (-not $Version) { $Version = $Matches[1] }
       }
     } else {
       if (-not $Repo -or $Repo.Contains('@@')) { Stop-Puddle 'no repository baked in; pass -Repo owner/repo' }
@@ -255,8 +258,13 @@ function Install-PuddleCli {
         Stop-Puddle "archive is missing $asset"
       }
     }
-    # Help loads the bundle without touching a daemon or user state.
+    # A renamed archive must not install another architecture's runtime.
     $node = [IO.Path]::Combine($stage, 'bin\node.exe')
+    $runtime = Get-PuddlePeArchitecture $node
+    if ($runtime -ne $Arch) {
+      Stop-Puddle "archive is not the win32-$Arch build (its node.exe is $runtime)"
+    }
+    # Help loads the bundle without touching a daemon or user state.
     if ((Invoke-PuddleNative $node @([IO.Path]::Combine($stage, 'cli\index.js'), '--help')) -ne 0) {
       Stop-Puddle 'CLI smoke test failed'
     }
@@ -297,18 +305,56 @@ function Write-PuddleStatus([string]$Message) { Write-Host "puddle install: $Mes
 
 function Stop-Puddle([string]$Message) { throw $Message }
 
+# The operating system's architecture, never this (possibly emulated) process's.
+# The machine-wide registry value is not redirected for x64 emulation on Arm
+# or for 32-bit processes; .NET's OSArchitecture tells the truth only from
+# .NET 7 (Windows PowerShell 5.1 runs on .NET Framework, where an emulated
+# process sees X64); the environment describes this process alone.
 function Get-PuddleArchitecture {
-  $os = $null
-  try { $os = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() } catch { $os = $null }
+  $os = Get-PuddleRegistryArchitecture
+  if (-not $os) { $os = Get-PuddleRuntimeArchitecture }
   if (-not $os) {
-    # PROCESSOR_ARCHITECTURE describes this (possibly emulated) process only.
     $os = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
   }
   switch -regex ($os) {
     '^(X64|AMD64)$' { return 'x64' }
-    # Windows arm64 assets are not published yet; Windows on Arm emulates x64.
-    '^ARM64$' { return 'x64' }
+    '^ARM64$' { return 'arm64' }
     default { Stop-Puddle "unsupported architecture $os" }
+  }
+}
+
+# Separate functions so tests can stand in for either source.
+function Get-PuddleRegistryArchitecture {
+  try {
+    return (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' -Name PROCESSOR_ARCHITECTURE -ErrorAction Stop).PROCESSOR_ARCHITECTURE
+  } catch { return $null }
+}
+
+function Get-PuddleRuntimeArchitecture {
+  try { return [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() } catch { return $null }
+}
+
+# The COFF machine of a PE file, read through e_lfanew: x64, arm64, or the
+# machine number in hexadecimal for anything else.
+function Get-PuddlePeArchitecture([string]$Path) {
+  $stream = $null
+  try {
+    $stream = [IO.File]::OpenRead($Path)
+    $reader = New-Object IO.BinaryReader $stream
+    if ($reader.ReadUInt16() -ne 0x5A4D) { return 'not a PE image' }
+    [void]$stream.Seek(0x3C, [IO.SeekOrigin]::Begin)
+    [void]$stream.Seek($reader.ReadInt32(), [IO.SeekOrigin]::Begin)
+    if ($reader.ReadUInt32() -ne 0x4550) { return 'not a PE image' }
+    $machine = $reader.ReadUInt16()
+  } catch {
+    return 'unreadable'
+  } finally {
+    if ($stream) { $stream.Dispose() }
+  }
+  switch ($machine) {
+    0x8664 { return 'x64' }
+    0xAA64 { return 'arm64' }
+    default { return ('machine 0x{0:X4}' -f $machine) }
   }
 }
 

@@ -2,7 +2,12 @@
 // Package the built cockpit with its own Node; no npm or system Node at runtime.
 // Windows gets puddle-cli-v<v>-win32-<arch>.zip with puddle.cmd/pudl.cmd beside
 // bin\node.exe; install.sh stays inside, since a Windows CLI still bootstraps
-// Linux and macOS hosts with it.
+// Linux and macOS hosts with it. Its PE files must match the architecture, and
+// with PUDDLE_WINDOWS_SIGNING the unsigned ones and cli\install-cli.ps1 (run
+// by `puddle upgrade cli`, which an AllSigned policy would otherwise refuse)
+// are Authenticode-signed (scripts/lib/windows-sign.mjs). `--arch` names the
+// architecture; on Windows another one is staged without the smoke test,
+// which only a native build can run.
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
@@ -18,7 +23,13 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { archiveTool, nodeBinary, stageNodeRuntime } from './lib/node-runtime.mjs';
+import {
+  archiveTool,
+  assertWindowsTreeArch,
+  nodeBinary,
+  stageNodeRuntime,
+} from './lib/node-runtime.mjs';
+import { signWindowsTree } from './lib/windows-sign.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
@@ -33,7 +44,13 @@ if (
 ) {
   throw new Error(`Unsupported CLI platform: ${process.platform}-${process.arch}`);
 }
-const target = `${process.platform}-${process.arch}`;
+const arch = flag('--arch') ?? process.arch;
+if (!['x64', 'arm64'].includes(arch)) throw new Error(`Unsupported CLI architecture: ${arch}`);
+// The smoke test runs the staged runtime, which only this architecture can.
+const crossArch = arch !== process.arch;
+if (crossArch && !windows)
+  throw new Error(`--arch ${arch} needs a ${process.platform}-${arch} machine`);
+const target = `${process.platform}-${arch}`;
 const out = resolve(root, flag('--out-dir') ?? 'dist-release');
 const name = `puddle-cli-v${version}`;
 const stage = join(out, 'stage', name);
@@ -81,12 +98,18 @@ if (windows) {
   chmodSync(join(stage, 'pudl'), 0o755);
 }
 await stageNodeRuntime(root, stage, target);
+if (windows) {
+  // Before the smoke test and pack: both must see the shipped bytes.
+  console.log(`${assertWindowsTreeArch(stage, arch)} PE files are ${arch}`);
+  await signWindowsTree(stage, console.log, { scripts: true });
+}
 
 // Offline inventory and help never start a daemon. An isolated home and PATH
 // prove that the archive needs neither installed npm nor installed Node.
 const home = mkdtempSync(join(tmpdir(), 'puddle-cli-smoke-'));
 try {
-  if (windows) smokeTestWindows(home);
+  if (crossArch) console.log(`staged a cross-architecture ${target} CLI: no smoke test`);
+  else if (windows) smokeTestWindows(home);
   else {
     const env = { HOME: home, PUDDLE_HOME: join(home, '.puddle'), PATH: '/usr/bin:/bin' };
     const output = execFileSync(join(stage, 'puddle'), ['--version'], { env, encoding: 'utf8' });
