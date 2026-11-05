@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import pty from 'node-pty';
 import { killProcessTree, type WindowsProcess } from '@puddle/shared/node/platform';
 import type { LogStore } from '../logs/log-store.js';
+import { guardConsoleListKill } from './conpty-console-list.js';
 import { sharedConptyJobs, type ConptyJob, type ConptyJobs } from './conpty-jobs.js';
 import {
   conptyTeardownDeps,
@@ -258,6 +259,7 @@ export class PtyManager extends EventEmitter {
       env: plan.env,
     });
     const spawnedAtMs = windows ? Date.now() : 0;
+    if (windows) guardConsoleListKill(proc);
     const filter = new EnvOscFilter();
     const live: Live = {
       proc,
