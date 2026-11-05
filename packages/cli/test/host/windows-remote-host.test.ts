@@ -394,6 +394,37 @@ describe('a Windows SSH host’s client', () => {
     expect(await warnings('process', false)).toEqual([]);
   });
 
+  it('removes and sweeps an install whose runtime is gone with its release’s node.exe', async () => {
+    const saved = process.env.PUDDLE_REPO;
+    process.env.PUDDLE_REPO = 'acme/puddle';
+    try {
+      // `bin\current` still names a version whose node.exe is gone.
+      const { ssh, sent } = fakeSsh(
+        (script) =>
+          script.includes("Join-Path $system 'curl.exe'")
+            ? {
+                code: 0,
+                lines: [{ t: 'result', value: opOf(script) === 'sweep' ? ['C:\\h\\w'] : null }],
+              }
+            : { code: NO_RUNTIME_EXIT },
+        { current: 'C:\\h\\bin\\versions\\0.3.14', node: null },
+      );
+      const host = new RemoteWindowsHost(ssh);
+      const info: string[] = [];
+      expect(await host.sweep()).toEqual(['C:\\h\\w']);
+      await host.remove({ purge: true, logger: { info: (m) => info.push(m), warn() {} } });
+      const boots = sent.filter((s) => s.script.includes("Join-Path $system 'curl.exe'"));
+      expect(boots.map((s) => opOf(s.script))).toEqual(['sweep', 'remove']);
+      expect(requestOf(boots[1]!.script, 'remove')).toEqual({ purge: true });
+      // Only an install is handed the archive; a removal borrows its node.exe alone.
+      expect(boots[1]!.script).not.toMatch(/'remove', '[^']+', \(Join-Path \$work \$name\)/);
+      expect(info.join('\n')).toContain('the installed runtime on alice@winbox is gone');
+    } finally {
+      if (saved === undefined) delete process.env.PUDDLE_REPO;
+      else process.env.PUDDLE_REPO = saved;
+    }
+  });
+
   it('bootstraps a host with no runtime of its architecture by download', async () => {
     const saved = process.env.PUDDLE_REPO;
     process.env.PUDDLE_REPO = 'acme/puddle';

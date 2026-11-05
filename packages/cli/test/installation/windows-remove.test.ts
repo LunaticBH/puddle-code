@@ -191,6 +191,23 @@ describe('removing the daemon from this Windows machine', () => {
     },
   );
 
+  it('disables remote access of a tree whose node.exe has gone, with its own runtime', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'puddle-windows-remove-'));
+    const order = join(home, 'order.log');
+    const current = join(home, 'bin', 'current');
+    mkdirSync(join(current, 'daemon'), { recursive: true });
+    writeFileSync(
+      join(current, 'daemon', 'connector.mjs'),
+      `import { appendFileSync } from 'node:fs';\n` +
+        `appendFileSync(${JSON.stringify(order)}, process.argv.slice(2).join(' ') + '\\n');\n`,
+    );
+    writeFileSync(join(current, 'CONNECTOR_PROTOCOL'), '4\n');
+    mkdirSync(join(home, 'remote'));
+    await removeWindowsDaemon(home, { purge: false, powershell: absentTask().runner });
+    expect(readFileSync(order, 'utf8').trim()).toBe('--disable-all');
+    expect(existsSync(join(home, 'bin'))).toBe(false);
+  });
+
   it('keeps removing when the logon task cannot be removed, and says where it is', async () => {
     const home = mkdtempSync(join(tmpdir(), 'puddle-windows-remove-'));
     const refusing: PowerShellRunner = async () => ({

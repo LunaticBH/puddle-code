@@ -428,9 +428,19 @@ try {
 }`;
 }
 
+/** What a bootstrap runs with the archive's own node.exe. */
+export type BootstrapOp =
+  /** A first install, or one over a tree of another build: the archive is installed. */
+  | 'install'
+  /** A broken install's removal and sweep: the archive only lends its node.exe. */
+  | 'remove'
+  | 'sweep';
+
 export interface BootstrapRequest {
   version: string;
-  /** The helper's install request, run by the archive's own node.exe. */
+  /** The helper operation; `install` when omitted. */
+  op?: BootstrapOp;
+  /** The helper's request for that operation, run by the archive's own node.exe. */
   install: unknown;
   /** The staged helper, checked again before anything is fetched. */
   helper: StagedHelper;
@@ -449,6 +459,11 @@ export interface BootstrapRequest {
  * archive as `installWindowsDaemon` installs a local one. Everything happens
  * in the account's private staging folder (Get-PuddleTemp); the helper
  * copies the archive into the home it creates privately.
+ *
+ * A home whose `bin\current\bin\node.exe` is gone (a quarantined runtime,
+ * a deleted version folder) is removed and swept the same way: the
+ * archive's node.exe runs the helper's `remove` or `sweep`, which need no
+ * runtime of the home's own.
  */
 export function bootstrapScript(request: BootstrapRequest): string {
   const { version, archive } = request;
@@ -473,11 +488,22 @@ try {
   if ($run.code -ne 0 -or -not [IO.File]::Exists($node)) { throw "the archive has no bin\node.exe: $($run.output)" }
   $machine = Get-PuddlePeMachine $node
   if ($machine -ne $arch) { throw "$name is the win32-$machine build; this machine needs puddled-v${version}-win32-$arch.zip" }
-  # The archive's path follows the request: the helper installs it as a local --tarball.
-  $global:PuddleExit = Invoke-PuddleNode $node @($helper, 'install', ${psQuote(b64json(request.install))}, (Join-Path $work $name))
+  ${helperRun(request)}
 } finally {
   Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 }`;
+}
+
+/** The helper's run by the archive's node.exe; only an install is given the archive. */
+function helperRun(request: BootstrapRequest): string {
+  const op = request.op ?? 'install';
+  if (!['install', 'remove', 'sweep'].includes(op)) throw new Error(`bad bootstrap op: ${op}`);
+  const args = ['$helper', psQuote(op), psQuote(b64json(request.install))];
+  if (op === 'install') {
+    // The archive's path follows the request: the helper installs it as a local --tarball.
+    args.push('(Join-Path $work $name)');
+  }
+  return `$global:PuddleExit = Invoke-PuddleNode $node @(${args.join(', ')})`;
 }
 
 function receiveArchive(archive: NonNullable<BootstrapRequest['archive']>): string {

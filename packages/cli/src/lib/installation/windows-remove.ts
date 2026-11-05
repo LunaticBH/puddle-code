@@ -116,14 +116,20 @@ export async function removeWindowsDaemon(
   else say(`removed the install; data kept under ${home}`);
 }
 
-/** Persist remote disable first, as the POSIX removal does; failure aborts the removal. */
+/**
+ * Persist remote disable first, as the POSIX removal does; failure aborts the
+ * removal. A tree whose node.exe has gone (quarantined, say) still has its
+ * connector disabled, by this process's own runtime: the SSH host helper's
+ * removal of a broken install runs on a release archive's node.exe.
+ */
 async function disableConnector(home: string): Promise<void> {
   const current = join(home, 'bin', 'current');
   const script = join(current, 'daemon', 'connector.mjs');
   if (!existsSync(script) || !existsSync(join(home, 'remote'))) return;
   if (!existsSync(join(current, 'CONNECTOR_PROTOCOL'))) return;
+  const tree = join(current, 'bin', 'node.exe');
   try {
-    await execute(join(current, 'bin', 'node.exe'), [script, '--disable-all'], {
+    await execute(existsSync(tree) ? tree : process.execPath, [script, '--disable-all'], {
       windowsHide: true,
       timeout: 60_000,
       env: { ...process.env, PUDDLE_HOME: home },

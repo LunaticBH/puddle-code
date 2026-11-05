@@ -122,6 +122,15 @@ describe('the Windows remote command', () => {
     expect(() =>
       bootstrapScript({ version: '1.2.3', install: {}, helper: staged, slug: 'a/b;c' }),
     ).toThrow();
+    expect(() =>
+      bootstrapScript({
+        op: 'exec' as 'remove',
+        version: '1.2.3',
+        install: {},
+        helper: staged,
+        slug: 'a/b',
+      }),
+    ).toThrow();
   });
 
   it('checks the staged helper’s digest before every run and before a bootstrap fetches', () => {
@@ -152,6 +161,15 @@ function everyScript(): Record<string, string> {
         slug: 'acme/puddle',
       }),
       { home: "D:\\puddle's home" },
+    ),
+    removal: windowsScript(
+      bootstrapScript({
+        op: 'remove',
+        version: '1.2.3',
+        install: { purge: true },
+        helper: staged,
+        slug: 'acme/puddle',
+      }),
     ),
     streamed: windowsScript(
       bootstrapScript({

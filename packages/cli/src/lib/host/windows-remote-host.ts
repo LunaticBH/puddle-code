@@ -13,6 +13,7 @@ import type { RunningSshCommand, SshTransport } from '../transport/ssh.js';
 import {
   bootstrapScript,
   HELPER_MISSING_EXIT,
+  type BootstrapOp,
   NO_RUNTIME_EXIT,
   runHelperScript,
   stageScript,
@@ -362,7 +363,8 @@ export class RemoteWindowsHost implements WindowsHostOps {
       ...(slug !== undefined ? { slug } : {}),
     };
     logger.info(`installing puddled ${version} on ${this.ssh.label}`);
-    if (tarball !== undefined) return this.bootstrap(version, request, logger, tarball);
+    const boot = { op: 'install' as const, version, request, logger, ...(slug ? { slug } : {}) };
+    if (tarball !== undefined) return this.bootstrap({ ...boot, tarball });
     if (probe.node === probe.arch) {
       return this.run('install', request, {
         runtime: 'copy',
@@ -370,15 +372,57 @@ export class RemoteWindowsHost implements WindowsHostOps {
         timeoutMs: INSTALL_TIMEOUT_MS,
       });
     }
-    return this.bootstrap(version, request, logger);
+    return this.bootstrap(boot);
   }
 
-  private async bootstrap(
-    version: string,
-    install: Record<string, unknown>,
-    logger: Logger,
-    tarball?: string,
+  /**
+   * A removal or sweep, whose helper normally runs on the home's own
+   * runtime. One whose `bin\current\bin\node.exe` is gone (quarantined, or
+   * its version folder deleted while `bin\current` still names it) runs on
+   * the node.exe of this launcher's release instead, fetched as a first
+   * install fetches it, so a broken install can still be removed.
+   */
+  private async withAnyRuntime(
+    op: 'remove' | 'sweep',
+    request: Record<string, unknown>,
+    opts: HelperRun,
   ): Promise<unknown> {
+    try {
+      return await this.run(op, request, opts);
+    } catch (err) {
+      if (!(err instanceof NoRuntimeError)) throw err;
+    }
+    const logger = opts.logger ?? silentLogger;
+    const version = pinnedDaemonVersion();
+    const slug = repoSlug();
+    if (slug === undefined) {
+      throw new CliError(
+        'not_installed',
+        `the installed runtime on ${this.ssh.label} is gone, and this build has no release ` +
+          `source to fetch one from for the ${op}`,
+        `set PUDDLE_REPO=owner/repo, or run puddle remove daemon on ${this.ssh.label} itself`,
+      );
+    }
+    logger.info(
+      `the installed runtime on ${this.ssh.label} is gone — fetching the node.exe of ` +
+        `puddled ${version} for the ${op}`,
+    );
+    return this.bootstrap({ op, version, request, slug, logger });
+  }
+
+  /**
+   * The bootstrap route (bootstrapScript): `op` by the release archive's own
+   * node.exe, fetched with `slug` or streamed from `tarball`.
+   */
+  private async bootstrap(opts: {
+    op: BootstrapOp;
+    version: string;
+    request: Record<string, unknown>;
+    logger: Logger;
+    slug?: string;
+    tarball?: string;
+  }): Promise<unknown> {
+    const { op, version, logger, tarball } = opts;
     let archive: Parameters<typeof bootstrapScript>[0]['archive'];
     if (tarball !== undefined) {
       const name = process.platform === 'win32' ? win32.basename(tarball) : basename(tarball);
@@ -395,16 +439,16 @@ export class RemoteWindowsHost implements WindowsHostOps {
     }
     for (let attempt = 0; ; attempt++) {
       const script = bootstrapScript({
+        op,
         version,
-        install,
+        install: opts.request,
         helper: await this.helper(attempt > 0),
-        ...(archive ? { archive } : {}),
-        ...(typeof install.slug === 'string' ? { slug: install.slug } : {}),
+        ...(archive ? { archive } : { ...(opts.slug !== undefined ? { slug: opts.slug } : {}) }),
       });
       const outcome = await this.collectStream(script, logger, tarball);
       // Checked before anything is fetched: a helper %TEMP% clean-up removed is staged again.
       if (missing(outcome) && attempt === 0) continue;
-      return this.settle('installation', outcome);
+      return this.settle(op === 'install' ? 'installation' : op, outcome);
     }
   }
 
@@ -446,13 +490,13 @@ export class RemoteWindowsHost implements WindowsHostOps {
 
   async sweep(): Promise<string[]> {
     if ((await this.presentVersion()) === null) return [];
-    const value = await this.run('sweep', {}, { timeoutMs: 2 * 60_000 });
+    const value = await this.withAnyRuntime('sweep', {}, { timeoutMs: 2 * 60_000 });
     return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
   }
 
   /** From a temporary copy of node.exe: the installed one's image would keep its tree. */
   async remove(opts: { purge: boolean; logger?: Logger }): Promise<void> {
-    await this.run(
+    await this.withAnyRuntime(
       'remove',
       { purge: opts.purge },
       { runtime: 'copy', timeoutMs: 2 * 60_000, ...(opts.logger ? { logger: opts.logger } : {}) },
