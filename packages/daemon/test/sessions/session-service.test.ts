@@ -616,41 +616,45 @@ describe('native conversation lifecycle', () => {
     await f.service.kill(session.id);
   });
 
-  it('lets shutdown wait, within a bound, for the lifecycle disposal an agent’s exit began', async () => {
-    // As a Codex app-server's stop on Windows: it reads the process table
-    // before it ends what is attached to the server's console.
-    let finish: (() => void) | undefined;
-    const adapter = {
-      ...fakeAdapter(),
-      prepareLifecycleLaunch: async (context: { args: string[] }) => ({
-        args: context.args,
-        dispose: () => new Promise<void>((resolve) => (finish = resolve)),
-      }),
-    };
-    const f = fixture({ adapter });
-    f.service.setSignalPort(65432);
-    await expect(f.service.lifecyclesDisposed(60_000)).resolves.toBeUndefined();
-    const session = await f.service.create({
-      project_id: f.ids.project,
-      account_id: f.ids.account,
-    });
-    await waitFor(() => f.logs.readTail(session.id, 'agent').includes('LAUNCH'));
-    expect(f.service.get(session.id).native_sync).toBe('full');
-    await f.service.kill(session.id);
-    expect(finish).toBeDefined();
-    // Still running: the wait ends at its bound.
-    let settled = false;
-    const waiting = f.service.lifecyclesDisposed(60_000).then(() => (settled = true));
-    const startedAt = Date.now();
-    await f.service.lifecyclesDisposed(100);
-    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(90);
-    expect(settled).toBe(false);
-    // Finished: the wait ends with it.
-    finish!();
-    await waiting;
-    expect(settled).toBe(true);
-    await expect(f.service.lifecyclesDisposed(60_000)).resolves.toBeUndefined();
-  });
+  // Windows only: POSIX keeps the untracked disposal, whose stops are immediate signals.
+  it.skipIf(process.platform !== 'win32')(
+    'lets shutdown wait, within a bound, for the lifecycle disposal an agent’s exit began',
+    async () => {
+      // As a Codex app-server's stop on Windows: it reads the process table
+      // before it ends what is attached to the server's console.
+      let finish: (() => void) | undefined;
+      const adapter = {
+        ...fakeAdapter(),
+        prepareLifecycleLaunch: async (context: { args: string[] }) => ({
+          args: context.args,
+          dispose: () => new Promise<void>((resolve) => (finish = resolve)),
+        }),
+      };
+      const f = fixture({ adapter });
+      f.service.setSignalPort(65432);
+      await expect(f.service.lifecyclesDisposed(60_000)).resolves.toBeUndefined();
+      const session = await f.service.create({
+        project_id: f.ids.project,
+        account_id: f.ids.account,
+      });
+      await waitFor(() => f.logs.readTail(session.id, 'agent').includes('LAUNCH'));
+      expect(f.service.get(session.id).native_sync).toBe('full');
+      await f.service.kill(session.id);
+      expect(finish).toBeDefined();
+      // Still running: the wait ends at its bound.
+      let settled = false;
+      const waiting = f.service.lifecyclesDisposed(60_000).then(() => (settled = true));
+      const startedAt = Date.now();
+      await f.service.lifecyclesDisposed(100);
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(90);
+      expect(settled).toBe(false);
+      // Finished: the wait ends with it.
+      finish!();
+      await waiting;
+      expect(settled).toBe(true);
+      await expect(f.service.lifecyclesDisposed(60_000)).resolves.toBeUndefined();
+    },
+  );
 
   it('marks a hook launch fallback when the installed agent version is unsupported', async () => {
     const adapter = {

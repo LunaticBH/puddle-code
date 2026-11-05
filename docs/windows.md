@@ -143,9 +143,11 @@ supported release) and through native system tools (`tar.exe`, `curl.exe`, `task
    4.5 s after a stop request, 250 ms after a SIGKILL and 5 s after a natural exit, however slow
    PowerShell is. The daemon records each PTY's root and console host in `<home>\pty-roots.json`,
    and after a crash the supervisor ends only what is still attached to a recorded console. The
-   headless agent driver ends its CLI's console the same way, never its whole tree. Elsewhere,
-   process trees stop through creation-time-consistent descendants only, never `taskkill /T` on a
-   pid the process table cannot vouch for.
+   headless agent driver and the Codex app-server stop end their console the same way, never a
+   whole live tree. Compile commands and notebook kernels stop as trees of creation-time-consistent
+   descendants that spare GUI programs and what they start, never `taskkill /T` on a pid the process
+   table cannot vouch for; daemon shutdown waits, bounded per stop (5 s each), for those stops, so
+   nothing they should end outlives the daemon.
 9. **Executables.** Lookup honours `PATHEXT` and uses absolute `PATH` entries only: a bare name is
    never looked up in the working directory, and one missing from `PATH` is refused rather than
    spawned. A relative path with a directory part names a file in the command's working directory.

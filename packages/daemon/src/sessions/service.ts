@@ -304,9 +304,17 @@ export class SessionService extends EventEmitter {
     });
   }
 
-  /** Disposes `resource`, tracked until its disposal has finished (lifecyclesDisposed). */
+  /**
+   * Disposes `resource`, tracked on Windows until its disposal has finished
+   * (lifecyclesDisposed). POSIX keeps the untracked call: its stops are
+   * immediate signals, and a rejected disposal surfaces as before.
+   */
   private disposeLifecycle(resource: LifecycleLaunchResource | null): void {
     if (!resource) return;
+    if (process.platform !== 'win32') {
+      void resource.dispose();
+      return;
+    }
     const disposal: Promise<void> = Promise.resolve(resource.dispose())
       .catch((error: unknown) =>
         console.warn(`agent lifecycle bridge did not close: ${(error as Error).message}`),
