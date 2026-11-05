@@ -5,11 +5,23 @@
  * The source holds no double quotes, which node-pty's Windows command-line
  * quoting would have to escape.
  *
- * Windows has no process groups or SIGTERM: the CLI stays attached to the
- * ConPTY console (so closing the terminal ends it) with its window hidden,
- * and `taskkill /T /F` stops its whole tree. The next turn is admitted only
- * after taskkill exits. A descendant whose parent already exited is no longer
- * reachable through the tree; only a job object could hold it.
+ * Windows has no process groups or SIGTERM. The CLI runs hidden in a console
+ * of its own, never the PTY's (libuv starts a child with `windowsHide` and no
+ * inherited stdio with CREATE_NO_WINDOW), so that, like a POSIX CLI in a
+ * session of its own, it never reads or writes the terminal; that console
+ * stands for its process group (docs/windows.md, decision 8). Ending a turn,
+ * or the driver, ends the CLI and what is attached to its console, through a
+ * ConPTY helper the driver starts with its first turn (`own`,
+ * pty/conpty-jobs.ts; the daemon sends how, as `helper`), which holds each
+ * process open from when it names it, so that no pid it ends is ever another
+ * process's: never a GUI programme nor what one started, nor what left the
+ * console (a detached process, one in a console of its own), as the PTY's
+ * teardown spares them. The next turn is admitted only once that is done.
+ * Without the helper (Constrained Language Mode, or one too slow to start),
+ * only the CLI is ended, through its own handle. A driver ended before it
+ * could do this (a SIGKILL) takes the CLI and its helper with it (libuv
+ * holds the children it starts in a kill-on-close job), but nothing else
+ * attached to the CLI's console.
  */
 export const HEADLESS_TERMINAL_SOURCE = String.raw`
 const net = require('node:net');
@@ -17,28 +29,122 @@ const { spawn } = require('node:child_process');
 const socket = net.connect(process.argv[1]);
 const token = process.argv[2];
 const windows = process.platform === 'win32';
-const taskkill = require('node:path').win32.join(
-  process.env.SystemRoot || process.env.windir || 'C:/Windows', 'System32', 'taskkill.exe');
 let child = null, current = null, buffer = '', stopping = false, killTimer = null, release = null;
+let launch = null, helper = null, asked = 0, holds = 0;
+const answers = new Map();
 const send = (message) => {
   if (!socket.destroyed) return socket.write(JSON.stringify(message) + '\n');
   return false;
+};
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Windows: this driver's ConPTY helper, started once, ending with this process.
+const startHelper = () => {
+  if (helper || !launch) return helper;
+  let proc;
+  try {
+    proc = spawn(launch.file, launch.args, {
+      env: { ...process.env, ...launch.env }, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true,
+    });
+  } catch {
+    return (helper = { dead: true, up: Promise.resolve(false) });
+  }
+  const self = helper = { proc, dead: false, up: null };
+  let text = '';
+  self.up = new Promise((resolve) => {
+    const timer = setTimeout(() => { resolve(false); gone(); proc.kill(); }, 15000);
+    const gone = () => {
+      clearTimeout(timer);
+      self.dead = true;
+      resolve(false);
+      for (const answer of [...answers.values()]) answer(null);
+    };
+    proc.on('error', gone);
+    proc.on('exit', gone);
+    proc.stdout.setEncoding('utf8');
+    proc.stdout.on('data', (data) => {
+      text += data;
+      for (;;) {
+        const end = text.indexOf('\n');
+        if (end < 0) break;
+        const line = text.slice(0, end).trim(); text = text.slice(end + 1);
+        const space = line.indexOf(' ');
+        if (line === 'ready') { clearTimeout(timer); resolve(true); }
+        else if (space > 0) answers.get(line.slice(0, space))?.(line.slice(space + 1));
+      }
+    });
+  });
+  proc.stdin.on('error', () => {});
+  proc.stdout.on('error', () => {});
+  return self;
+};
+// One request to the helper; null when it is not available or does not answer within ms.
+const ask = (line, ms) => {
+  const active = startHelper();
+  if (!active) return Promise.resolve(null);
+  return active.up.then((up) => !up || active.dead ? null : new Promise((resolve) => {
+    const seq = String(++asked);
+    const done = (answer) => {
+      clearTimeout(timer);
+      answers.delete(seq);
+      resolve(answer === null || answer.startsWith('error') ? null : answer);
+    };
+    const timer = setTimeout(() => done(null), ms);
+    answers.set(seq, done);
+    active.proc.stdin.write(seq + ' ' + line + '\n');
+  }));
+};
+// The helper's hold on a CLI this driver spawned between from and to, and on
+// the console host of its own console; null without one.
+const hold = (proc, from, to) => {
+  if (!launch || !proc.pid) return Promise.resolve(null);
+  const id = 'cli' + (++holds);
+  const request = ['own', id, proc.pid, from - 100, to + 100, process.pid].join(' ');
+  return ask(request, 20000).then((answer) => {
+    const [state, , host, hostCreated] = String(answer).split(' ');
+    if (state === 'ok') return { id, host: Number(host), hostCreated: Number(hostCreated) };
+    if (answer !== null) ask('release ' + id, 1000);
+    return null;
+  });
+};
+// Ends the CLI and what is attached to its console, held by the helper:
+// created after its host and naming it, or listed by the console itself;
+// never a GUI programme nor what one started, nor the host (it goes once
+// nothing is attached). Then the CLI by its handle, should the helper not have.
+const endCli = async (active) => {
+  // A helper still starting is waited for, less long once the driver is stopping.
+  const asking = Date.now();
+  let held;
+  active.held.then((value) => (held = value));
+  while (held === undefined && Date.now() - asking < (stopping ? 1500 : 5000)) await pause(25);
+  for (let round = 0; held && round < 3; round++) {
+    const scan = await ask('scan ' + held.id + ' ' + (round === 0 ? 1 : 0), 1500);
+    const fields = (scan || '').split(' ');
+    if (fields[0] !== 'ok') break;
+    const targets = fields[1] === '1' ? ['root'] : [];
+    for (const item of fields.slice(3)) {
+      const [pid, created, subsystem, host, listed, guiStarted] = item.split(':').map(Number);
+      const attached = held.host > 0 && created >= held.hostCreated &&
+        (listed === 1 || host === held.host);
+      if (attached && subsystem !== 2 && guiStarted !== 1) targets.push(pid + '@' + created);
+    }
+    if (targets.length === 0) break;
+    await ask('terminate ' + held.id + ' ' + targets.join(' '), 1500);
+  }
+  if (active.exitCode === null && active.signalCode === null) {
+    try { active.kill(); } catch {}
+  }
 };
 const kill = () => {
   const active = child;
   if (!active?.pid || killTimer) return;
   const pid = active.pid;
   if (windows) {
-    const killer = killTimer = spawn(taskkill, ['/PID', String(pid), '/T', '/F'], {
-      stdio: 'ignore', windowsHide: true,
-    });
-    const done = () => {
+    const killer = killTimer = endCli(active).catch(() => {}).then(() => {
       if (killTimer !== killer) return;
       killTimer = null;
       release?.();
-    };
-    killer.once('error', done);
-    killer.once('exit', done);
+      if (stopping) process.exit(0);
+    });
     return;
   }
   try { process.kill(-pid, 'SIGTERM'); } catch {}
@@ -52,6 +158,8 @@ const stop = () => {
   if (stopping) return;
   stopping = true;
   kill();
+  // Windows: on once the CLI's console is ended, within the PTY's close grace.
+  if (windows && killTimer) return void setTimeout(() => process.exit(0), 2500);
   setTimeout(() => process.exit(0), 550);
 };
 process.on('SIGHUP', stop);
@@ -79,6 +187,8 @@ socket.on('data', (data) => {
     try { message = JSON.parse(line); } catch { return stop(); }
     if (message.type === 'display') {
       process.stdout.write(String(message.text).replace(/\r?\n/g, '\r\n'));
+    } else if (windows && message.type === 'helper' && launch === null && helper === null) {
+      launch = { file: String(message.file), args: message.args, env: message.env };
     } else if (message.type === 'cancel') {
       // Completion may already be in flight when cancellation arrives.
       if (message.id === current) kill();
@@ -88,10 +198,12 @@ socket.on('data', (data) => {
       // Structured execution reports through its owner, not inherited hooks.
       delete env.PUDDLE_AGENT_SIGNAL_URL;
       delete env.PUDDLE_AGENT_SIGNAL_NONCE;
+      const from = Date.now();
       const proc = child = spawn(message.binary, message.args, {
         env, detached: !windows, stdio: ['pipe', 'pipe', 'pipe'],
         ...(windows ? { windowsHide: true, windowsVerbatimArguments: message.verbatim === true } : {}),
       });
+      if (windows) proc.held = hold(proc, from, Date.now());
       for (const name of ['stdout', 'stderr']) proc[name].on('data', (bytes) => {
         if (!send({ type: name, id, data: bytes.toString('base64') })) proc[name].pause();
       });
@@ -104,6 +216,8 @@ socket.on('data', (data) => {
         socket.off('drain', drain);
         release = () => {
           child = null; current = null; release = null;
+          // Windows: the turn's processes are ended, or exited: the helper lets them go.
+          if (windows) proc.held.then((held) => held && ask('release ' + held.id, 1000));
           send({ type: 'exit', id, code, signal });
         };
         if (killTimer && !windows) {
