@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import pty from 'node-pty';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -9,6 +10,7 @@ import { listWindowsProcesses, type WindowsProcess } from '@puddle/shared/node/p
 import { guardConsoleListKill } from '../../src/pty/conpty-console-list.js';
 import {
   ConptyHelper,
+  conptyHelperLaunch,
   HELPER_ARGS,
   isConptyHelper,
   noteConptySpawn,
@@ -410,5 +412,76 @@ describe.skipIf(process.platform !== 'win32')('the ConPTY helper on Windows', ()
       await helper.adopt({ pid: child.pid!, createdAtMs: now, parentPid: process.pid }),
     ).toBeNull();
     child.kill();
+  });
+
+  /** The real helper, spoken to as the headless driver speaks to it (terminal-source.ts). */
+  async function driverHelper() {
+    const launch = conptyHelperLaunch();
+    const proc = spawn(launch.file, [...launch.args], {
+      env: { ...process.env, ...launch.env },
+      stdio: ['pipe', 'pipe', 'ignore'],
+      windowsHide: true,
+    });
+    onTeardown(() => {
+      if (proc.exitCode === null) proc.kill();
+    });
+    const waiting = new Map<string, (answer: string) => void>();
+    let ready!: () => void;
+    const up = new Promise<void>((resolve) => (ready = resolve));
+    createInterface({ input: proc.stdout }).on('line', (line) => {
+      if (line === 'ready') ready();
+      const space = line.indexOf(' ');
+      if (space > 0) waiting.get(line.slice(0, space))?.(line.slice(space + 1));
+    });
+    await up;
+    let sequence = 0;
+    return {
+      ask: (request: string) =>
+        new Promise<string>((resolve) => {
+          const id = String(++sequence);
+          waiting.set(id, resolve);
+          proc.stdin.write(`${id} ${request}\n`);
+        }),
+      stop: () => proc.kill(),
+    };
+  }
+
+  it('owns a CLI in a console of its own only as created by the parent named, in the window given', async () => {
+    const helper = await driverHelper();
+    const fromMs = Date.now();
+    // As the driver starts its CLI: hidden, no stdio inherited, so in a console of its own.
+    const cli = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e9)'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    const toMs = Date.now();
+    onTeardown(() => {
+      if (cli.exitCode === null) cli.kill();
+    });
+    await new Promise((resolve) => cli.once('spawn', resolve));
+    let host: WindowsProcess | undefined;
+    await waitUntil(
+      async () =>
+        (host = (await listWindowsProcesses({ fresh: true })).find(
+          (p) => p.ppid === cli.pid && p.name.toLowerCase() === 'conhost.exe',
+        )) !== undefined,
+      10_000,
+      'its console host',
+    );
+    const window = `${fromMs - 100} ${toMs + 100}`;
+    const owned = (await helper.ask(`own a ${cli.pid} ${window} ${process.pid}`)).split(' ');
+    expect(owned[0]).toBe('ok');
+    expect(Number(owned[2])).toBe(host!.pid);
+    expect(Math.abs(Number(owned[3]) - host!.createdAtMs!)).toBeLessThanOrEqual(1);
+    // Not created in the window given, or not by the parent named: another process's pid.
+    expect(
+      await helper.ask(`own b ${cli.pid} ${toMs + 60_000} ${toMs + 70_000} ${process.pid}`),
+    ).toBe('other 0 0 0');
+    expect(await helper.ask(`own c ${cli.pid} ${window} ${process.ppid}`)).toBe('other 0 0 0');
+    // What it holds is the CLI's: ended as the root, whatever its image.
+    expect(await helper.ask('terminate a root')).toBe('ok 1');
+    await waitUntil(() => cli.exitCode !== null || cli.signalCode !== null, 10_000, 'its exit');
+    expect(await helper.ask('release a')).toBe('ok');
+    helper.stop();
   });
 });

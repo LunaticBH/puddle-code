@@ -31,8 +31,10 @@ import { system32Path } from '@puddle/shared/node/platform';
  * process got there, and nothing it holds ends with it.
  *
  * Node has no API for any of this, so the helper is one hidden Windows
- * PowerShell 5.1 process per daemon (and one per supervisor) running a small
- * C# class (`Add-Type`, compiled by the .NET Framework that ships with
+ * PowerShell 5.1 process per daemon (and one per supervisor, and one per
+ * headless driver that has started its CLI, for the CLI's own console:
+ * `own`, agents/headless/terminal-source.ts) running a small C# class
+ * (`Add-Type`, compiled by the .NET Framework that ships with
  * Windows; its source travels in an environment variable) that answers
  * requests on stdin, where numbers are all that cross. It starts in about
  * half a second; a request takes a few milliseconds. Where
@@ -302,6 +304,7 @@ public static class PuddleConsoles
         if (f.Length == 3 && f[1] == "release") return Release(f[2]);
         if (f.Length == 6 && f[1] == "adopt") return Adopt(f[2], int.Parse(f[3]), long.Parse(f[4]), int.Parse(f[5]));
         if (f.Length >= 3 && f[1] == "classify") return Classify(f[2], f, 3);
+        if (f.Length == 7 && f[1] == "own") return Own(f[2], int.Parse(f[3]), long.Parse(f[4]), long.Parse(f[5]), int.Parse(f[6]));
         return "error usage";
     }
 
@@ -884,6 +887,71 @@ public static class PuddleConsoles
         return pty.Host != null ? "ok " + pty.Host.Created : "gone";
     }
 
+    // Holds 'pid', provided 'parent' created it between fromMs and toMs, as
+    // the root, and the console of its own it was started in (as a hidden
+    // child is, with CREATE_NO_WINDOW) as the host: the conhost.exe it
+    // names, which it created itself. For the headless driver's CLI
+    // (agents/headless/terminal-source.ts): that console stands for its
+    // POSIX process group. Replies with the root's and the host's creation.
+    static string Own(string id, int pid, long fromMs, long toMs, int parent)
+    {
+        var pty = new Pty();
+        pty.From = fromMs;
+        pty.To = toMs;
+        pty.Parent = parent;
+        string state = "gone";
+        Pin root = Open(pid);
+        if (root != null)
+        {
+            Entry entry;
+            if (root.Created < fromMs || root.Created > toMs || !Table().TryGetValue(pid, out entry) ||
+                (int)entry.Parent != parent)
+            {
+                state = "other";
+                Close(root);
+                root = null;
+            }
+            else
+            {
+                root.Parent = parent;
+                state = "ok";
+            }
+        }
+        pty.Root = root;
+        if (root != null)
+        {
+            // Its console is created as it initialises: wait for it, unless it exits first.
+            long named = 0;
+            for (int waited = 0; waited <= 2000; waited += 5)
+            {
+                long host = ConsoleHost(root.Handle);
+                if (host > 0) named = host;
+                if (host != 0 || !Running(root.Handle)) break;
+                Thread.Sleep(5);
+            }
+            Entry entry;
+            if (named > 0 && named <= int.MaxValue && Table().TryGetValue((int)named, out entry) &&
+                (int)entry.Parent == pid &&
+                string.Equals(entry.Exe, "conhost.exe", StringComparison.OrdinalIgnoreCase))
+            {
+                // Held, the root's pid is its own: a conhost.exe naming it as
+                // its parent, created after it, is the one it created. Held
+                // in turn, the host is still the one the root names.
+                Pin host = Open((int)named);
+                if (host != null && host.Created >= root.Created &&
+                    ConsoleHost(root.Handle) == host.Pid && !Assigned(host, pty))
+                {
+                    host.Parent = pid;
+                    pty.Host = host;
+                }
+                else Close(host);
+            }
+        }
+        Put(id, pty);
+        return state + " " + (root != null ? root.Created : 0) + " " +
+            (pty.Host != null ? pty.Host.Pid + " " + pty.Host.Created : "0 0");
+    }
+
     // Holds each pid@created still running as created then, and says what it is.
     static string Classify(string id, string[] f, int from)
     {
@@ -934,6 +1002,25 @@ export const HELPER_ARGS: readonly string[] = [
   '-EncodedCommand',
   Buffer.from(HELPER_SCRIPT, 'utf16le').toString('base64'),
 ];
+
+/** How a helper starts: Windows PowerShell 5.1, its arguments, and what its environment adds. */
+export interface ConptyHelperLaunch {
+  file: string;
+  args: readonly string[];
+  env: Record<string, string>;
+}
+
+/**
+ * The helper's launch, for a process that starts one of its own: the
+ * headless driver does, for its CLI's console (agents/headless/terminal-source.ts).
+ */
+export function conptyHelperLaunch(): ConptyHelperLaunch {
+  return {
+    file: system32Path(win32.join('WindowsPowerShell', 'v1.0', 'powershell.exe')),
+    args: HELPER_ARGS,
+    env: { [SOURCE_VARIABLE]: HELPER_SOURCE },
+  };
+}
 
 /** Whether `commandLine` is a ConPTY helper's (the test suites' process guard leaves it be). */
 export function isConptyHelper(commandLine: string): boolean {
@@ -1084,10 +1171,7 @@ export class ConptyHelper implements ConptyJobs, ConsoleInspector {
   private readonly waiting = new Map<string, (reply: string | null) => void>();
 
   constructor(options: ConptyHelperOptions = {}) {
-    this.worker = options.worker ?? {
-      file: system32Path(win32.join('WindowsPowerShell', 'v1.0', 'powershell.exe')),
-      args: HELPER_ARGS,
-    };
+    this.worker = options.worker ?? conptyHelperLaunch();
     this.startMs = options.startMs ?? 15_000;
     this.answerMs = options.answerMs ?? 5_000;
     this.onLost = options.onLost;
