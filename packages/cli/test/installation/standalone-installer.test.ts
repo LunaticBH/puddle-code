@@ -64,6 +64,7 @@ function fixture() {
   for (const file of [
     'index.js',
     'host-control.mjs',
+    'windows-host.mjs',
     'public/index.html',
     'install.sh',
     'install-cli.sh',
@@ -419,6 +420,7 @@ describe.runIf(process.platform === 'win32')('Windows standalone CLI installer',
     writeFileSync(join(stage, 'VERSION'), '1.2.3\n');
     for (const file of [
       'host-control.mjs',
+      'windows-host.mjs',
       'public/index.html',
       'install.sh',
       'install-cli.sh',

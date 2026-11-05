@@ -120,7 +120,7 @@ main() {
   STAGE=$(mktemp -d "$PREFIX/versions/$VERSION.XXXXXX")
   tar -xzf "$TARBALL" --strip-components=1 -C "$STAGE" || die "extraction failed"
   [ "$(cat "$STAGE/STANDALONE")" = puddle-cli ] && [ "$(cat "$STAGE/VERSION")" = "$VERSION" ] || die "archive metadata mismatch"
-  for ASSET in cli/index.js cli/host-control.mjs cli/public/index.html cli/install.sh cli/install-cli.sh; do
+  for ASSET in cli/index.js cli/host-control.mjs cli/windows-host.mjs cli/public/index.html cli/install.sh cli/install-cli.sh; do
     [ -f "$STAGE/$ASSET" ] || die "archive is missing $ASSET"
   done
   # Help loads the bundle without touching a daemon or user state.

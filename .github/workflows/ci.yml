@@ -53,7 +53,7 @@ jobs:
       - name: verify hardened remote container startup and static files
         run: node deploy/remote/test-images.mjs
       - name: assert web assets ship inside the CLI
-        run: test -f packages/cli/dist/public/index.html && test -f packages/cli/dist/install.sh && test -f packages/cli/dist/host-control.mjs && test -f packages/cli/dist/install-cli.sh && test -f packages/cli/dist/install-cli.ps1
+        run: test -f packages/cli/dist/public/index.html && test -f packages/cli/dist/install.sh && test -f packages/cli/dist/host-control.mjs && test -f packages/cli/dist/windows-host.mjs && test -f packages/cli/dist/install-cli.sh && test -f packages/cli/dist/install-cli.ps1
       # Self-smoke-tests the staged tree (puddled --version loads both native
       # modules), so the release packaging cannot rot between tags.
       - name: build the daemon tarball

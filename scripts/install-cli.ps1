@@ -252,7 +252,7 @@ function Install-PuddleCli {
       (Read-PuddleText $standalone) -ne 'puddle-cli' -or (Read-PuddleText $stagedVersion) -ne $Version) {
       Stop-Puddle 'archive metadata mismatch'
     }
-    foreach ($asset in @('cli\index.js', 'cli\host-control.mjs', 'cli\public\index.html', 'cli\install.sh',
+    foreach ($asset in @('cli\index.js', 'cli\host-control.mjs', 'cli\windows-host.mjs', 'cli\public\index.html', 'cli\install.sh',
         'cli\install-cli.sh', 'cli\install-cli.ps1', 'bin\node.exe', 'puddle.cmd')) {
       if (-not (Test-Path -LiteralPath ([IO.Path]::Combine($stage, $asset)) -PathType Leaf)) {
         Stop-Puddle "archive is missing $asset"
