@@ -10,11 +10,16 @@ import { CliError } from '../types.js';
  * assignment), and which stays far below cmd.exe's 8191-character limit.
  *
  * The loader reads a length-framed UTF-8 script from its raw standard input
- * (`PUDDLE1 <bytes>\n<script>`) and runs it with the rest of that stream, so
- * a payload (a release archive, the host helper, JSON for a connector) can
- * follow the script on the same connection. Scripts never write pipeline
- * output, whose text conversion would corrupt binary data: they write raw
- * bytes, and programs they start inherit the connection's own handles.
+ * (`PUDDLE1 <bytes>\n<script>`) and runs it, leaving the rest of that stream
+ * unread, so a payload (a release archive, the host helper, JSON for a
+ * connector) can follow the script on the same connection. Only native
+ * programs read that payload: a PowerShell loop reading a Windows OpenSSH
+ * session's standard input stalls after a few tens of kilobytes, whereas
+ * tar.exe and node.exe drain it, so a file arrives as a one-entry tar stream
+ * that System32's tar.exe unpacks (Receive-PuddleFile) and anything else is
+ * read by the helper. Scripts never write pipeline output, whose text
+ * conversion would corrupt binary data: they write raw bytes, and programs
+ * they start inherit the connection's own handles.
  * PowerShell default shells report every failure as status 1, so the loader
  * ends its standard error with `puddle-exit:<status>`, and it reports a
  * caught error there as plain UTF-8 rather than PowerShell's CLIXML.
@@ -31,8 +36,9 @@ const LOADER_SOURCE = [
   "$i=[Console]::OpenStandardInput();$h='';while($true){$b=$i.ReadByte();if($b -lt 0){throw 'the script frame ended early'};if($b -eq 10){break};$h+=[char]$b;if($h.Length -gt 24){throw 'not a script frame'}}",
   `if($h -notmatch '^${FRAME_MAGIC} (\\d{1,9})$'){throw 'not a script frame'};$n=[int]$Matches[1];$a=New-Object byte[] $n;$o=0`,
   "while($o -lt $n){$r=$i.Read($a,$o,$n-$o);if($r -le 0){throw 'the script frame ended early'};$o+=$r}",
-  // Assigned, so stray pipeline output never reaches the data stream.
-  '$global:PuddleExit=0;$null=& ([ScriptBlock]::Create([Text.Encoding]::UTF8.GetString($a))) $i;$s=[int]$global:PuddleExit',
+  // Assigned, so stray pipeline output never reaches the data stream. The
+  // script is not handed the stream: what follows it is for native programs.
+  '$global:PuddleExit=0;$null=& ([ScriptBlock]::Create([Text.Encoding]::UTF8.GetString($a)));$s=[int]$global:PuddleExit',
   "}catch{$m=[Text.Encoding]::UTF8.GetBytes('puddle-host: '+$_.Exception.Message+[char]10);$e.Write($m,0,$m.Length);$s=1}",
   "$t=[Text.Encoding]::ASCII.GetBytes('puddle-exit:'+$s+[char]10);$e.Write($t,0,$t.Length);$e.Flush();exit $s",
 ].join('\n');
@@ -57,10 +63,58 @@ export function windowsRemoteCommand(): string {
 /** The loader's source, for tests that run it directly. */
 export const WINDOWS_LOADER = LOADER_SOURCE;
 
+/**
+ * The most the loader reads of its own standard input: the script. A real
+ * Windows OpenSSH session delivers a script of this size to PowerShell
+ * whole, but PowerShell's reads stall on longer streams, so a payload is
+ * never read by PowerShell (see Receive-PuddleFile).
+ */
+export const MAX_SCRIPT_BYTES = 64 * 1024;
+
 /** `PUDDLE1 <bytes>\n` and the script, as the loader reads them. */
 export function frame(script: string): Buffer {
   const body = Buffer.from(script, 'utf8');
+  if (body.length > MAX_SCRIPT_BYTES) {
+    throw new Error(`a Windows host script of ${body.length} bytes is too large to frame`);
+  }
   return Buffer.concat([Buffer.from(`${FRAME_MAGIC} ${body.length}\n`, 'ascii'), body]);
+}
+
+/** The one entry of a payload's tar stream, which Receive-PuddleFile unpacks. */
+export const PAYLOAD_ENTRY = 'payload';
+
+/**
+ * The ustar header of a one-entry tar stream holding `length` bytes, which
+ * follow it; tarTrailer(length) ends the stream. A plain regular file with a
+ * fixed ASCII name: the script names the file it unpacks itself.
+ */
+export function tarHeader(length: number): Buffer {
+  if (!Number.isSafeInteger(length) || length < 0 || length >= 8 ** 11) {
+    throw new Error(`cannot send ${length} bytes in one tar entry`);
+  }
+  const header = Buffer.alloc(512, 0);
+  const field = (offset: number, text: string) => header.write(text, offset, 'ascii');
+  const octal = (value: number, width: number) => value.toString(8).padStart(width - 1, '0') + '\0';
+  field(0, PAYLOAD_ENTRY);
+  field(100, octal(0o644, 8));
+  field(108, octal(0, 8));
+  field(116, octal(0, 8));
+  field(124, octal(length, 12));
+  field(136, octal(Math.floor(Date.now() / 1000), 12));
+  field(156, '0');
+  field(257, 'ustar\0');
+  field(263, '00');
+  // The checksum counts its own field as spaces.
+  field(148, ' '.repeat(8));
+  let sum = 0;
+  for (const byte of header) sum += byte;
+  field(148, sum.toString(8).padStart(6, '0') + '\0 ');
+  return header;
+}
+
+/** The entry's padding to a whole block, then the two empty blocks that end a tar stream. */
+export function tarTrailer(length: number): Buffer {
+  return Buffer.alloc(((512 - (length % 512)) % 512) + 1024, 0);
 }
 
 /**
@@ -109,9 +163,10 @@ export function languageModeRefusal(host: string, output: string): CliError | nu
  * owns). `Invoke-PuddleNode` starts a program that inherits this process's
  * own standard input and output, so they reach it byte for byte; only its
  * standard error is relayed, ahead of the loader's trailer.
+ * `Receive-PuddleFile` has tar.exe, inheriting standard input the same way,
+ * unpack the payload's one-entry tar stream (tarHeader) into a folder.
  */
-const PRELUDE = String.raw`param($PuddleIn)
-$PuddleOut = [Console]::OpenStandardOutput()
+const PRELUDE = String.raw`$PuddleOut = [Console]::OpenStandardOutput()
 function Write-PuddleBytes([byte[]]$Bytes) { $PuddleOut.Write($Bytes, 0, $Bytes.Length); $PuddleOut.Flush() }
 function Write-PuddleLine([string]$Text) { Write-PuddleBytes ([Text.Encoding]::UTF8.GetBytes($Text + [char]10)) }
 function Write-PuddleLog([string]$Message) { Write-PuddleLine (ConvertTo-Json -Compress -InputObject @{ t = 'log'; level = 'info'; message = $Message }) }
@@ -203,18 +258,29 @@ function Get-PuddleArch {
   if (-not $value) { $value = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE } }
   switch ("$value".ToUpperInvariant()) { 'AMD64' { 'x64' } 'ARM64' { 'arm64' } default { "$value".ToLowerInvariant() } }
 }
-function Receive-PuddlePayload([string]$Path, [long]$Length) {
-  $f = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)
-  try {
-    $buffer = New-Object byte[] 65536
-    $left = $Length
-    while ($left -gt 0) {
-      $read = $PuddleIn.Read($buffer, 0, [int][Math]::Min([long]$buffer.Length, $left))
-      if ($read -le 0) { throw 'the connection ended before the whole file arrived' }
-      $f.Write($buffer, 0, $read)
-      $left -= $read
-    }
-  } finally { $f.Dispose() }
+function Receive-PuddleFile([string]$Directory, [long]$Length) {
+  $tar = Join-Path $env:SystemRoot 'System32\tar.exe'
+  if (-not [IO.File]::Exists($tar)) { throw 'tar.exe is missing (it ships with Windows 10 1803 and later)' }
+  $psi = New-Object Diagnostics.ProcessStartInfo
+  $psi.FileName = $tar
+  # A relative ASCII name in the folder it runs in: tar.exe reads its arguments in the ANSI code page.
+  $psi.Arguments = '-xf - ${PAYLOAD_ENTRY}'
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+  $psi.WorkingDirectory = $Directory
+  # Standard input stays the connection's; what tar.exe prints is kept off standard output.
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $p = [Diagnostics.Process]::Start($psi)
+  $out = $p.StandardOutput.ReadToEndAsync()
+  $err = $p.StandardError.ReadToEndAsync()
+  $p.WaitForExit()
+  $path = Join-Path $Directory '${PAYLOAD_ENTRY}'
+  if ($p.ExitCode -ne 0 -or -not [IO.File]::Exists($path) -or ([IO.FileInfo]$path).Length -ne $Length) {
+    $detail = ($out.Result + $err.Result).Trim()
+    throw ('the connection ended before the whole file arrived' + $(if ($detail) { ": $detail" } else { '' }))
+  }
+  $path
 }
 `;
 
@@ -350,12 +416,13 @@ Write-PuddleBytes ([IO.File]::ReadAllBytes($path))`;
 
 /**
  * Stage the host helper as `%TEMP%\puddle-host\<name>` from the payload
- * that follows the script, and print its path. That folder is this
- * account's alone (Get-PuddleTemp creates it owner-only and refuses one
- * that is not: %TEMP% may be C:\Temp, which every user can write), and
- * the copy just received and checked always replaces whatever has the
- * name; one already there is kept only while another operation holds it
- * open, and only when it is identical.
+ * that follows the script (a one-entry tar stream of `length` bytes, which
+ * tar.exe unpacks into a folder of its own there), and print its path.
+ * That folder is this account's alone (Get-PuddleTemp creates it
+ * owner-only and refuses one that is not: %TEMP% may be C:\Temp, which
+ * every user can write), and the copy just received and checked always
+ * replaces whatever has the name; one already there is kept only while
+ * another operation holds it open, and only when it is identical.
  *
  * Staging runs once per client process, so it also clears what operations
  * ended midway by the SSH session's job left behind, their `finally` never
@@ -376,12 +443,13 @@ foreach ($item in @(Get-ChildItem -LiteralPath $dir -Force -ErrorAction Silently
 $dest = Join-Path $dir ${psQuote(name)}
 $want = ${psQuote(sha256.toUpperCase())}
 $tmp = $dest + '.' + [Guid]::NewGuid().ToString('N')
+[void][IO.Directory]::CreateDirectory($tmp)
 try {
-  Receive-PuddlePayload $tmp ${length}
-  if ((Get-FileHash -Algorithm SHA256 -LiteralPath $tmp).Hash -ne $want) { throw 'the host helper arrived damaged' }
-  try { Move-Item -LiteralPath $tmp -Destination $dest -Force }
+  $received = Receive-PuddleFile $tmp ${length}
+  if ((Get-FileHash -Algorithm SHA256 -LiteralPath $received).Hash -ne $want) { throw 'the host helper arrived damaged' }
+  try { Move-Item -LiteralPath $received -Destination $dest -Force }
   catch { if (-not (Test-PuddleHelper $dest $want)) { throw } }
-} finally { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+} finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 Write-PuddleLine (ConvertTo-Json -Compress -InputObject @{ path = [string]$dest })`;
 }
 
@@ -472,7 +540,8 @@ export interface BootstrapRequest {
  * First installation, before any node.exe exists on the host (decision 3):
  * fetch this machine's release zip and SHA256SUMS with System32's curl.exe
  * (which honours the proxy variables), or receive the zip that follows the
- * script; verify it with Get-FileHash; unpack only `bin\node.exe` with
+ * script (a one-entry tar stream that tar.exe unpacks: Receive-PuddleFile);
+ * verify it with Get-FileHash; unpack only `bin\node.exe` with
  * System32's tar.exe; then let the helper, run by that node.exe, install the
  * archive as `installWindowsDaemon` installs a local one. Everything happens
  * in the account's private staging folder (Get-PuddleTemp); the helper
@@ -527,7 +596,7 @@ function helperRun(request: BootstrapRequest): string {
 function receiveArchive(archive: NonNullable<BootstrapRequest['archive']>): string {
   return String.raw`$name = ${psQuote(archive.name)}
   Write-PuddleLog "receiving $name"
-  Receive-PuddlePayload (Join-Path $work $name) ${archive.length}
+  [IO.File]::Move((Receive-PuddleFile $work ${archive.length}), (Join-Path $work $name))
   if ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $work $name)).Hash -ne ${psQuote(archive.sha256.toUpperCase())}) { throw "$name arrived damaged" }
   ${archive.verified ? String.raw`[IO.File]::WriteAllText((Join-Path $work ($name + '.sha256')), ${psQuote(`${archive.sha256}  ${archive.name}\n`)})` : ''}`;
 }

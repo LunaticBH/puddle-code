@@ -61,7 +61,7 @@ function fakeSsh(
         payload = Buffer.concat(chunks);
       }
       sent.push({ script, payload });
-      if (script.includes('Receive-PuddlePayload $tmp')) {
+      if (script.includes('Receive-PuddleFile $tmp')) {
         return { code: 0, stdout: '{"path":"C:\\\\T\\\\windows-host-1.mjs"}\r\n', stderr: '' };
       }
       const reply = answer(script);
@@ -103,7 +103,22 @@ function fakeSsh(
   return { ssh: ssh as unknown as SshTransport, sent, probes };
 }
 
-const isStage = (s: Sent) => s.script.includes('Receive-PuddlePayload $tmp');
+const isStage = (s: Sent) => s.script.includes('Receive-PuddleFile $tmp');
+
+/** The one entry of a payload's tar stream, checked as tar.exe would read it. */
+function untar(stream: Buffer): Buffer {
+  const header = stream.subarray(0, 512);
+  expect(header.subarray(0, 8).toString('ascii')).toBe('payload\0');
+  expect(header.subarray(257, 263).toString('ascii')).toBe('ustar\0');
+  let sum = 0;
+  for (let i = 0; i < 512; i++) sum += i >= 148 && i < 156 ? 32 : header[i]!;
+  expect(parseInt(header.subarray(148, 156).toString('ascii'), 8)).toBe(sum);
+  const size = parseInt(header.subarray(124, 136).toString('ascii'), 8);
+  // Padded to a block, then two empty blocks.
+  expect(stream.length).toBe(512 + Math.ceil(size / 512) * 512 + 1024);
+  expect(stream.subarray(512 + size).every((byte) => byte === 0)).toBe(true);
+  return stream.subarray(512, 512 + size);
+}
 
 const opOf = (script: string) => /@\(\$helper, '([a-z-]+)'/.exec(script)?.[1];
 const requestOf = (script: string, op: string) =>
@@ -124,15 +139,14 @@ describe('a Windows SSH host’s client', () => {
     const host = new RemoteWindowsHost(ssh);
     expect(await host.run('pipe', {})).toBe('daemon');
     expect(await host.run('pipe', {})).toBe('daemon');
-    const stages = sent.filter((s) => s.script.includes('Receive-PuddlePayload $tmp'));
+    const stages = sent.filter(isStage);
     expect(stages).toHaveLength(2);
-    // The helper travels as the stage's payload, by its own digest.
+    // The helper travels as the stage's payload, a tar stream tar.exe unpacks, by its own digest.
     expect(Buffer.isBuffer(stages[0]!.payload)).toBe(true);
+    const helper = untar(stages[0]!.payload as Buffer);
+    expect(stages[0]!.script).toContain(`Receive-PuddleFile $tmp ${helper.length}`);
     expect(stages[0]!.script).toContain(
-      createHash('sha256')
-        .update(stages[0]!.payload as Buffer)
-        .digest('hex')
-        .toUpperCase(),
+      createHash('sha256').update(helper).digest('hex').toUpperCase(),
     );
   });
 
@@ -504,8 +518,9 @@ describe('a Windows SSH host’s client', () => {
     const { ssh, sent } = fakeSsh(() => ({ code: 0, lines: [{ t: 'result' }] }));
     await new RemoteWindowsHost(ssh).install({ tarball: zip });
     const boot = sent.at(-1)!;
-    expect(String(boot.payload)).toBe('archive bytes');
-    expect(boot.script).toContain(`Receive-PuddlePayload (Join-Path $work $name) 13`);
+    // A tar stream that tar.exe unpacks on the host: PowerShell never reads it.
+    expect(untar(boot.payload as Buffer).toString()).toBe('archive bytes');
+    expect(boot.script).toContain(`Receive-PuddleFile $work 13`);
     expect(boot.script).toContain(digest.toUpperCase());
     // An authentic sum is written beside the archive for the installer to check again.
     expect(boot.script).toContain(`${digest}  puddled-v1.2.3-win32-x64.zip`);
@@ -517,5 +532,20 @@ describe('a Windows SSH host’s client', () => {
     await expect(
       new RemoteWindowsHost(ssh).install({ tarball: join(dir, 'puddled.zip') }),
     ).rejects.toMatchObject({ code: 'not_installed' });
+  });
+
+  it('never sends a payload PowerShell would have to read itself', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'puddle-remote-zip-'));
+    const zip = join(dir, 'puddled-v1.2.3-win32-x64.zip');
+    writeFileSync(zip, Buffer.alloc(300_000, 7));
+    const { ssh, sent } = fakeSsh(() => ({ code: 0, lines: [{ t: 'result' }] }));
+    await new RemoteWindowsHost(ssh).install({ tarball: zip });
+    // Every payload past a few bytes is a tar stream: the helper's and the archive's.
+    const large = sent.filter((s) => Buffer.isBuffer(s.payload) && s.payload.length > 1024);
+    expect(large).toHaveLength(2);
+    for (const { script, payload } of large) {
+      expect(script).toMatch(/Receive-PuddleFile \$\w+ \d+/);
+      expect(untar(payload as Buffer).length).toBeGreaterThan(0);
+    }
   });
 });

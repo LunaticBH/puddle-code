@@ -10,6 +10,7 @@ import {
   frame,
   fromB64json,
   languageModeRefusal,
+  MAX_SCRIPT_BYTES,
   parseProbe,
   parseTrailer,
   PROBE_SCRIPT,
@@ -17,10 +18,16 @@ import {
   readHomeFileScript,
   runHelperScript,
   stageScript,
+  tarHeader,
+  tarTrailer,
   WINDOWS_LOADER,
   windowsRemoteCommand,
   windowsScript,
 } from '../../src/lib/transport/windows-remote.js';
+
+/** A file as the one entry of a tar stream, as the client sends every file. */
+const tarred = (body: Buffer) =>
+  Buffer.concat([tarHeader(body.length), body, tarTrailer(body.length)]);
 
 /**
  * The PowerShell primitive every Windows SSH host operation rides on
@@ -47,6 +54,34 @@ describe('the Windows remote command', () => {
     const header = framed.subarray(0, framed.indexOf(10) + 1).toString('ascii');
     expect(header).toBe(`PUDDLE1 ${Buffer.byteLength('Write-Output "é"')}\n`);
     expect(framed.subarray(header.length).toString('utf8')).toBe('Write-Output "é"');
+  });
+
+  it('keeps every script small enough for PowerShell to read whole', () => {
+    // PowerShell's own reads of an SSH session's standard input stall on long
+    // streams: only scripts are read by it, and every one stays far below the cap.
+    for (const [name, script] of Object.entries(everyScript())) {
+      expect(Buffer.byteLength(script), name).toBeLessThan(MAX_SCRIPT_BYTES / 2);
+    }
+    expect(() => frame('#'.repeat(MAX_SCRIPT_BYTES + 1))).toThrow('too large to frame');
+    // Nor is the stream handed to a script: what follows it is for native programs.
+    expect(WINDOWS_LOADER).not.toMatch(/GetString\(\$a\)\)\) \$i/);
+  });
+
+  it('writes a one-entry ustar stream tar.exe can unpack', () => {
+    const header = tarHeader(1234);
+    expect(header).toHaveLength(512);
+    expect(header.subarray(0, 8).toString('ascii')).toBe('payload\0');
+    expect(header.subarray(124, 136).toString('ascii')).toBe('00000002322\0');
+    expect(header.subarray(257, 265).toString('ascii')).toBe('ustar\x0000');
+    let sum = 0;
+    for (let i = 0; i < 512; i++) sum += i >= 148 && i < 156 ? 32 : header[i]!;
+    expect(parseInt(header.subarray(148, 156).toString('ascii'), 8)).toBe(sum);
+    // Padded to a block, then two empty blocks.
+    expect(tarTrailer(1234)).toHaveLength(1536 - 1234 + 1024);
+    expect(tarTrailer(1024)).toHaveLength(1024);
+    expect(tarTrailer(0)).toHaveLength(1024);
+    expect(() => tarHeader(8 ** 11)).toThrow();
+    expect(() => tarHeader(-1)).toThrow();
   });
 
   it('takes the script’s own status from the trailer, whatever the shell reported', () => {
@@ -355,7 +390,7 @@ describe.runIf(process.platform === 'win32')('the loader on Windows', () => {
     const script = windowsScript(
       `${age}\n${stageScript('windows-host-1.mjs', sha256, body.length)}`,
     );
-    const result = await viaShell('cmd', Buffer.concat([frame(script), body]), {
+    const result = await viaShell('cmd', Buffer.concat([frame(script), tarred(body)]), {
       ...process.env,
       TEMP: temp,
       TMP: temp,
@@ -414,7 +449,7 @@ describe.runIf(process.platform === 'win32')('the loader on Windows', () => {
     const result = await inTemp(
       temp,
       stageScript('windows-host-1.mjs', helperDigest, helperBody.length),
-      helperBody,
+      tarred(helperBody),
     );
     expect(parseTrailer(result.stderr)).toEqual({ code: 0, stderr: '' });
     const acl = aclOf(join(temp, 'puddle-host'));
@@ -436,7 +471,7 @@ describe.runIf(process.platform === 'win32')('the loader on Windows', () => {
     const result = await inTemp(
       temp,
       stageScript('windows-host-1.mjs', helperDigest, helperBody.length),
-      helperBody,
+      tarred(helperBody),
     );
     expect(parseTrailer(result.stderr)).toMatchObject({
       code: 1,
@@ -450,7 +485,7 @@ describe.runIf(process.platform === 'win32')('the loader on Windows', () => {
     const first = await inTemp(
       temp,
       stageScript('windows-host-1.mjs', helperDigest, helperBody.length),
-      helperBody,
+      tarred(helperBody),
     );
     expect(parseTrailer(first.stderr).code).toBe(0);
     const dest = join(temp, 'puddle-host', 'windows-host-1.mjs');
@@ -463,7 +498,7 @@ describe.runIf(process.platform === 'win32')('the loader on Windows', () => {
       temp,
       stageScript('windows-host-1.mjs', helperDigest, helperBody.length) +
         `\nWrite-PuddleLine ([string]((Get-Item -LiteralPath ${psQuote(dest)}).LastWriteTimeUtc -gt [DateTime]::UtcNow.AddHours(-1)))`,
-      helperBody,
+      tarred(helperBody),
     );
     expect(parseTrailer(second.stderr).code).toBe(0);
     expect(second.stdout.toString('utf8')).toContain('True');
@@ -474,7 +509,7 @@ describe.runIf(process.platform === 'win32')('the loader on Windows', () => {
     const stage = await inTemp(
       temp,
       stageScript('windows-host-1.mjs', helperDigest, helperBody.length),
-      helperBody,
+      tarred(helperBody),
     );
     const path = (JSON.parse(stage.stdout.toString('utf8')) as { path: string }).path;
     const helper = { path, sha256: helperDigest };
@@ -492,6 +527,33 @@ describe.runIf(process.platform === 'win32')('the loader on Windows', () => {
       bootstrapScript({ version: '1.2.3', install: {}, helper, slug: 'acme/puddle' }),
     );
     expect(parseTrailer(boot.stderr)).toEqual({ code: 3, stderr: '' });
+  }, 60_000);
+
+  it('receives a file through tar.exe, whatever its size, and refuses one cut short', async () => {
+    const body = Buffer.alloc(3 * 1024 * 1024 + 7);
+    for (let i = 0; i < body.length; i++) body[i] = (i * 31 + (i >> 9)) & 0xff;
+    const script = String.raw`$dir = Join-Path (Get-PuddleTemp) 'received'
+[void][IO.Directory]::CreateDirectory($dir)
+$file = Receive-PuddleFile $dir ${body.length}
+Write-PuddleLine (Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash`;
+    const whole = await inTemp(
+      mkdtempSync(join(tmpdir(), 'puddle-receive-')),
+      script,
+      tarred(body),
+    );
+    expect(parseTrailer(whole.stderr)).toEqual({ code: 0, stderr: '' });
+    expect(whole.stdout.toString('utf8').trim()).toBe(
+      createHash('sha256').update(body).digest('hex').toUpperCase(),
+    );
+    const cut = await inTemp(
+      mkdtempSync(join(tmpdir(), 'puddle-receive-')),
+      script,
+      tarred(body).subarray(0, 100_000),
+    );
+    expect(parseTrailer(cut.stderr)).toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining('the connection ended before the whole file arrived'),
+    });
   }, 60_000);
 
   it('refuses a frame that is cut short', async () => {
