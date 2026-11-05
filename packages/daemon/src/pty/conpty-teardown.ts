@@ -29,16 +29,18 @@ export interface HeldRoot {
 }
 
 /**
- * Whether `member` is attached to the PTY's console: the console's own list
- * named it, or it names the console's host and was created after it (a
- * process whose host was terminated keeps naming that pid, which a later
- * host may hold).
+ * Whether `member` is attached to the PTY's console: created after its host
+ * (after its root, while the host is not told apart: nothing older is the
+ * session's, the daemon least of all), and either the console's own list
+ * named it or it names the console's host (a process whose host was
+ * terminated keeps naming that pid, which a later host may hold). With
+ * neither the host nor the root told apart, nothing is.
  */
-export function attachedTo(member: ConsoleMember, host: HeldRoot['console']['host']): boolean {
-  return (
-    member.listed ||
-    (host !== null && member.consoleHost === host.pid && member.createdAtMs >= host.createdAtMs)
-  );
+export function attachedTo(member: ConsoleMember, console: HeldRoot['console']): boolean {
+  const { host } = console;
+  const from = host?.createdAtMs ?? console.rootCreatedAtMs;
+  if (from === null || member.createdAtMs < from) return false;
+  return member.listed || (host !== null && member.consoleHost === host.pid);
 }
 
 function isRoot(member: ConsoleMember, held: HeldRoot): boolean {
@@ -61,9 +63,8 @@ export function consoleTargets(
   options: { root: boolean },
 ): string[] {
   const targets: string[] = [];
-  const host = held.console.host;
   for (const member of scan.members) {
-    if (!attachedTo(member, host)) continue;
+    if (!attachedTo(member, held.console)) continue;
     if (isRoot(member, held)) {
       if (options.root && scan.rootAlive) targets.unshift('root');
     } else if (!member.gui && !member.guiStarted) {
@@ -81,7 +82,7 @@ export function consoleTargets(
 export function guiAttached(scan: ConsoleScan, held: HeldRoot): boolean {
   return scan.members.some(
     (member) =>
-      attachedTo(member, held.console.host) &&
+      attachedTo(member, held.console) &&
       !isRoot(member, held) &&
       (member.gui || member.guiStarted),
   );

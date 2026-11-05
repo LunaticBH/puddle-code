@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,8 +13,10 @@ import {
   isConptyHelper,
   noteConptySpawn,
 } from '../../src/pty/conpty-jobs.js';
+import { endConsole } from '../../src/pty/conpty-teardown.js';
 import { onTeardown } from '../helpers/process-guard.js';
 import {
+  consoleVisitorProgram,
   conptyHosts,
   guiProgram,
   marked,
@@ -309,6 +311,59 @@ describe.skipIf(process.platform !== 'win32')('the ConPTY helper on Windows', ()
     expect(await held!.terminate([...scan!.members.map((m) => m.key), 'host'])).toBe(2);
     expect(await survivors([ping, ...hosts])).toEqual([]);
     expect(await stillRunning(left)).toHaveLength(2);
+    held!.release();
+  });
+
+  it('never reads the console of another process that a root it cannot place attached to', async () => {
+    // A GUI root that attached to another console (its parent's, as
+    // Electron does), its console host not told apart (another spawn began
+    // within the margin): that console's list names the daemon and whatever
+    // shares its console, none of it the PTY's.
+    const helper = new ConptyHelper();
+    helpers.push(helper);
+    const dir = mkdtempSync(join(tmpdir(), 'puddle-helper-'));
+    markers.push(dir);
+    // The stand-in daemon: a node in a hidden console of its own.
+    const standIn = spawn(process.execPath, ['-e', 'setInterval(()=>{},1e9)', `${dir}:stand-in`], {
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    await new Promise((resolve) => standIn.once('spawn', resolve));
+    const flag = join(dir, 'attached.txt');
+    const visitor = await consoleVisitorProgram();
+    const fromMs = Date.now();
+    const proc = pty.spawn(visitor, [String(standIn.pid), '120', flag, `${dir}:root`], {
+      cols: 100,
+      rows: 30,
+      cwd: dir,
+    });
+    const toMs = Date.now();
+    guardConsoleListKill(proc);
+    consoles.push(proc);
+    // Its console host, not told apart, stays until this process exits (as a daemon's would).
+    strays.push(...(await conptyHosts(fromMs, toMs)));
+    noteConptySpawn({ startedAtMs: fromMs + 1, spawnedAtMs: toMs + 1000 });
+    const held = await helper.track(proc.pid, {
+      fromMs: fromMs - 100,
+      toMs: toMs + 100,
+      startedAtMs: fromMs,
+      spawnedAtMs: toMs,
+    });
+    expect(held?.rootCreatedAtMs).not.toBeNull();
+    expect(held?.host).toBeNull();
+    await waitUntil(() => existsSync(flag), 20_000, 'the root’s attach');
+    expect(readFileSync(flag, 'utf8')).toBe('attached');
+    const [standing] = await marked(`${dir}:stand-in`);
+    const scan = await held!.scan({ attach: true });
+    expect(scan?.rootAlive).toBe(true);
+    expect(scan!.members.filter((m) => m.listed)).toEqual([]);
+    expect(scan!.members.some((m) => m.pid === standIn.pid || m.pid === process.pid)).toBe(false);
+    // Nor does a teardown end anything there.
+    expect(await endConsole(proc.pid, held!, { root: true, host: true, attach: true })).toEqual({
+      ended: 0,
+      answered: true,
+    });
+    expect(await stillRunning([standing!])).toHaveLength(1);
     held!.release();
   });
 

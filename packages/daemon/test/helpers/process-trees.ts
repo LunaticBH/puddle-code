@@ -150,6 +150,27 @@ public static class PuddleTestAttachedGui
 }
 `;
 
+const VISITOR_SOURCE = `
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Threading;
+public static class PuddleTestConsoleVisitor
+{
+    [DllImport("kernel32.dll")] static extern bool AttachConsole(int pid);
+
+    // A GUI-subsystem programme that attaches to process <pid>'s console,
+    // as Electron attaches to its parent's, writes whether it could to
+    // <file>, waits <seconds>, then exits.
+    public static int Main(string[] args)
+    {
+        bool attached = AttachConsole(int.Parse(args[0]));
+        File.WriteAllText(args[2], attached ? "attached" : "not attached");
+        Thread.Sleep(int.Parse(args[1]) * 1000);
+        return 0;
+    }
+}
+`;
+
 const programs = new Map<string, Promise<string>>();
 
 /** Compiles `source` as a GUI-subsystem programme `<name>.exe`, once per process. */
@@ -196,6 +217,15 @@ export function guiProgram(): Promise<string> {
  */
 export function attachedGuiProgram(): Promise<string> {
   return compileGui('gui-attach', ATTACHED_GUI_SOURCE);
+}
+
+/**
+ * A GUI-subsystem programme that attaches to another process's console:
+ * `gui-visit.exe <pid> <seconds> <file> [anything]` writes `attached` (or
+ * `not attached`) to `<file>`, then waits.
+ */
+export function consoleVisitorProgram(): Promise<string> {
+  return compileGui('gui-visit', VISITOR_SOURCE);
 }
 
 /**

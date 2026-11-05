@@ -86,7 +86,10 @@ export interface ConptyConsole {
    * What is attached to the console now, each process held open from now on.
    * With `attach`, the helper also reads the console's own list, attaching
    * to it for a moment: never while the console is being closed, whose
-   * close would end the helper with its members. Null when it did not answer.
+   * close would end the helper with its members. While the host is not told
+   * apart, it reads the root's console only when this PTY's spawn could have
+   * created it (never the parent's, which a GUI root may attach to), and
+   * names only what was created after that host. Null when it did not answer.
    */
   scan(options: { attach: boolean }): Promise<ConsoleScan | null>;
   /**
@@ -630,22 +633,34 @@ public static class PuddleConsoles
         }
         if (attach && (rootAlive || host != null))
         {
-            int through = rootAlive && (host == null || AttachedTo(pty.Root, host)) ? pty.Root.Pid : 0;
-            if (through == 0 && host != null)
+            // The console to read: the PTY's own, or, while its host is not
+            // told apart, the one the root runs in, provided this PTY's spawn
+            // could have created it. Never another console the root attached
+            // to (its parent's, as a GUI root such as Electron's does), whose
+            // list names the daemon and whatever shares its console.
+            Pin console = host;
+            Pin found = null;
+            if (console == null) console = found = RootConsole(pty, table);
+            try
             {
-                lock (pty)
+                int through = console != null && rootAlive && AttachedTo(pty.Root, console) ? pty.Root.Pid : 0;
+                if (through == 0 && host != null)
                 {
-                    foreach (var member in pty.Members.Values)
+                    lock (pty)
                     {
-                        if (Running(member.Handle) && AttachedTo(member, host))
+                        foreach (var member in pty.Members.Values)
                         {
-                            through = member.Pid;
-                            break;
+                            if (Running(member.Handle) && AttachedTo(member, host))
+                            {
+                                through = member.Pid;
+                                break;
+                            }
                         }
                     }
                 }
+                if (through != 0) Listed(pty, through, console, listed, table);
             }
-            if (through != 0) Listed(pty, through, host, listed, table);
+            finally { Close(found); }
         }
         var reply = new StringBuilder("ok " + (rootAlive ? 1 : 0) + " " + (host != null ? 1 : 0));
         var members = new List<Pin>();
@@ -662,9 +677,29 @@ public static class PuddleConsoles
         return reply.ToString();
     }
 
+    // The console host the root runs in, held open, when this PTY's spawn
+    // could have created it: a headless host the PTY's parent created within
+    // the spawn's window, before the root, that no other PTY holds. Null
+    // otherwise, as for a GUI root that attached to its parent's console.
+    static Pin RootConsole(Pty pty, Dictionary<int, Entry> table)
+    {
+        if (pty.Root == null || pty.Root.Handle == IntPtr.Zero) return null;
+        long named = ConsoleHost(pty.Root.Handle);
+        if (named <= 0 || named > int.MaxValue) return null;
+        Pin pin = OpenHost((int)named, pty, pty.Parent, table);
+        if (pin != null && pin.Created > pty.Root.Created)
+        {
+            Close(pin);
+            pin = null;
+        }
+        return pin;
+    }
+
     // The console's own list, through 'through', which must be attached to
-    // 'host' (null: not known): each pid listed again once held open is the
-    // process listed the first time.
+    // 'host' (held open meanwhile, so that its pid stays its own): each pid
+    // listed again once held open is the process listed the first time.
+    // Only a process attached to 'host' counts, created after it and after
+    // the PTY's spawn began; never the PTY's parent.
     static void Listed(Pty pty, int through, Pin host, HashSet<string> listed, Dictionary<int, Entry> table)
     {
         var opened = new List<Pin>();
@@ -673,16 +708,17 @@ public static class PuddleConsoles
             if (!AttachConsole(through)) return;
             try
             {
-                if (host != null && ConsoleHost(GetCurrentProcess()) != host.Pid) return;
+                if (ConsoleHost(GetCurrentProcess()) != host.Pid) return;
                 foreach (int pid in List())
                 {
+                    if (pid == pty.Parent) continue;
                     Pin pin = Open(pid);
                     if (pin != null) opened.Add(pin);
                 }
                 var again = new HashSet<int>(List());
                 foreach (var pin in opened)
                 {
-                    if (again.Contains(pin.Pid) && (host == null || AttachedTo(pin, host))) listed.Add(pin.Key);
+                    if (again.Contains(pin.Pid) && pin.Created >= pty.From && AttachedTo(pin, host)) listed.Add(pin.Key);
                 }
             }
             finally { FreeConsole(); }

@@ -90,16 +90,34 @@ describe('consoleTargets', () => {
     expect(consoleTargets(scan([stale, member(11, 200)]), held, { root: false })).toEqual([
       '11@200',
     ]);
-    // The console's own list is the console's word.
+    // Nor one older than the console that a list names: it is no session's process.
     expect(
       consoleTargets(scan([member(17, 50, HOST, { listed: true })]), held, { root: false }),
-    ).toEqual(['17@50']);
+    ).toEqual([]);
   });
 
   it('goes by the console’s own list when the host was never told apart', () => {
     const untold = { pid: ROOT, console: { rootCreatedAtMs: 100, host: null } };
     const members = [member(11, 200, -1, { listed: true }), member(12, 300, -1)];
     expect(consoleTargets(scan(members), untold, { root: false })).toEqual(['11@200']);
+  });
+
+  it('never takes, from a list read through a root it could not place, what is older than the root', () => {
+    // The reviewer's case: a GUI root that attached to its parent's console,
+    // whose list names the daemon (4000, started long before) and what shares its console.
+    const untold = { pid: ROOT, console: { rootCreatedAtMs: 100, host: null } };
+    const members = [
+      member(ROOT, 100, 8000, { listed: true, gui: true }),
+      member(4000, 5, 8000, { listed: true }),
+      member(4001, 3, 8000, { listed: true }),
+    ];
+    expect(consoleTargets(scan(members), untold, { root: false })).toEqual([]);
+    expect(guiAttached(scan(members), untold)).toBe(false);
+    // With neither its host nor its root told apart, nothing is the PTY's.
+    const neither = { pid: ROOT, console: { rootCreatedAtMs: null, host: null } };
+    expect(
+      consoleTargets(scan([member(11, 200, -1, { listed: true })]), neither, { root: true }),
+    ).toEqual([]);
   });
 });
 
