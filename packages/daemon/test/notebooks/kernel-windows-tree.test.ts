@@ -212,18 +212,22 @@ describe.runIf(process.platform === 'win32')('a notebook kernel’s stop on Wind
     describe(how, () => {
       it('ends the kernel’s tree when its bridge exits, never a GUI programme or what one started', async () => {
         const { bridge, ending, spared } = await kernelTree(redirected);
-        // The kernel outlives its bridge: nothing but the daemon ends it.
+        // The kernel outlives its bridge: nothing but the daemon ends it,
+        // and close, as the daemon's stop calls it, resolves once it has.
         bridge.child.kill();
-        expect(await survivors(ending, 10_000)).toEqual([]);
+        await new Promise((resolve) => bridge.child.once('exit', resolve));
+        await bridge.close();
+        expect(await survivors(ending, 0)).toEqual([]);
         expect((await stillRunning(spared)).map(role).sort()).toEqual(spared.map(role).sort());
       });
 
       it('ends the bridge’s tree when it does not shut down, never a GUI programme or what one started', async () => {
         const { bridge, ending, spared } = await kernelTree(redirected);
-        // The stand-in ignores the shutdown request: the bridge is ended after 3 s.
+        // The stand-in ignores the shutdown request: the bridge is ended after
+        // 3 s, and close resolves once its tree has been.
         await bridge.close();
         expect(bridge.child.exitCode !== null || bridge.child.signalCode !== null).toBe(true);
-        expect(await survivors(ending, 10_000)).toEqual([]);
+        expect(await survivors(ending, 0)).toEqual([]);
         expect((await stillRunning(spared)).map(role).sort()).toEqual(spared.map(role).sort());
       });
     });

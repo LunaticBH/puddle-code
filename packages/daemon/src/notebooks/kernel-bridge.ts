@@ -52,6 +52,9 @@ export function windowsKernelIdentity(
   return member ? kernel.createdAtMs : null;
 }
 
+/** How long close waits for a Windows tree stop (a few process-table reads). */
+const STOP_WAIT_MS = 5_000;
+
 export const messageSchema = z.object({
   event: z
     .enum([
@@ -102,6 +105,11 @@ export class KernelBridge {
     }
   >();
   private closePromise: Promise<void> | null = null;
+  /**
+   * Windows: tree stops still running, each of which reads the process table
+   * before it ends anything; close waits for them (stopsSettled).
+   */
+  private readonly stops = new Set<Promise<void>>();
 
   constructor(
     python: string,
@@ -209,24 +217,55 @@ export class KernelBridge {
     });
   }
 
+  /**
+   * Resolves once the bridge has exited, and on Windows once the stops of
+   * its tree and its kernel's have been carried out (or after
+   * STOP_WAIT_MS): a daemon that exited sooner would leave them running.
+   */
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
-    if (this.closed) return Promise.resolve();
+    if (this.closed) return this.stopsSettled();
     this.closePromise = new Promise((resolve) => {
       const timer = setTimeout(() => {
         this.killKernel();
         if (process.platform === 'win32' && this.child.pid !== undefined) {
           // The bridge's tree, which includes any kernel it still owns.
-          void this.tree.kill();
+          this.track(this.tree.kill());
         } else this.child.kill('SIGKILL');
       }, 3000);
       this.child.once('exit', () => {
         clearTimeout(timer);
-        resolve();
+        // (The exit has just begun the kernel's stop, if it still ran.)
+        if (this.stops.size === 0) resolve();
+        else void this.stopsSettled().then(resolve);
       });
       this.child.stdin.end(`${JSON.stringify({ op: 'shutdown' })}\n`);
     });
     return this.closePromise;
+  }
+
+  /** Windows: holds `stop` until it has finished, for close. */
+  private track(stop: Promise<unknown>): void {
+    const tracked: Promise<void> = stop
+      .then(
+        () => undefined,
+        () => undefined,
+      )
+      .finally(() => this.stops.delete(tracked));
+    this.stops.add(tracked);
+  }
+
+  /** Once every tracked stop has finished, or after STOP_WAIT_MS; never rejects. */
+  private stopsSettled(): Promise<void> {
+    if (this.stops.size === 0) return Promise.resolve();
+    const pending = Promise.all(this.stops);
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, STOP_WAIT_MS);
+      void pending.then(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
   }
 
   /**
@@ -263,11 +302,13 @@ export class KernelBridge {
       const identity = this.kernelIdentity;
       this.pid = null;
       this.kernelIdentity = null;
-      void identity
-        ?.then((createdAtMs) =>
-          createdAtMs === null ? undefined : killProcessTree(pid, { root: { createdAtMs } }),
-        )
-        .catch(() => undefined);
+      if (identity) {
+        this.track(
+          identity.then((createdAtMs) =>
+            createdAtMs === null ? undefined : killProcessTree(pid, { root: { createdAtMs } }),
+          ),
+        );
+      }
       return;
     }
     try {
