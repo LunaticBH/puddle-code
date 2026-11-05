@@ -282,6 +282,22 @@ describe.runIf(process.platform === 'win32' && zip !== undefined && existsSync(h
         const hostInfo = (await (await api('/api/host')).json()) as { platform?: string };
         expect(hostInfo.platform).toBe('win32');
 
+        // `puddle remote` starts a transport of its own: the connector's
+        // `--version` gives the host away, and PowerShell does the rest.
+        const before = host.sent().length;
+        const status = host.puddle('remote', 'status', '--profile', '0123456789', 'alice@winhost');
+        await status.exited;
+        const remote = host.sent().slice(before);
+        expect(remote[0]!.command, status.output()).toBe('true');
+        const version = remote.findIndex((s) => s.command?.includes('connector.mjs --version'));
+        expect(version, status.output()).toBeGreaterThan(0);
+        expect(remote[version + 1]!.command).toBe(windowsRemoteCommand());
+        expect(
+          remote.slice(version + 1).every((s) => s.command === windowsRemoteCommand()),
+          status.output(),
+        ).toBe(true);
+        expect(status.output()).not.toContain('POSIX host command');
+
         await killAndPurge(host, cockpit);
       },
       300_000,

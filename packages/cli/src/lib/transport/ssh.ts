@@ -237,6 +237,16 @@ export class SshTransport implements Transport {
     return true;
   }
 
+  /**
+   * A host whose own answer says it is Windows (its connector's `--version`,
+   * reached through a Git Bash default shell), confirmed with the probe;
+   * true once the transport is win32. A ConstrainedLanguage session rejects.
+   */
+  async confirmWindows(): Promise<boolean> {
+    if (this.remotePlatform === 'win32') return true;
+    return this.recogniseWindows();
+  }
+
   private async openWindows(): Promise<void> {
     await this.windowsProbe(true);
   }
