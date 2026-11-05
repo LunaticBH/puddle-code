@@ -8,7 +8,10 @@ import {
   peMachine,
   windowsArchFromProcessor,
   windowsHostArch,
+  type PowerShellRunner,
+  type WindowsHostArchOptions,
 } from '../src/node/platform.js';
+import { queryProcessorArchitecture } from '../src/node/windows-arch.js';
 
 const temp = mkdtempSync(join(tmpdir(), 'puddle-windows-arch-'));
 afterAll(() => rmSync(temp, { recursive: true, force: true }));
@@ -228,6 +231,124 @@ describe('windowsHostArch', () => {
     await expect(windowsHostArch(options)).resolves.toBe('arm64');
     await expect(windowsHostArch(options)).resolves.toBe('arm64');
     expect(asked).toBe(1);
+  });
+
+  it('never memoises an environment guess, so a later call asks again', async () => {
+    let asked = 0;
+    const query = () =>
+      ++asked === 1 ? Promise.reject(new Error('timed out')) : Promise.resolve(registry('ARM64'));
+    const options = {
+      platform: 'win32' as const,
+      arch: 'x64',
+      env: { PROCESSOR_ARCHITECTURE: 'AMD64' },
+      query,
+    };
+    await expect(windowsHostArch(options)).resolves.toBe('x64');
+    await expect(windowsHostArch(options)).resolves.toBe('arm64');
+    await expect(windowsHostArch(options)).resolves.toBe('arm64');
+    expect(asked).toBe(2);
+  });
+
+  describe('when reg.exe is blocked', () => {
+    const blocked = () =>
+      Promise.reject(new Error('ERROR: Registry editing has been disabled by your administrator.'));
+    const answering = (stdout: string, code: number | null = 0) => {
+      const scripts: string[] = [];
+      const powershell: PowerShellRunner = (script) => {
+        scripts.push(script);
+        return Promise.resolve({ code, stdout, stderr: '' });
+      };
+      return { scripts, powershell };
+    };
+
+    it('reads the same value through PowerShell, as install.ps1 and the SSH probe do', async () => {
+      // An emulated x64 process on Arm: its environment says AMD64.
+      const { scripts, powershell } = answering('ARM64\r\n');
+      await expect(
+        windowsHostArch({
+          platform: 'win32',
+          arch: 'x64',
+          env: { PROCESSOR_ARCHITECTURE: 'AMD64' },
+          query: (env) => queryProcessorArchitecture(env, { reg: blocked, powershell }),
+        }),
+      ).resolves.toBe('arm64');
+      expect(scripts).toHaveLength(1);
+      expect(scripts[0]).toContain(
+        "'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment'",
+      );
+      expect(scripts[0]).toContain(
+        'Get-ItemProperty -LiteralPath $key -Name PROCESSOR_ARCHITECTURE',
+      );
+      expect(scripts[0]).toContain('RuntimeInformation]::OSArchitecture');
+    });
+
+    it('asks PowerShell only when reg.exe has no answer', async () => {
+      const quiet = answering('AMD64');
+      await expect(
+        queryProcessorArchitecture(
+          {},
+          {
+            reg: () => Promise.resolve(registry('ARM64')),
+            powershell: quiet.powershell,
+          },
+        ),
+      ).resolves.toBe(registry('ARM64'));
+      expect(quiet.scripts).toEqual([]);
+      const asked = answering('ARM64');
+      await expect(
+        queryProcessorArchitecture(
+          {},
+          {
+            reg: () => Promise.resolve('ERROR: The system was unable to find the specified value'),
+            powershell: asked.powershell,
+          },
+        ),
+      ).resolves.toMatch(/PROCESSOR_ARCHITECTURE\s+REG_SZ\s+ARM64$/);
+      expect(asked.scripts).toHaveLength(1);
+    });
+
+    it('falls back to the environment, unmemoised, only when PowerShell fails too', async () => {
+      for (const [stdout, code] of [
+        ['', 1],
+        ['', 0],
+        ['not an architecture', 0],
+      ] as const) {
+        await expect(
+          queryProcessorArchitecture(
+            {},
+            { reg: blocked, powershell: answering(stdout, code).powershell },
+          ),
+        ).rejects.toThrow('neither reg.exe nor PowerShell');
+      }
+      let calls = 0;
+      const powershell: PowerShellRunner = () =>
+        Promise.resolve(
+          ++calls === 1
+            ? { code: null, stdout: '', stderr: 'blocked' }
+            : { code: 0, stdout: 'ARM64', stderr: '' },
+        );
+      const options: WindowsHostArchOptions = {
+        platform: 'win32',
+        arch: 'x64',
+        env: { PROCESSOR_ARCHITECTURE: 'AMD64' },
+        query: (env) => queryProcessorArchitecture(env, { reg: blocked, powershell }),
+      };
+      await expect(windowsHostArch(options)).resolves.toBe('x64');
+      await expect(windowsHostArch(options)).resolves.toBe('arm64');
+    });
+
+    it.runIf(process.platform === 'win32')(
+      'PowerShell reads what reg.exe reads',
+      async () => {
+        const viaRegExe = await windowsHostArch({ arch: 'x64' });
+        const output = await queryProcessorArchitecture(process.env, { reg: blocked });
+        expect(output).toMatch(/^PROCESSOR_ARCHITECTURE {4}REG_SZ {4}(AMD64|ARM64)$/);
+        await expect(
+          windowsHostArch({ arch: 'x64', query: () => Promise.resolve(output) }),
+        ).resolves.toBe(viaRegExe);
+      },
+      60_000,
+    );
   });
 
   it('is the process architecture on POSIX', async () => {

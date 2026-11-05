@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { closeSync, openSync, readSync } from 'node:fs';
 import { getEnv, system32Path, type Environment } from './environment.js';
+import { runWindowsPowerShell, type PowerShellRunner } from './windows-tasks.js';
 
 /**
  * Windows architectures (docs/windows.md, decision 15, "Packaging"). A
@@ -147,17 +148,32 @@ export interface WindowsHostArchOptions {
   platform?: NodeJS.Platform;
   env?: Environment;
   /**
-   * Reads the system's PROCESSOR_ARCHITECTURE (resolving to `reg.exe query`'s
-   * output by default); injectable so tests never depend on the host. Results
-   * are memoised per query function.
+   * Reads the system's PROCESSOR_ARCHITECTURE as `reg.exe query` prints it
+   * (`queryProcessorArchitecture` by default); injectable so tests never
+   * depend on the host. An answer is memoised per query function; a failure
+   * is not.
    */
   query?: (env: Environment) => Promise<string>;
 }
 
 const REGISTRY_KEY = 'HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment';
+const REGISTRY_VALUE = /PROCESSOR_ARCHITECTURE\s+REG_(?:EXPAND_)?SZ\s+(\S+)/i;
+
+/**
+ * The same value through PowerShell's registry provider, which
+ * DisableRegistryTools and rules that block reg.exe leave open, then .NET's
+ * OSArchitecture: the order install.ps1 reads them in.
+ */
+const POWERSHELL_QUERY = [
+  "$key = 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment'",
+  '$value = $null',
+  'try { $value = (Get-ItemProperty -LiteralPath $key -Name PROCESSOR_ARCHITECTURE -ErrorAction Stop).PROCESSOR_ARCHITECTURE } catch { }',
+  'if (-not $value) { try { $value = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() } catch { } }',
+  '[Console]::Out.Write([string]$value)',
+].join('; ');
 
 /** `reg.exe query` of the machine-wide PROCESSOR_ARCHITECTURE, a native System32 tool. */
-function queryRegistry(env: Environment): Promise<string> {
+function queryRegExe(env: Environment): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
       system32Path('reg.exe', env),
@@ -167,6 +183,38 @@ function queryRegistry(env: Environment): Promise<string> {
     );
   });
 }
+
+export interface ProcessorArchitectureReaders {
+  /** `reg.exe query`'s output; System32's reg.exe unless a test stands in. */
+  reg?: (env: Environment) => Promise<string>;
+  /** Runs the PowerShell fallback; System32's Windows PowerShell unless a test stands in. */
+  powershell?: PowerShellRunner;
+}
+
+/**
+ * The machine-wide PROCESSOR_ARCHITECTURE as `reg.exe query` prints it.
+ * reg.exe answers quickly; when it fails or prints no value (a
+ * DisableRegistryTools policy, an AppLocker or WDAC rule), the same value is
+ * read through PowerShell, so every Puddle process on the machine reaches the
+ * same answer. Rejects only when both fail.
+ */
+export async function queryProcessorArchitecture(
+  env: Environment,
+  readers: ProcessorArchitectureReaders = {},
+): Promise<string> {
+  try {
+    const output = await (readers.reg ?? queryRegExe)(env);
+    if (REGISTRY_VALUE.test(output)) return output;
+  } catch {
+    // Read through PowerShell instead.
+  }
+  const result = await (readers.powershell ?? runWindowsPowerShell)(POWERSHELL_QUERY, {}, 30_000);
+  const value = result.code === 0 ? result.stdout.trim() : '';
+  if (!/^\w+$/.test(value)) throw new Error('neither reg.exe nor PowerShell read the architecture');
+  return `PROCESSOR_ARCHITECTURE    REG_SZ    ${value}`;
+}
+
+const defaultQuery = (env: Environment): Promise<string> => queryProcessorArchitecture(env);
 
 const memo = new WeakMap<(env: Environment) => Promise<string>, Promise<string>>();
 
@@ -180,9 +228,11 @@ const memo = new WeakMap<(env: Environment) => Promise<string>, Promise<string>>
  * the true value. `os.machine()` cannot answer this (libuv asks
  * GetSystemInfo, which reports the emulated architecture), nor can
  * GetNativeSystemInfo (AMD64 for x64 on Arm) or .NET's OSArchitecture before
- * .NET 7. If reg.exe fails, the process environment
- * (PROCESSOR_ARCHITEW6432, then PROCESSOR_ARCHITECTURE) is the fallback,
- * which an emulated x64 process reports as AMD64.
+ * .NET 7 in an emulated process. When reg.exe is blocked, PowerShell reads
+ * the same value (`queryProcessorArchitecture`). Only if neither can is the
+ * process environment (PROCESSOR_ARCHITEW6432, then PROCESSOR_ARCHITECTURE)
+ * the answer, which an emulated x64 process reports as AMD64; that guess is
+ * never memoised, so the next call asks the registry again.
  *
  * Returns `x64` or `arm64`, or another lower-case architecture name for the
  * caller to refuse. On POSIX it is the process architecture.
@@ -193,24 +243,22 @@ export function windowsHostArch(opts: WindowsHostArchOptions = {}): Promise<stri
     return Promise.resolve(arch);
   }
   const env = opts.env ?? process.env;
-  const query = opts.query ?? queryRegistry;
-  let answer = memo.get(query);
-  if (answer === undefined) {
-    answer = query(env)
-      .then((output) => {
-        const value = /PROCESSOR_ARCHITECTURE\s+REG_(?:EXPAND_)?SZ\s+(\S+)/i.exec(output)?.[1];
-        if (value === undefined) throw new Error('reg.exe printed no PROCESSOR_ARCHITECTURE');
-        return windowsArchFromProcessor(value);
-      })
-      .catch(() => {
-        const fallback =
-          getEnv(env, 'PROCESSOR_ARCHITEW6432', 'win32') ??
-          getEnv(env, 'PROCESSOR_ARCHITECTURE', 'win32');
-        return fallback === undefined || fallback === ''
-          ? arch
-          : windowsArchFromProcessor(fallback);
-      });
-    memo.set(query, answer);
-  }
+  const query = opts.query ?? defaultQuery;
+  const memoised = memo.get(query);
+  if (memoised !== undefined) return memoised;
+  const answer: Promise<string> = query(env)
+    .then((output) => {
+      const value = REGISTRY_VALUE.exec(output)?.[1];
+      if (value === undefined) throw new Error('reg.exe printed no PROCESSOR_ARCHITECTURE');
+      return windowsArchFromProcessor(value);
+    })
+    .catch(() => {
+      if (memo.get(query) === answer) memo.delete(query);
+      const fallback =
+        getEnv(env, 'PROCESSOR_ARCHITEW6432', 'win32') ??
+        getEnv(env, 'PROCESSOR_ARCHITECTURE', 'win32');
+      return fallback === undefined || fallback === '' ? arch : windowsArchFromProcessor(fallback);
+    });
+  memo.set(query, answer);
   return answer;
 }
