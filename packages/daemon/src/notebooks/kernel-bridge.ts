@@ -11,10 +11,46 @@ import {
 import {
   childProcessTree,
   killProcessTree,
+  listWindowsProcesses,
+  windowsProcessTree,
   type ChildProcessTree,
+  type ProcessTreeRoot,
+  type WindowsProcess,
 } from '@puddle/shared/node/platform';
 import { NOTEBOOK_BRIDGE } from './bridge.js';
 import { pythonEnvironment } from './python-env.js';
+
+/**
+ * The creation time of the kernel a bridge named on Windows, from a table
+ * read while the bridge most likely still runs, or null when the table
+ * cannot vouch for it. The kernel is in the bridge's tree, not necessarily
+ * its child: a venv's python.exe (CPython 3.7.2 and later, uv, virtualenv)
+ * and py.exe run the real interpreter as their own child, so the process
+ * the daemon started is the real bridge's parent, and the pid the bridge
+ * names (for a venv, the kernel's own redirector) is the real bridge's
+ * child. The kernel was created before the bridge named it (`namedAtMs`): a
+ * holder of its pid created later is another process, as is one outside the
+ * bridge's tree.
+ */
+export function windowsKernelIdentity(
+  table: readonly WindowsProcess[],
+  bridge: ProcessTreeRoot,
+  kernelPid: number,
+  namedAtMs: number,
+): number | null {
+  const [kernel] = windowsProcessTree(table, {
+    pid: kernelPid,
+    ...(bridge.startedAtMs !== undefined ? { startedAtMs: bridge.startedAtMs } : {}),
+    createdBeforeMs: namedAtMs,
+  });
+  if (kernel?.pid !== kernelPid || kernel.createdAtMs === null || kernelPid === bridge.pid) {
+    return null;
+  }
+  const member = windowsProcessTree(table, bridge).some(
+    (entry) => entry.pid === kernel.pid && entry.createdAtMs === kernel.createdAtMs,
+  );
+  return member ? kernel.createdAtMs : null;
+}
 
 export const messageSchema = z.object({
   event: z
@@ -49,9 +85,8 @@ export class KernelBridge {
   readonly child: ChildProcessWithoutNullStreams;
   closed = false;
   private pid: number | null = null;
-  /** When the bridge was started, and when it named its kernel (this process's clock). */
-  private readonly startedAtMs: number;
-  private kernelNamedAtMs = 0;
+  /** Windows: the kernel's creation time (windowsKernelIdentity), once the table is read. */
+  private kernelIdentity: Promise<number | null> | null = null;
   /** What identifies the bridge's process tree on Windows. */
   private readonly tree: ChildProcessTree;
   private sequence = 0;
@@ -75,13 +110,13 @@ export class KernelBridge {
     exactPython = false,
   ) {
     const env = pythonEnvironment(python);
-    this.startedAtMs = Date.now();
+    const startedAtMs = Date.now();
     this.child = spawn(
       python,
       ['-u', '-c', NOTEBOOK_BRIDGE, ...(exactPython ? ['--puddle-python'] : [])],
       { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, ...(env ? { env } : {}) },
     );
-    this.tree = childProcessTree(this.child, this.startedAtMs);
+    this.tree = childProcessTree(this.child, startedAtMs);
     const child = this.child;
     this.ready = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -108,9 +143,13 @@ export class KernelBridge {
             }
             if (message.event === 'spawned' && message.pid) {
               this.pid = message.pid;
-              this.kernelNamedAtMs = Date.now();
+              this.kernelIdentity =
+                process.platform === 'win32' ? this.identifyKernel(message.pid, Date.now()) : null;
             }
-            if (message.event === 'stopped' || message.event === 'dead') this.pid = null;
+            if (message.event === 'stopped' || message.event === 'dead') {
+              this.pid = null;
+              this.kernelIdentity = null;
+            }
             onMessage?.(message);
             if (message.id !== undefined) {
               const pending = this.pending.get(message.id);
@@ -190,22 +229,45 @@ export class KernelBridge {
     return this.closePromise;
   }
 
+  /**
+   * Windows: reads the table as soon as the bridge names its kernel, while
+   * the bridge, whose tree vouches for the kernel, still runs. Never rejects.
+   */
+  private async identifyKernel(pid: number, namedAtMs: number): Promise<number | null> {
+    const bridge = this.child.pid;
+    if (bridge === undefined) return null;
+    // What is known of the bridge before the table is read: an exit noted
+    // after the read would hide a bridge the table shows running.
+    const root = { pid: bridge, ...this.tree.root() };
+    try {
+      return windowsKernelIdentity(
+        await listWindowsProcesses({ fresh: true }),
+        root,
+        pid,
+        namedAtMs,
+      );
+    } catch {
+      return null;
+    }
+  }
+
   private killKernel(): void {
     if (!this.pid) return;
     if (process.platform === 'win32') {
       // No process groups: stop the kernel and what it started as the
       // process table shows its tree (never a GUI programme, nor what one
-      // started, but console processes it started detached as well). The
-      // kernel is the bridge's child, created before the bridge named it:
-      // a later holder of its pid is another process.
-      void killProcessTree(this.pid, {
-        root: {
-          startedAtMs: this.startedAtMs,
-          createdBeforeMs: this.kernelNamedAtMs,
-          ...(this.child.pid !== undefined ? { parentPid: this.child.pid } : {}),
-        },
-      });
+      // started, but console processes it started detached as well), once
+      // it is identified by its creation time: a later holder of its pid is
+      // another process. One the table could not vouch for is left running.
+      const pid = this.pid;
+      const identity = this.kernelIdentity;
       this.pid = null;
+      this.kernelIdentity = null;
+      void identity
+        ?.then((createdAtMs) =>
+          createdAtMs === null ? undefined : killProcessTree(pid, { root: { createdAtMs } }),
+        )
+        .catch(() => undefined);
       return;
     }
     try {

@@ -199,8 +199,6 @@ export interface ProcessTreeRoot {
   readonly createdBeforeMs?: number;
   /** It has exited, at or before this time: whoever holds its pid now is another process. */
   readonly exitedAtMs?: number;
-  /** The process that created it: a holder of its pid naming another parent is another process. */
-  readonly parentPid?: number;
   /**
    * Should it have exited, it did so before this time: a process naming its
    * pid created later is a child of a later holder of that pid.
@@ -220,8 +218,7 @@ const CLOCK_SLACK_MS = 100;
  *
  * A running root is the table's holder of its pid, when that holder was
  * created when the root was (`createdAtMs`), or not before it was started
- * (`startedAtMs`) nor after `createdBeforeMs`, naming `parentPid` as its
- * parent when that is given. A root that has exited is gone
+ * (`startedAtMs`) nor after `createdBeforeMs`. A root that has exited is gone
  * from the table, but its children still name its pid: they are the
  * processes naming it that were created after it was started and before
  * both any later holder of its pid was and the root's exit (`exitedAtMs`,
@@ -243,7 +240,6 @@ export function windowsProcessTree(
     holder !== undefined &&
     holder.createdAtMs !== null &&
     root.exitedAtMs === undefined &&
-    (root.parentPid === undefined || holder.ppid === root.parentPid) &&
     (root.createdAtMs !== undefined && root.createdAtMs !== null
       ? holder.createdAtMs === root.createdAtMs
       : (root.startedAtMs === undefined ||

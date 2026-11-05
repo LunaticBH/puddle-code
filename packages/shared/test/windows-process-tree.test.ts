@@ -143,15 +143,6 @@ describe('windowsProcessTree', () => {
     expect(windowsProcessTree(table, { pid: 0 })).toEqual([]);
   });
 
-  it('never takes a holder naming another parent for a root its parent is known of', () => {
-    // A kernel the bridge (pid 5) started; pid 10 now names a process another one started,
-    // within the window that cannot tell them apart.
-    const reused = [entry(10, 7, 1000), entry(11, 10, 1100)];
-    const root = { pid: 10, startedAtMs: 900, createdBeforeMs: 2000 };
-    expect(windowsProcessTree(reused, { ...root, parentPid: 5 })).toEqual([]);
-    expect(pids(windowsProcessTree(reused, { ...root, parentPid: 7 }))).toEqual([10, 11]);
-  });
-
   it('leaves out what `spare` names and everything below it, never the root', () => {
     const spare = (e: WindowsProcess) => e.pid === 11 || e.pid === 10;
     expect(pids(windowsProcessTree(table, { pid: 10 }, spare))).toEqual([10, 13]);
