@@ -29,10 +29,13 @@ export const FAKE_WINDOWS_SSH_SCRIPT = join(
 
 /**
  * A runnable fake ssh to a Windows host, as `<dir>\ssh.cmd` (npm's shim,
- * which SshTransport unwraps to `node fake-windows-ssh`): pass it as the
- * transport's sshBinary, or put `dir` first on a CLI process's PATH.
- * Windows only, since its "host" is this machine's cmd.exe or PowerShell.
+ * which SshTransport unwraps to `node fake-windows-ssh`), with its scp
+ * beside it as `<dir>\scp.cmd`: pass it as the transport's sshBinary, or put
+ * `dir` first on a CLI process's PATH. Windows only, since its "host" is
+ * this machine's cmd.exe, PowerShell or Git Bash.
  */
 export function fakeWindowsSshBinary(dir = mkdtempSync(join(tmpdir(), 'puddle-fake-winssh-'))) {
-  return writeFakeExecutable(dir, 'ssh', readFileSync(FAKE_WINDOWS_SSH_SCRIPT, 'utf8'));
+  const source = readFileSync(FAKE_WINDOWS_SSH_SCRIPT, 'utf8');
+  writeFakeExecutable(dir, 'scp', source);
+  return writeFakeExecutable(dir, 'ssh', source);
 }
