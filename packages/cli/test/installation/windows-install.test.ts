@@ -10,6 +10,7 @@ import {
   readFileSync,
   readlinkSync,
   rmSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -28,6 +29,7 @@ import {
   type PowerShellRunner,
 } from '@puddle/shared/node/platform';
 import { waitForStartedDaemon } from '../../src/lib/connection/cockpit.js';
+import { localWindowsOps } from '../../src/lib/host/windows-ops.js';
 import { readCurrentVersion } from '../../src/lib/installation/current-link.js';
 import {
   controlPipePresent,
@@ -137,6 +139,32 @@ describe('Windows daemon release assets', () => {
     expect(windowsLauncher()).toBe(
       '@"%~dp0current\\bin\\node.exe" "%~dp0current\\daemon\\puddled.mjs" %*\r\n',
     );
+  });
+
+  it('finds a tree of another architecture for removal and upgrades, never as installed', async () => {
+    const at = mkdtempSync(join(tmpdir(), 'puddle-windows-foreign-'));
+    const tree = join(at, 'bin', 'versions', '0.3.14');
+    mkdirSync(join(tree, 'bin'), { recursive: true });
+    // An arm64 node.exe header: a v1 install on Arm is the x64 build, the other way round.
+    const pe = Buffer.alloc(512);
+    pe.write('MZ', 0, 'latin1');
+    pe.writeUInt32LE(0x80, 0x3c);
+    pe.write('PE\0\0', 0x80, 'latin1');
+    pe.writeUInt16LE(0xaa64, 0x84);
+    writeFileSync(join(tree, 'bin', 'node.exe'), pe);
+    symlinkSync(tree, join(at, 'bin', 'current'), 'junction');
+    // The runtime's path is a Windows one, so only a Windows machine opens it.
+    if (process.platform === 'win32') {
+      expect(await windowsInstalledVersion(at, async () => 'arm64')).toBe('0.3.14');
+      expect(await windowsInstalledVersion(at, async () => 'x64')).toBeNull();
+    }
+    // What `puddle remove` and `puddle upgrade` ask: present, whatever its architecture.
+    expect(await localWindowsOps({ home: () => at }).presentVersion()).toBe('0.3.14');
+    expect(
+      await localWindowsOps({
+        home: () => mkdtempSync(join(tmpdir(), 'puddle-empty-')),
+      }).presentVersion(),
+    ).toBeNull();
   });
 
   it('keeps the current download and one previous', () => {

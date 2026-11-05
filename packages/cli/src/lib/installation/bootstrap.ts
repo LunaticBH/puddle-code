@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { windowsOps } from '../host/windows-ops.js';
+import { windowsOps, type WindowsHostOps } from '../host/windows-ops.js';
 import { hostPaths } from '../paths.js';
 import type { Transport } from '../transport/transport.js';
 import { CliError, type Logger, silentLogger } from '../types.js';
@@ -25,14 +25,35 @@ export interface BootstrapOptions {
  * symlink's target (versions/<X.Y.Z>) — never by executing an unknown
  * `puddled` (a pre-Phase-6 binary would START a daemon on --version).
  * Null when nothing bootstrap-managed is installed. A Windows host answers
- * through its own implementation (host/windows-ops.ts); one recognised only
- * by this command failing is asked again.
+ * through its own implementation (host/windows-ops.ts), where a tree of
+ * another architecture is not installed: this is what installation decides
+ * on. One recognised only by this command failing is asked again.
  */
-export async function installedVersion(transport: Transport): Promise<string | null> {
+export function installedVersion(transport: Transport): Promise<string | null> {
+  return linkedVersion(transport, (windows) => windows.installedVersion());
+}
+
+/**
+ * The daemon version present under ~/.puddle/bin, whatever its architecture:
+ * what removal and upgrades act on. The same command as installedVersion on
+ * a POSIX host; on Windows an x64 tree on Arm (every v1 install there) is
+ * still found, so it can be removed or replaced.
+ */
+export function presentVersion(transport: Transport): Promise<string | null> {
+  return linkedVersion(transport, (windows) => windows.presentVersion());
+}
+
+async function linkedVersion(
+  transport: Transport,
+  ask: (windows: WindowsHostOps) => Promise<string | null>,
+): Promise<string | null> {
   const windows = windowsOps(transport);
-  if (windows) return windows.installedVersion();
+  if (windows) return ask(windows);
   const result = await transport.exec(`readlink ${hostPaths.current}`, { timeoutMs: 15_000 });
-  if (result.code !== 0) return windowsOps(transport)?.installedVersion() ?? null;
+  if (result.code !== 0) {
+    const recognised = windowsOps(transport);
+    return recognised ? ask(recognised) : null;
+  }
   const match = /versions\/([^/\s]+)\s*$/.exec(result.stdout.trim());
   return match?.[1] ?? null;
 }

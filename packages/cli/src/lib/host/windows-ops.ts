@@ -24,8 +24,18 @@ import { remoteWindowsHost } from './windows-remote-host.js';
  * their code paths, and every command they receive, stay as they were.
  */
 export interface WindowsHostOps {
-  /** The installed release, when its runtime is this machine's build. */
+  /**
+   * The installed release, when its runtime is this machine's build: what
+   * installation decides on, since a tree of another architecture is to be
+   * replaced rather than started.
+   */
   installedVersion(): Promise<string | null>;
+  /**
+   * The release `bin\current` names, whatever its architecture: what removal,
+   * upgrades and sweeps act on (every Windows-on-Arm install of v1 is an x64
+   * tree, which must still be found to be removed or upgraded).
+   */
+  presentVersion(): Promise<string | null>;
   /** Whether a daemon may hold the home's control pipe (one starting, or too busy to answer). */
   pipePresent(): Promise<boolean>;
   install(opts: WindowsInstallRequest): Promise<void>;
@@ -58,6 +68,7 @@ export function localWindowsOps(seams: LocalWindowsSeams = {}): WindowsHostOps {
   const home = () => seams.home?.() ?? clientHome();
   return {
     installedVersion: () => windowsInstalledVersion(home()),
+    presentVersion: () => Promise.resolve(readCurrentVersion(home(), 'win32') ?? null),
     pipePresent: () => controlPipePresent(home()),
     install: (opts) =>
       installWindowsDaemon({

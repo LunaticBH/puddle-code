@@ -21,6 +21,7 @@ import {
   type PowerShellRunner,
 } from '@puddle/shared/node/platform';
 import { inspectHostLocally } from '../auth/host-inspection.js';
+import { readCurrentVersion } from '../installation/current-link.js';
 import {
   connectorEnvironment,
   runWindowsConnector,
@@ -198,7 +199,8 @@ export async function runWindowsHostOp(
           t: 'result',
           value: {
             installed: windowsConnectorInstalled(home),
-            version: await windowsInstalledVersion(home),
+            // Whatever its architecture, as on a local host: the tree that runs.
+            version: readCurrentVersion(home, 'win32') ?? null,
           },
         });
         return 0;

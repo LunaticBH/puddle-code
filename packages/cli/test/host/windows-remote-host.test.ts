@@ -134,6 +134,41 @@ describe('a Windows SSH host’s client', () => {
     ).toBeNull();
   });
 
+  it('still finds a tree of another architecture, for removal, upgrades and sweeps', async () => {
+    const current = 'C:\\Users\\alice\\.puddle\\bin\\versions\\0.3.14\\';
+    expect(
+      await new RemoteWindowsHost(
+        fakeSsh(() => ({ code: 0 }), { current, node: 'x64', arch: 'arm64' }).ssh,
+      ).presentVersion(),
+    ).toBe('0.3.14');
+    expect(await new RemoteWindowsHost(fakeSsh(() => ({ code: 0 })).ssh).presentVersion()).toBe(
+      null,
+    );
+  });
+
+  it('asks the pipe of a tree of another architecture, whose daemon still runs', async () => {
+    const { ssh, sent } = fakeSsh(() => ({ code: 0, lines: [{ t: 'result', value: 'daemon' }] }), {
+      current: 'C:\\h\\bin\\versions\\0.3.14',
+      node: 'x64',
+      arch: 'arm64',
+    });
+    expect(await new RemoteWindowsHost(ssh).pipePresent()).toBe(true);
+    expect(sent.some((s) => opOf(s.script) === 'pipe')).toBe(true);
+    // No runtime at all: nothing can hold the pipe, and no helper runs.
+    const empty = fakeSsh(() => ({ code: 0 }));
+    expect(await new RemoteWindowsHost(empty.ssh).pipePresent()).toBe(false);
+    expect(empty.sent).toEqual([]);
+  });
+
+  it('sweeps a tree of another architecture too', async () => {
+    const { ssh, sent } = fakeSsh(
+      () => ({ code: 0, lines: [{ t: 'result', value: ['C:\\h\\worktrees\\r\\w'] }] }),
+      { current: 'C:\\h\\bin\\versions\\0.3.14', node: 'x64', arch: 'arm64' },
+    );
+    expect(await new RemoteWindowsHost(ssh).sweep()).toEqual(['C:\\h\\worktrees\\r\\w']);
+    expect(sent.some((s) => opOf(s.script) === 'sweep')).toBe(true);
+  });
+
   it('stops an attached lease’s daemon by its pid only', async () => {
     const { ssh, sent } = fakeSsh(() => ({
       code: 0,

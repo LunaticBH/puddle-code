@@ -1,4 +1,4 @@
-import { installDaemon, installedVersion, type BootstrapOptions } from './bootstrap.js';
+import { installDaemon, presentVersion, type BootstrapOptions } from './bootstrap.js';
 import { inspectHost } from '../auth/control-channel.js';
 import type { Transport } from '../transport/transport.js';
 import { type Logger, silentLogger } from '../types.js';
@@ -20,7 +20,7 @@ export async function upgradeDaemon(
   opts: BootstrapOptions & { logger?: Logger; probeLive?: boolean } = {},
 ): Promise<UpgradeResult> {
   const logger = opts.logger ?? silentLogger;
-  const from = await installedVersion(transport);
+  const from = await presentVersion(transport);
 
   const liveSessions = (await inspectHost(transport).catch(() => null))?.liveSessions ?? 0;
   if (liveSessions > 0) {

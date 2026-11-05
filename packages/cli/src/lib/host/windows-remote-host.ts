@@ -215,9 +215,26 @@ export class RemoteWindowsHost implements WindowsHostOps {
     return versionFromLinkTarget(probe.current, 'win32') ?? null;
   }
 
+  /** From the probe, whatever the tree's architecture: what removal and upgrades act on. */
+  async presentVersion(): Promise<string | null> {
+    const probe = await this.ssh.windowsProbe(true);
+    if (probe.current === null) return null;
+    return versionFromLinkTarget(probe.current, 'win32') ?? null;
+  }
+
+  /**
+   * Run by whichever runtime the home has: an x64 tree on Arm still runs
+   * (emulated), and its daemon may hold the pipe. Without a node.exe that
+   * runs here, no daemon of that tree can run either.
+   */
   async pipePresent(): Promise<boolean> {
-    if ((await this.installedVersion()) === null) return false;
-    const state = await this.run('pipe', {}, { timeoutMs: 30_000 });
+    const probe = await this.ssh.windowsProbe(true);
+    if (probe.current === null || probe.node === null) return false;
+    const state = await this.run('pipe', {}, { timeoutMs: 30_000 }).catch((err: unknown) => {
+      // Windows 10 on Arm runs no x64 program at all.
+      if (probe.node !== probe.arch) return 'absent';
+      throw err;
+    });
     return state === 'daemon' || state === 'unknown';
   }
 
@@ -336,7 +353,7 @@ export class RemoteWindowsHost implements WindowsHostOps {
   }
 
   async sweep(): Promise<string[]> {
-    if ((await this.installedVersion()) === null) return [];
+    if ((await this.presentVersion()) === null) return [];
     const value = await this.run('sweep', {}, { timeoutMs: 2 * 60_000 });
     return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
   }

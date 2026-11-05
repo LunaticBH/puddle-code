@@ -6,7 +6,7 @@ import { chmod, copyFile, mkdir, rename, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { Session } from '@puddle/shared';
-import { installedVersion } from '../lib/installation/bootstrap.js';
+import { installedVersion, presentVersion } from '../lib/installation/bootstrap.js';
 import {
   componentProtocolForVersion,
   recordDesktopInstallation,
@@ -202,7 +202,8 @@ export async function runUpgrade(
   }
 
   const transport = new LocalTransport();
-  const daemonInstalled = (await installedVersion(transport)) !== null;
+  // A tree of another architecture is upgraded too: that replaces it with this machine's.
+  const daemonInstalled = (await presentVersion(transport)) !== null;
   // An installed macOS app or Windows per-user install upgrades in place.
   const inPlaceDesktop = process.platform === 'darwin' || process.platform === 'win32';
   const desktopInstalled = inPlaceDesktop && (await findInstalledDesktopApp()) !== null;
@@ -462,7 +463,8 @@ async function removeDaemonCmd(
   const transport = await openTransport(cmd.host);
   let tunnel: Awaited<ReturnType<typeof openTunnel>> | null = null;
   try {
-    const installed = await installedVersion(transport);
+    // Whatever its architecture: an x64 tree on Arm is removed like any other.
+    const installed = await presentVersion(transport);
     if (installed === null) {
       logger.info(
         `no bootstrap-managed daemon on ${transport.label} — nothing to remove` +

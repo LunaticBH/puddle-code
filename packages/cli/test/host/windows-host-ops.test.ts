@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import type { Server, Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -132,6 +132,18 @@ describe('the host helper’s other operations', () => {
     const install = io();
     await runWindowsHostOp('install', {}, { home: home(), ...install });
     expect(install.lines()[0]).toMatchObject({ t: 'error', code: 'bad_arguments' });
+  });
+
+  it('reports the connector of a tree whatever its architecture, as a local host does', async () => {
+    const at = home();
+    const tree = join(at, 'bin', 'versions', '1.2.3');
+    mkdirSync(join(tree, 'daemon'), { recursive: true });
+    writeFileSync(join(tree, 'daemon', 'connector.mjs'), '');
+    // No node.exe of this machine's build: installation would replace it, but it is what runs.
+    symlinkSync(tree, join(at, 'bin', 'current'), 'junction');
+    const reply = io();
+    await runWindowsHostOp('connector-installed', {}, { home: at, ...reply });
+    expect(reply.lines()).toEqual([{ t: 'result', value: { installed: true, version: '1.2.3' } }]);
   });
 
   it('stops only a daemon pid the home names, and nothing for a malformed one', async () => {
