@@ -16,8 +16,16 @@ const fake = {
   },
   env: () => ({}),
   checkLoggedIn: async () => true,
-  launchArgs: () => [fileURLToPath(new URL('./fake-agent.mjs', import.meta.url))],
-  resumeArgs: () => [fileURLToPath(new URL('./fake-agent.mjs', import.meta.url))],
+  // The home names the agent's command line, so the test run's process
+  // guard recognises it (daemon/test/helpers/process-guard.ts).
+  launchArgs: () => [
+    fileURLToPath(new URL('./fake-agent.mjs', import.meta.url)),
+    process.env.PUDDLE_HOME,
+  ],
+  resumeArgs: () => [
+    fileURLToPath(new URL('./fake-agent.mjs', import.meta.url)),
+    process.env.PUDDLE_HOME,
+  ],
   loginArgs: () => ['-c', 'exit 0'],
   resolveSessionRef: async (options) => `fake-${options.sessionId}`,
   hasConversation: () => true,
@@ -32,9 +40,14 @@ const daemon = await startDaemon({
 });
 process.send?.({ port: daemon.port });
 let stopping = false;
-for (const signal of ['SIGTERM', 'SIGINT'])
-  process.on(signal, () => {
-    if (stopping) return;
-    stopping = true;
-    void daemon.stop().then(() => process.exit(0));
-  });
+const stop = () => {
+  if (stopping) return;
+  stopping = true;
+  void daemon.stop().then(() => process.exit(0));
+};
+for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, stop);
+// Windows has no SIGTERM from another process (that is TerminateProcess):
+// the test asks over the IPC channel instead.
+process.on('message', (message) => {
+  if (message?.t === 'stop') stop();
+});

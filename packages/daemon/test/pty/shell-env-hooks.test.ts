@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { LogStore } from '../../src/logs/log-store.js';
 import { PtyManager, type PtyCwdEvent, type PtyEnvDeltaEvent } from '../../src/pty/pty-manager.js';
 import { defaultShell } from '../../src/pty/shell.js';
+import { stopPtysAfterFile } from '../helpers/process-guard.js';
 import {
   ENV_CAPTURE_DENYLIST,
   installShellHooks,
@@ -51,6 +52,7 @@ function harness(rcFiles: Record<string, string>, puddleHomePrefix = 'puddle-hoo
   const logsDir = mkdtempSync(join(tmpdir(), 'puddle-hook-logs-'));
   const logs = new LogStore(logsDir, 64 * 1024);
   const ptys = new PtyManager(logs);
+  stopPtysAfterFile(ptys);
   const historyFile = logs.historyFile('s1');
   const chunks: string[] = [];
   const deltas: PtyEnvDeltaEvent[] = [];

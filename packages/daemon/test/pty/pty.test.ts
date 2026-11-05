@@ -9,6 +9,7 @@ import { extractOscTitle, stripAnsi } from '../../src/pty/ansi.js';
 import { EnvOscFilter, MAX_SEQ_BYTES, type ShellReport } from '../../src/pty/env-osc.js';
 import { PtyManager, type PtyEnvDeltaEvent } from '../../src/pty/pty-manager.js';
 import { StatusDetector } from '../../src/pty/status-detector.js';
+import { stopPtysAfterFile } from '../helpers/process-guard.js';
 
 async function waitFor(cond: () => boolean, ms = 8000): Promise<void> {
   const start = Date.now();
@@ -184,7 +185,9 @@ describe('PtyManager', () => {
   function manager() {
     const logsDir = mkdtempSync(join(tmpdir(), 'puddle-logs-'));
     const logs = new LogStore(logsDir, 64 * 1024);
-    return { logsDir, logs, ptys: new PtyManager(logs) };
+    const ptys = new PtyManager(logs);
+    stopPtysAfterFile(ptys);
+    return { logsDir, logs, ptys };
   }
 
   it('spawns, streams, tees to the log, echoes stdin, and reports exit', async () => {
@@ -385,7 +388,9 @@ describe('PtyManager shell reports', () => {
   function manager() {
     const logsDir = mkdtempSync(join(tmpdir(), 'puddle-logs-'));
     const logs = new LogStore(logsDir, 64 * 1024);
-    return { logsDir, logs, ptys: new PtyManager(logs) };
+    const ptys = new PtyManager(logs);
+    stopPtysAfterFile(ptys);
+    return { logsDir, logs, ptys };
   }
 
   it('emits env-delta and strips OSC 7733 from stream and log', async () => {

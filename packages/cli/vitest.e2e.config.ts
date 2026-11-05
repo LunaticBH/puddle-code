@@ -21,5 +21,8 @@ export default defineConfig({
     fileParallelism: false,
     testTimeout: 90_000,
     hookTimeout: 60_000,
+    // No test may leave a process running (daemon/test/helpers/process-guard.ts).
+    globalSetup: ['../daemon/test/helpers/process-guard.global.ts'],
+    setupFiles: ['../daemon/test/helpers/process-guard.setup.ts'],
   },
 });

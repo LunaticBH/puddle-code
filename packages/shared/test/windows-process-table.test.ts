@@ -114,6 +114,24 @@ describe('Windows process table protocol', () => {
     expect((await table.list())[0]?.pid).toBe(2);
   });
 
+  it('answers a fresh read with a query begun after it, never a cached or older one', async () => {
+    const { table } = fake('ok', { cacheMs: 10_000 });
+    expect((await table.list())[0]?.pid).toBe(1);
+    // The cache would answer; a fresh read asks again.
+    expect((await table.list())[0]?.pid).toBe(1);
+    expect((await table.list({ fresh: true }))[0]?.pid).toBe(2);
+    // A fresh read made while an older query runs waits for one of its own,
+    // while a plain read still takes the cached answer.
+    const older = table.list({ fresh: true });
+    await delay(1);
+    const [a, b, c] = await Promise.all([older, table.list({ fresh: true }), table.list()]);
+    expect(a[0]?.pid).toBe(3);
+    expect(b[0]?.pid).toBe(4);
+    expect(c[0]?.pid).toBe(2);
+    // And the latest becomes what a plain read reuses.
+    expect((await table.list())[0]?.pid).toBe(4);
+  });
+
   it('replaces a worker that times out', async () => {
     const { table } = fake('hang-once', { timeoutMs: 300 });
     await expect(table.list()).rejects.toThrow(/timed out after 300 ms/);

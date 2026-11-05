@@ -20,5 +20,13 @@ export default defineConfig({
   // Tunnel/daemon suites spawn and probe real child processes. Unbounded file
   // parallelism starves those children on CI and turns readiness deadlines
   // into cascading false failures, even though each file passes in isolation.
-  test: { include: ['test/**/*.test.ts'], name: 'cli', testTimeout: 20000, hookTimeout: 60000 },
+  test: {
+    include: ['test/**/*.test.ts'],
+    name: 'cli',
+    testTimeout: 20000,
+    hookTimeout: 60000,
+    // No test may leave a process running (daemon/test/helpers/process-guard.ts).
+    globalSetup: ['../daemon/test/helpers/process-guard.global.ts'],
+    setupFiles: ['../daemon/test/helpers/process-guard.setup.ts'],
+  },
 });

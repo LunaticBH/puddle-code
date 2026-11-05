@@ -36,6 +36,7 @@ import { SessionService } from '../../src/sessions/service.js';
 import { WorktreeManager } from '../../src/worktrees/manager.js';
 import { initRepo } from './git-fixtures.js';
 import { fakeStoreKey, withNodeFakeAgent } from './node-fake-agent.js';
+import { stopPtysAfterFile } from './process-guard.js';
 
 export interface FakeAdapterOptions {
   share?: boolean;
@@ -326,6 +327,8 @@ export function fixture(
     statusQuietMs: opts.quietMs ?? 150,
     titleRefreshMs: opts.titleRefreshMs,
   });
+  // Whatever the test leaves live stops with the file, as the daemon stops it.
+  stopPtysAfterFile(ptys, () => service.beginShutdown());
 
   const repoPath = initRepo();
   const profile = stores.profiles.create({ name: 'alice', branch_prefix: 'alice/' });

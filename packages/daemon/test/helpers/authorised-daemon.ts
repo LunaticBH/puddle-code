@@ -2,10 +2,13 @@ import { secret } from '@puddle/shared/node';
 import { CONNECTION_POLICY } from '@puddle/shared';
 import { startDaemon as start, type DaemonOptions } from '../../src/daemon.js';
 import type { ConnectionAuthority } from '../../../cli/src/lib/auth/connection-authority.js';
+import { onTeardown } from './process-guard.js';
 
 /** Functional daemon tests own a host-side lease; production exposes no static token. */
 export async function startDaemon(opts: DaemonOptions = {}) {
   const daemon = await start(opts);
+  // A daemon the test forgets stops with the file (daemon.stop is idempotent).
+  onTeardown(() => daemon.stop());
   const issued = daemon.authority.create();
   let token = issued.token;
   const resources = new Set<string>();
