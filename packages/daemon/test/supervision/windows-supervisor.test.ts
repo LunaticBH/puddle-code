@@ -333,4 +333,31 @@ describe('the supervised connector', () => {
     h.state.manager = 'absent';
     await until(() => h.connectors.length === 1);
   });
+
+  it('starts a connector it gave up on afresh once remote access is enabled again', async () => {
+    const h = harness({ connector: true });
+    h.start();
+    for (let crash = 1; crash <= 10; crash++) {
+      await until(() => h.connectors.length === crash);
+      h.connectors[crash - 1]!.exit(1);
+    }
+    await until(() => h.log.some((line) => line.includes('failed 10 times in ten minutes')));
+    // Only an enable revives it: the backoff and the supervisor's own reconciles do not.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(h.connectors).toHaveLength(10);
+    // `remote enable` rewrites the marker (still present) and asks the supervisor to reconcile.
+    expect((await supervisorRequest(h.home, 'reconcile')).kind).toBe('answered');
+    await until(() => h.connectors.length === 11);
+    expect(h.log.join('\n')).toMatch(/enabled again — starting the connector afresh/);
+    // A fresh start: the next crash restarts it at the first backoff again.
+    h.connectors[10]!.exit(1);
+    await until(() => h.connectors.length === 12);
+    expect(h.log.filter((line) => line.startsWith('restarting the connector')).at(-1)).toMatch(
+      /restarting the connector in 0\.01 s/,
+    );
+    // A reconcile while it runs changes nothing.
+    await supervisorRequest(h.home, 'reconcile');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(h.connectors).toHaveLength(12);
+  });
 });

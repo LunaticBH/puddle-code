@@ -212,7 +212,8 @@ export class WindowsSupervisor {
           void this.shutdown('shutdown requested over the supervisor pipe');
           return answer();
         }
-        if (t === 'reconcile') this.reconcileConnector();
+        // Only `remote enable` asks: a fresh start for a connector given up on.
+        if (t === 'reconcile') this.reconcileConnector(true);
         if (t === 'restart_connector') return void this.restartConnector().then(answer);
         answer();
       },
@@ -296,7 +297,12 @@ export class WindowsSupervisor {
     this.deps.writePid(null);
   }
 
-  private reconcileConnector(): void {
+  /**
+   * Start or stop the connector as its supervision says. `requested`: remote
+   * access was enabled again (a `reconcile` request), which ends a give-up,
+   * as the give-up's log line says; restarts and backoff timers do not.
+   */
+  private reconcileConnector(requested = false): void {
     if (this.stopping) return;
     if (!this.deps.connectorWanted()) {
       this.connector.gaveUp = false;
@@ -305,6 +311,11 @@ export class WindowsSupervisor {
       this.connector.timer = undefined;
       void this.stopConnector();
       return;
+    }
+    if (requested && this.connector.gaveUp) {
+      this.connector.gaveUp = false;
+      this.connector.restarts.reset();
+      this.deps.log('remote access was enabled again — starting the connector afresh');
     }
     if (this.connector.stopping.size > 0) {
       this.connector.deferred = true;
