@@ -36,7 +36,11 @@ export interface SupervisedChild {
   readonly exited: Promise<number | null>;
   /** Ask the process to stop (the connector closes when its IPC channel does). */
   stop(): void;
-  /** Terminate it and its descendants. */
+  /**
+   * Terminate it: the daemon alone (its exit's reap then ends what it left,
+   * by the rule its PTYs' teardown follows), the connector with its
+   * descendants.
+   */
   kill(): Promise<void>;
 }
 
