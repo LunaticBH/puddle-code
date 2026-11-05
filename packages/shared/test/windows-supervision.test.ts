@@ -189,6 +189,34 @@ describe('starting the supervisor', () => {
     expect(lines.join('\n')).toMatch(/no desktop session/);
   });
 
+  it('goes to WMI at once when Task Scheduler refused the run, naming its result', async () => {
+    const home = freshHome();
+    const lines: string[] = [];
+    const { runner, calls } = powershell((env) => {
+      if ('PUDDLE_PROCESS_COMMAND' in env) {
+        void supervisor(home);
+        return { code: 0, pid: 77, error: '' };
+      }
+      // What START reports for a run refused for want of a desktop session.
+      return { ran: false, state: 'Ready', lastResult: 0x800710e0, error: '' };
+    });
+    const begun = Date.now();
+    const started = await startWindowsSupervisor(home, {
+      task: true,
+      powershell: runner,
+      waitMs: 20_000,
+      logger: { info: (line) => lines.push(line), warn: (line) => lines.push(line) },
+    });
+    expect(started).toBe('process');
+    // No wait for a supervisor the refused task never started.
+    expect(Date.now() - begun).toBeLessThan(10_000);
+    expect(calls.filter((env) => 'PUDDLE_PROCESS_COMMAND' in env)).toHaveLength(1);
+    expect(lines.join('\n')).toMatch(
+      /the scheduled task did not run \(state ready, last result 0x800710E0\); no desktop session/,
+    );
+    expect(lines.join('\n')).not.toMatch(/ran, but its supervisor did not come up/);
+  });
+
   it('supervises a home holding % without its task, through WMI or a detached child', async () => {
     const home = mkdtempSync(join(tmpdir(), 'puddle-100%-'));
     const { runner, calls } = powershell((env) => {

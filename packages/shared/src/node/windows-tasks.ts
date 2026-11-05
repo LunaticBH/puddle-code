@@ -158,9 +158,12 @@ const PRELUDE = [
 /**
  * Start the task, then wait (PUDDLE_TASK_WAIT_MS) until it runs or has run:
  * an interactive-token task does not run while its user has no desktop
- * session, and Start-ScheduledTask still succeeds then. A run that is just
- * ending (its program exited a moment ago) is waited out first, since
- * IgnoreNew would drop the start.
+ * session, and Start-ScheduledTask still succeeds then. Task Scheduler
+ * stamps the run it refused with a new LastRunTime all the same, so a run
+ * whose result is a refusal (0x800710E0 ERROR_REQUEST_REFUSED, 0x800704DD
+ * ERROR_NOT_LOGGED_ON, compared as the unsigned values they are) never
+ * counts as one. A run that is just ending (its program exited a moment
+ * ago) is waited out first, since IgnoreNew would drop the start.
  */
 const START = [
   'try {',
@@ -174,7 +177,11 @@ const START = [
   '  do {',
   "    $task = Get-ScheduledTask -TaskName $name -TaskPath '\\'",
   '    $info = $task | Get-ScheduledTaskInfo',
-  "    if ([string]$task.State -eq 'Running' -or $info.LastRunTime -ne $before) { $out.ran = $true; break }",
+  "    if ([string]$task.State -eq 'Running') { $out.ran = $true; break }",
+  '    if ($info.LastRunTime -ne $before) {',
+  '      $out.ran = @(2147946720, 2147943645) -notcontains [int64]$info.LastTaskResult',
+  '      break',
+  '    }',
   '    Start-Sleep -Milliseconds 200',
   '  } while ((Get-Date) -lt $deadline)',
   '  $out.state = [string]$task.State',

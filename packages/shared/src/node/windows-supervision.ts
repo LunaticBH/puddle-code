@@ -232,6 +232,17 @@ export async function waitForSupervisor(home: string, waitMs: number): Promise<b
   }
 }
 
+/** Why a start of the task did not run it, for the log. */
+function notRun(started: WindowsTaskStart): string {
+  if (started.error !== undefined) return started.error;
+  // Task Scheduler's result codes read as the unsigned hexadecimal it documents.
+  const result =
+    started.lastResult !== undefined && started.lastResult !== 0
+      ? `, last result 0x${(started.lastResult >>> 0).toString(16).toUpperCase().padStart(8, '0')}`
+      : '';
+  return `state ${started.state}${result}`;
+}
+
 /**
  * Start the home's supervisor unless one runs: through its task, then WMI,
  * then as a detached child. A late start of an earlier way only meets the
@@ -257,7 +268,7 @@ export async function startWindowsSupervisor(
     info(
       started.ran
         ? 'the scheduled task ran, but its supervisor did not come up — starting it directly'
-        : `the scheduled task did not run (${started.error ?? `state ${started.state}`}); ` +
+        : `the scheduled task did not run (${notRun(started)}); ` +
             'no desktop session may be logged on — starting the supervisor directly',
     );
   }

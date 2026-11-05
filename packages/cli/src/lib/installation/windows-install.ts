@@ -351,6 +351,9 @@ async function supervise(
             started: {
               ran: registration.ran,
               state: registration.state ?? 'unknown',
+              ...(registration.lastResult !== undefined
+                ? { lastResult: registration.lastResult }
+                : {}),
               ...(registration.error !== undefined ? { error: registration.error } : {}),
             },
           }

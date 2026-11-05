@@ -301,3 +301,111 @@ describe.runIf(process.platform === 'win32')('on this Windows machine', () => {
     expect(result.stdout).toBe('valid|False');
   }, 70_000);
 });
+
+/**
+ * The register and start scripts run by real Windows PowerShell against a
+ * stand-in Task Scheduler: PowerShell resolves a function before a cmdlet of
+ * the same name, so every ScheduledTasks cmdlet the scripts call is a
+ * function over PUDDLE_FAKE that only records what it was asked. Nothing
+ * reaches Task Scheduler.
+ */
+const FAKE_SCHEDULER = [
+  '$fake = $env:PUDDLE_FAKE | ConvertFrom-Json',
+  '$script:calls = New-Object System.Collections.Generic.List[string]',
+  '$script:started = $false',
+  'function New-FakeTask($t) {',
+  "  $state = if ($script:started -and $fake.runs -and $t.name -eq $env:PUDDLE_TASK_NAME) { 'Running' } else { $t.state }",
+  "  [pscustomobject]@{ TaskName = $t.name; TaskPath = '\\'; State = $state; Principal = [pscustomobject]@{ UserId = $t.user }; Actions = @([pscustomobject]@{ Execute = $t.command; Arguments = $t.arguments }) }",
+  '}',
+  'function Get-ScheduledTask {',
+  '  [CmdletBinding()] param([string]$TaskName, [string]$TaskPath)',
+  '  $found = @($fake.tasks | Where-Object { -not $TaskName -or $_.name -eq $TaskName } | ForEach-Object { New-FakeTask $_ })',
+  '  if ($TaskName -and $found.Count -eq 0) { Write-Error "No task named $TaskName"; return }',
+  '  $found',
+  '}',
+  'function Get-ScheduledTaskInfo {',
+  '  [CmdletBinding()] param([Parameter(ValueFromPipeline = $true)]$InputObject, [string]$TaskName, [string]$TaskPath)',
+  '  process {',
+  "    if ($script:started) { [pscustomobject]@{ LastRunTime = [datetime]'2026-11-04T12:00:00'; LastTaskResult = [uint32]$fake.result } }",
+  "    else { [pscustomobject]@{ LastRunTime = [datetime]'1999-11-30T00:00:00'; LastTaskResult = [uint32]267011 } }",
+  '  }',
+  '}',
+  'function Start-ScheduledTask { [CmdletBinding()] param([string]$TaskName, [string]$TaskPath) $script:calls.Add("start $TaskName"); $script:started = $true }',
+  'function Register-ScheduledTask { [CmdletBinding()] param([string]$TaskName, [string]$TaskPath, [string]$Xml, [switch]$Force) $script:calls.Add("register $TaskName") }',
+  'function Unregister-ScheduledTask { [CmdletBinding()] param([string]$TaskName, [string]$TaskPath, [switch]$Confirm) $script:calls.Add("unregister $TaskName") }',
+  'function Disable-ScheduledTask { [CmdletBinding()] param([string]$TaskName, [string]$TaskPath) $script:calls.Add("disable $TaskName") }',
+].join('\n');
+
+interface FakeTask {
+  name: string;
+  state: 'Ready' | 'Running' | 'Disabled';
+  user: string;
+  command: string;
+  arguments: string;
+}
+
+describe.runIf(process.platform === 'win32')(
+  'the task scripts against a stand-in Task Scheduler',
+  () => {
+    const action = {
+      PUDDLE_TASK_COMMAND: 'C:\\Users\\a b\\.puddle\\bin\\current\\bin\\puddle-hidden.exe',
+      PUDDLE_TASK_ARGUMENTS:
+        '"C:\\Users\\a b\\.puddle\\bin\\current\\bin\\node.exe" --home "C:\\Users\\a b\\.puddle"',
+    };
+    const task = (overrides: Partial<FakeTask> = {}): FakeTask => ({
+      name: 'Puddle 0123456789abcdef',
+      state: 'Ready',
+      // Task Scheduler reports its principal by account name.
+      user: process.env.USERNAME ?? '',
+      command: action.PUDDLE_TASK_COMMAND,
+      arguments: action.PUDDLE_TASK_ARGUMENTS,
+      ...overrides,
+    });
+
+    async function run(
+      script: string,
+      fake: { tasks: FakeTask[]; result?: number; runs?: boolean },
+      env: Record<string, string> = {},
+    ) {
+      const result = await runWindowsPowerShell(
+        [FAKE_SCHEDULER, script, "'calls:' + ($script:calls -join '|')"].join('\n'),
+        {
+          PUDDLE_FAKE: JSON.stringify({ result: 0, runs: false, ...fake }),
+          PUDDLE_TASK_NAME: 'Puddle 0123456789abcdef',
+          PUDDLE_TASK_WAIT_MS: '3000',
+          PUDDLE_TASK_XML: '<Task/>',
+          ...action,
+          ...env,
+        },
+        60_000,
+      );
+      const lines = result.stdout.split(/\r?\n/);
+      const report = lines.find((line) => line.startsWith('{'));
+      const calls = lines.find((line) => line.startsWith('calls:'));
+      if (report === undefined || calls === undefined) throw new Error(result.stderr);
+      return {
+        report: JSON.parse(report) as Record<string, unknown>,
+        calls: calls.slice('calls:'.length).split('|').filter(Boolean),
+      };
+    }
+
+    it('starts a task of this user’s, and counts a run Task Scheduler refused as none', async () => {
+      const ran = await run(WINDOWS_TASK_SCRIPTS.start, { tasks: [task()], runs: true });
+      expect(ran.calls).toEqual(['start Puddle 0123456789abcdef']);
+      expect(ran.report).toMatchObject({ ran: true, state: 'Running' });
+      // Without a desktop session the run is refused, yet LastRunTime moves on.
+      for (const refusal of [0x800710e0, 0x800704dd]) {
+        const refused = await run(WINDOWS_TASK_SCRIPTS.start, {
+          tasks: [task()],
+          result: refusal,
+        });
+        expect(refused.calls).toEqual(['start Puddle 0123456789abcdef']);
+        expect(refused.report).toMatchObject({ ran: false, state: 'Ready', lastResult: refusal });
+      }
+      // A run that launched and has already ended still ran.
+      const ended = await run(WINDOWS_TASK_SCRIPTS.start, { tasks: [task()], result: 1 });
+      expect(ended.report).toMatchObject({ ran: true, lastResult: 1 });
+    }, 240_000);
+
+  },
+);
