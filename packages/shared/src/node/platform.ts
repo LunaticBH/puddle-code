@@ -21,7 +21,14 @@ export {
   windowsExtensions,
   type FindExecutableOptions,
 } from './executables.js';
-export { isPidAlive, killProcessTree, type KillProcessTreeOptions } from './processes.js';
+export {
+  isPidAlive,
+  killProcessTree,
+  stopWindowsProcessTree,
+  type KillProcessTreeOptions,
+  type StopWindowsProcessTreeOptions,
+  type WindowsProcessSource,
+} from './processes.js';
 export { renameWithRetry, renameWithRetrySync } from './rename.js';
 export {
   isWindowsArch,
@@ -43,8 +50,12 @@ export {
 } from './windows-spawn.js';
 export {
   listWindowsProcesses,
+  windowsDescendantsOf,
+  windowsProcessTree,
   WindowsProcessTable,
+  type ProcessTreeRoot,
   type WindowsProcess,
+  type WindowsProcessListOptions,
   type WindowsProcessTableOptions,
 } from './windows-process-table.js';
 export {

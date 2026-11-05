@@ -71,11 +71,22 @@ function query(marker: string): string {
   );
 }
 
+export interface WindowsProcessListOptions {
+  /**
+   * Only a snapshot begun after this call, never a cached or already running
+   * one: what stopping a process tree needs to see the children started
+   * before it stopped their parents.
+   */
+  fresh?: boolean;
+}
+
 export class WindowsProcessTable {
   private readonly options: Required<WindowsProcessTableOptions>;
   private worker: TableWorker | null = null;
   private inflight: Promise<readonly WindowsProcess[]> | null = null;
-  private cached: { at: number; processes: readonly WindowsProcess[] } | null = null;
+  private inflightStartedAt = 0;
+  private cached: { at: number; startedAt: number; processes: readonly WindowsProcess[] } | null =
+    null;
   private idle: NodeJS.Timeout | null = null;
 
   constructor(options: WindowsProcessTableOptions = {}) {
@@ -92,15 +103,32 @@ export class WindowsProcessTable {
   }
 
   /** Every process, as one snapshot. Rejects when the query fails or times out. */
-  async list(): Promise<WindowsProcess[]> {
-    const cached = this.cached;
-    if (cached && performance.now() - cached.at < this.options.cacheMs) {
-      return [...cached.processes];
+  async list(options: WindowsProcessListOptions = {}): Promise<WindowsProcess[]> {
+    const since = performance.now();
+    for (;;) {
+      const cached = this.cached;
+      if (
+        cached &&
+        (options.fresh
+          ? cached.startedAt >= since
+          : performance.now() - cached.at < this.options.cacheMs)
+      ) {
+        return [...cached.processes];
+      }
+      if (this.inflight && (!options.fresh || this.inflightStartedAt >= since)) {
+        return [...(await this.inflight)];
+      }
+      if (this.inflight) {
+        // The worker answers one query at a time: wait for the older one.
+        await this.inflight.catch(() => undefined);
+        continue;
+      }
+      const startedAt = performance.now();
+      this.inflightStartedAt = startedAt;
+      this.inflight = this.query(startedAt).finally(() => {
+        this.inflight = null;
+      });
     }
-    this.inflight ??= this.query().finally(() => {
-      this.inflight = null;
-    });
-    return [...(await this.inflight)];
   }
 
   /** Stops the worker now; a later `list` starts a new one. */
@@ -111,14 +139,14 @@ export class WindowsProcessTable {
     this.worker = null;
   }
 
-  private async query(): Promise<readonly WindowsProcess[]> {
+  private async query(startedAt: number): Promise<readonly WindowsProcess[]> {
     if (this.idle) clearTimeout(this.idle);
     this.idle = null;
     const worker = this.worker && !this.worker.dead ? this.worker : this.start();
     try {
       const body = await worker.request(this.options.timeoutMs, this.options.maxOutputBytes);
       const processes = parseProcesses(body);
-      this.cached = { at: performance.now(), processes };
+      this.cached = { at: performance.now(), startedAt, processes };
       return processes;
     } finally {
       this.idle = setTimeout(() => this.close(), this.options.idleMs);
@@ -138,12 +166,130 @@ export class WindowsProcessTable {
 let shared: WindowsProcessTable | null = null;
 
 /** Every process on this Windows machine, from the shared persistent worker. */
-export function listWindowsProcesses(): Promise<WindowsProcess[]> {
+export function listWindowsProcesses(
+  options: WindowsProcessListOptions = {},
+): Promise<WindowsProcess[]> {
   if (process.platform !== 'win32') {
     return Promise.reject(new Error('The Windows process table is only available on Windows'));
   }
   shared ??= new WindowsProcessTable();
-  return shared.list();
+  return shared.list(options);
+}
+
+/**
+ * What is known about the root of a Windows process tree, beyond its pid.
+ * Windows never re-parents an orphan and soon reuses a dead process's pid,
+ * so a parent link only counts when the child is not older than its parent,
+ * and below a root that has exited only when the child was created during
+ * the root's lifetime.
+ */
+export interface ProcessTreeRoot {
+  readonly pid: number;
+  /** Its creation time, from an earlier table: tells the root from a later holder of its pid. */
+  readonly createdAtMs?: number | null;
+  /** A lower bound on its creation time: the clock just before it was started. */
+  readonly startedAtMs?: number;
+  /** An upper bound on its creation time: a holder of its pid created later is another process. */
+  readonly createdBeforeMs?: number;
+  /** It has exited, at or before this time: whoever holds its pid now is another process. */
+  readonly exitedAtMs?: number;
+}
+
+/**
+ * Slack between this process's clock and the creation times Windows
+ * records: measured within 10 ms of each other on Windows 11.
+ */
+const CLOCK_SLACK_MS = 100;
+
+/**
+ * The tree below `root` in one table, the root itself first when it is
+ * still running, parents always before their children.
+ *
+ * A running root is the table's holder of its pid, when that holder was
+ * created when the root was (`createdAtMs`), or not before it was started
+ * (`startedAtMs`) nor after `createdBeforeMs`. A root that has exited is gone from the table, but its
+ * children still name its pid: they are the processes naming it that were
+ * created after it was started and before any later holder of its pid was
+ * (or, with no holder, before `exitedAtMs`). Without a creation time or a
+ * start time nothing tells a dead root's children from an earlier holder's,
+ * so there are none. A process whose creation time is unknown is never
+ * followed: only the idle and system pseudo-processes lack one.
+ */
+export function windowsProcessTree(
+  table: readonly WindowsProcess[],
+  root: ProcessTreeRoot,
+): WindowsProcess[] {
+  const byPid = new Map(table.map((entry) => [entry.pid, entry]));
+  const holder = byPid.get(root.pid);
+  const running =
+    holder !== undefined &&
+    holder.createdAtMs !== null &&
+    root.exitedAtMs === undefined &&
+    (root.createdAtMs !== undefined && root.createdAtMs !== null
+      ? holder.createdAtMs === root.createdAtMs
+      : (root.startedAtMs === undefined ||
+          holder.createdAtMs >= root.startedAtMs - CLOCK_SLACK_MS) &&
+        (root.createdBeforeMs === undefined ||
+          holder.createdAtMs <= root.createdBeforeMs + CLOCK_SLACK_MS));
+  if (running) return [holder, ...windowsDescendantsOf(table, [holder])];
+  const from =
+    root.createdAtMs ??
+    (root.startedAtMs === undefined ? undefined : root.startedAtMs - CLOCK_SLACK_MS);
+  if (from === undefined) return [];
+  const until =
+    holder !== undefined
+      ? (holder.createdAtMs ?? -Infinity)
+      : (root.exitedAtMs ?? Infinity) + CLOCK_SLACK_MS;
+  const orphans = table.filter(
+    (entry) =>
+      entry.ppid === root.pid &&
+      entry.pid !== root.pid &&
+      entry.createdAtMs !== null &&
+      entry.createdAtMs >= from &&
+      entry.createdAtMs < until,
+  );
+  return [...orphans, ...windowsDescendantsOf(table, orphans)];
+}
+
+/**
+ * Every descendant of `parents` (processes from this or an earlier table,
+ * running or not) in `table`, by creation-consistent links, parents first,
+ * excluding the parents themselves. A parent that has exited keeps its
+ * children up to the creation of whichever process holds its pid now.
+ */
+export function windowsDescendantsOf(
+  table: readonly WindowsProcess[],
+  parents: readonly WindowsProcess[],
+): WindowsProcess[] {
+  const byPid = new Map(table.map((entry) => [entry.pid, entry]));
+  const childrenOf = new Map<number, WindowsProcess[]>();
+  for (const entry of table) {
+    if (entry.pid === entry.ppid) continue; // the idle process is its own parent
+    const siblings = childrenOf.get(entry.ppid);
+    if (siblings) siblings.push(entry);
+    else childrenOf.set(entry.ppid, [entry]);
+  }
+  const key = (entry: WindowsProcess) => `${entry.pid}@${entry.createdAtMs}`;
+  const seen = new Set(parents.map(key));
+  const found: WindowsProcess[] = [];
+  const queue = [...parents];
+  while (queue.length > 0) {
+    const parent = queue.shift()!;
+    if (parent.createdAtMs === null) continue;
+    const holder = byPid.get(parent.pid);
+    const until =
+      holder === undefined || holder.createdAtMs === parent.createdAtMs
+        ? Infinity
+        : (holder.createdAtMs ?? -Infinity);
+    for (const child of childrenOf.get(parent.pid) ?? []) {
+      if (child.createdAtMs === null || seen.has(key(child))) continue;
+      if (child.createdAtMs < parent.createdAtMs || child.createdAtMs >= until) continue;
+      seen.add(key(child));
+      found.push(child);
+      queue.push(child);
+    }
+  }
+  return found;
 }
 
 interface PendingQuery {

@@ -1,5 +1,12 @@
 import { execFile } from 'node:child_process';
 import { system32Path, type Environment } from './environment.js';
+import {
+  windowsDescendantsOf,
+  windowsProcessTree,
+  type ProcessTreeRoot,
+  type WindowsProcess,
+  type WindowsProcessListOptions,
+} from './windows-process-table.js';
 
 /**
  * Whether `pid` names a live process, by a signal-0 probe. POSIX keeps the
@@ -19,20 +26,35 @@ export function isPidAlive(pid: number, platform: NodeJS.Platform = process.plat
   }
 }
 
+/** A Windows process table: `listWindowsProcesses`, or a test's stand-in. */
+export type WindowsProcessSource = (
+  options?: WindowsProcessListOptions,
+) => Promise<readonly WindowsProcess[]>;
+
 export interface KillProcessTreeOptions {
   platform?: NodeJS.Platform;
   /** Bound on waiting for taskkill.exe; 5 s by default. */
   timeoutMs?: number;
   /** Locates `%SystemRoot%`; `process.env` by default. */
   env?: Environment;
+  /**
+   * Windows: stop the tree the process table shows (stopWindowsProcessTree)
+   * rather than the one `taskkill /T` follows, which cannot reach a
+   * descendant whose parent has exited. `taskkill /T` still runs when the
+   * table cannot be read.
+   */
+  processes?: WindowsProcessSource;
+  /** With `processes`: what is known about the root (see windowsProcessTree). */
+  root?: Omit<ProcessTreeRoot, 'pid'>;
 }
 
 /**
  * Forcibly stops `pid` and its descendants, resolving whether or not the
  * process existed. Windows runs `taskkill.exe /PID <pid> /T /F` from
- * System32. POSIX sends SIGKILL to the process group `pid` leads and then to
- * `pid` itself, which only reaches descendants that stayed in that group;
- * existing POSIX callers keep their own signal sequences.
+ * System32, or with `processes` stops the process table's tree. POSIX sends
+ * SIGKILL to the process group `pid` leads and then to `pid` itself, which
+ * only reaches descendants that stayed in that group; existing POSIX callers
+ * keep their own signal sequences.
  */
 export function killProcessTree(pid: number, opts: KillProcessTreeOptions = {}): Promise<void> {
   if (!Number.isSafeInteger(pid) || pid <= 0) {
@@ -48,6 +70,17 @@ export function killProcessTree(pid: number, opts: KillProcessTreeOptions = {}):
     }
     return Promise.resolve();
   }
+  if (opts.processes) {
+    const { processes, root, ...rest } = opts;
+    return stopWindowsProcessTree(pid, { processes, root }).then(
+      () => undefined,
+      () => taskkill(pid, rest),
+    );
+  }
+  return taskkill(pid, opts);
+}
+
+function taskkill(pid: number, opts: KillProcessTreeOptions): Promise<void> {
   return new Promise((resolve) => {
     execFile(
       system32Path('taskkill.exe', opts.env),
@@ -57,4 +90,69 @@ export function killProcessTree(pid: number, opts: KillProcessTreeOptions = {}):
       () => resolve(),
     );
   });
+}
+
+export interface StopWindowsProcessTreeOptions {
+  processes: WindowsProcessSource;
+  /** What is known about the root beyond its pid (see windowsProcessTree). */
+  root?: Omit<ProcessTreeRoot, 'pid'>;
+  /**
+   * Members of the tree seen in an earlier table: those still running are
+   * stopped too, with their descendants, though a parent between them and
+   * the root has exited since.
+   */
+  known?: readonly WindowsProcess[];
+  /** A snapshot already read for this stop (a fresh one is read otherwise). */
+  table?: readonly WindowsProcess[];
+  /** Ends one process; TerminateProcess through `process.kill` by default. */
+  terminate?: (pid: number) => void;
+}
+
+/**
+ * Stops a Windows process tree as the process table shows it
+ * (windowsProcessTree): unlike `taskkill /T`, this reaches the children of
+ * a root, or of any member, that has already exited, while a later holder of
+ * a dead process's pid keeps its own children. Parents end before their
+ * children, so none can start a replacement; then the table is read again
+ * for children started in between, at most twice more. This process is
+ * never stopped. Resolves with the processes it ended; rejects when the
+ * table cannot be read.
+ */
+export async function stopWindowsProcessTree(
+  pid: number,
+  opts: StopWindowsProcessTreeOptions,
+): Promise<WindowsProcess[]> {
+  const terminate =
+    opts.terminate ??
+    ((target: number) => {
+      process.kill(target);
+    });
+  const known = opts.known ?? [];
+  const identity = (entry: WindowsProcess) => `${entry.pid}@${entry.createdAtMs}`;
+  const table = opts.table ?? (await opts.processes({ fresh: true }));
+  const running = new Set(table.map(identity));
+  const stopped: WindowsProcess[] = [];
+  const seen = new Set<string>();
+  let targets = [
+    ...windowsProcessTree(table, { ...opts.root, pid }),
+    ...known.filter((entry) => running.has(identity(entry))),
+    ...windowsDescendantsOf(table, known),
+  ];
+  for (let round = 0; round < 3; round++) {
+    const fresh = targets.filter((entry) => !seen.has(identity(entry)));
+    if (fresh.length === 0) break;
+    for (const target of fresh) {
+      seen.add(identity(target));
+      if (target.pid === process.pid) continue;
+      try {
+        terminate(target.pid);
+      } catch {
+        // Exited meanwhile, or another account's.
+      }
+      stopped.push(target);
+    }
+    if (round === 2) break;
+    targets = windowsDescendantsOf(await opts.processes({ fresh: true }), [...stopped, ...known]);
+  }
+  return stopped;
 }
