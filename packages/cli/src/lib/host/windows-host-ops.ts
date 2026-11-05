@@ -36,6 +36,7 @@ import { installWindowsDaemon, windowsInstalledVersion } from '../installation/w
 import { removeWindowsDaemon, sweepWindowsWorktrees } from '../installation/windows-remove.js';
 import { CliError, type Logger } from '../types.js';
 import { showWindowsLogs } from '../windows-logs.js';
+import { ELEVATED_SUPERVISOR } from '../transport/windows-remote.js';
 import { errorMessage, type HelperMessage } from './windows-host-protocol.js';
 
 /**
@@ -221,6 +222,7 @@ export async function runWindowsHostOp(
           detachedStart: false,
           onSupervisorStart: (how) => (started = how),
         });
+        await recordElevation(home, started, body.elevated === true);
         // How the supervisor started: the client warns when WMI started it
         // from an elevated session, whose token the daemon then carries.
         emit({ t: 'result', value: started === undefined ? {} : { started } });
@@ -273,7 +275,7 @@ export async function runWindowsHostOp(
         // Registration values travel on standard input only, never the command line.
         const stdin = await readAll(context.stdin);
         if (args.includes('--configure') && managedSetup(stdin)) {
-          await requireSupervisor(home, seams, logger);
+          await requireSupervisor(home, seams, logger, body.elevated === true);
         }
         const run = await runWindowsConnector(home, args as string[], { stdin, timeoutMs });
         emit({ t: 'result', value: run });
@@ -317,6 +319,7 @@ async function requireSupervisor(
   home: string,
   seams: { powershell?: PowerShellRunner },
   logger: Logger,
+  elevated: boolean,
 ): Promise<void> {
   if ((await supervisorRequest(home, 'status')).kind === 'answered') return;
   const pipe = await controlPipeState(home);
@@ -330,12 +333,13 @@ async function requireSupervisor(
     );
   }
   try {
-    await startWindowsSupervisor(home, {
+    const started = await startWindowsSupervisor(home, {
       ...seams,
       task: readMarker(join(home, 'supervisor')) === 'task',
       spawnDetached: () => refusedChild(),
       logger,
     });
+    await recordElevation(home, started, elevated);
   } catch {
     throw new CliError(
       'session_bound',
@@ -345,6 +349,28 @@ async function requireSupervisor(
         'creation there, then enable it again',
     );
   }
+}
+
+/**
+ * `<home>\supervisor-elevated`: the pid of a supervisor WMI started from an
+ * administrator's elevated SSH session, whose token it and every daemon it
+ * restarts carry. The probe reports it for as long as that process runs, so
+ * every later launch and enable warns again; a start by the logon task,
+ * which runs without elevation, clears it.
+ */
+export async function recordElevation(
+  home: string,
+  how: SupervisorStart | undefined,
+  elevated: boolean,
+): Promise<void> {
+  const marker = join(home, ELEVATED_SUPERVISOR);
+  if (how === 'task' || (how === 'process' && !elevated)) {
+    rmSync(marker, { force: true });
+    return;
+  }
+  if (how !== 'process') return;
+  const answer = await supervisorRequest(home, 'status');
+  if (answer.kind === 'answered') writeFileSync(marker, `${answer.state.pid}\n`);
 }
 
 function readMarker(path: string): string | undefined {

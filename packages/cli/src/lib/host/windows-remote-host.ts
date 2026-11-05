@@ -120,7 +120,11 @@ export function elevatedWarning(label: string, via: 'wmi' | 'session'): string {
   return (
     `puddled on ${label} runs elevated: an administrator's SSH session started it ` +
     `${via === 'wmi' ? 'through WMI' : 'as its own child'}, outside Task Scheduler; ` +
-    'log on to the machine once so its logon task, which runs without elevation, starts it instead'
+    (via === 'wmi'
+      ? // A logon task started later only meets this supervisor's pipe and stands down.
+        `log on to the machine, then run puddle upgrade daemon ${label} (or restart it), so its ` +
+        'logon task, which runs without elevation, starts it instead'
+      : 'log on to the machine once so its logon task, which runs without elevation, starts it instead')
   );
 }
 
@@ -138,6 +142,8 @@ export function remoteWindowsHost(ssh: SshTransport): RemoteWindowsHost {
 
 export class RemoteWindowsHost implements WindowsHostOps {
   private staged: Promise<StagedHelper> | undefined;
+  /** This client has said the home's supervisor runs elevated. */
+  private warnedElevated = false;
 
   constructor(readonly ssh: SshTransport) {}
 
@@ -330,8 +336,21 @@ export class RemoteWindowsHost implements WindowsHostOps {
     // task runs without elevation, and one already running was not started here.
     const started = (outcome as { started?: unknown } | undefined)?.started;
     if (probe.elevated && started === 'process') {
+      this.warnedElevated = true;
       logger.warn(elevatedWarning(this.ssh.label, 'wmi'));
     }
+  }
+
+  /**
+   * Warn, once per client, while the home's supervisor runs with an elevated
+   * SSH session's token (the probe's elevatedSupervisor), whichever launch or
+   * enable started it: logging on alone does not replace it.
+   */
+  async warnElevated(logger: Logger, opts: { refresh?: boolean } = {}): Promise<void> {
+    if (this.warnedElevated) return;
+    if (!(await this.ssh.windowsProbe(opts.refresh === true)).elevatedSupervisor) return;
+    this.warnedElevated = true;
+    logger.warn(elevatedWarning(this.ssh.label, 'wmi'));
   }
 
   private async installAs(
@@ -361,6 +380,8 @@ export class RemoteWindowsHost implements WindowsHostOps {
       version,
       ...(opts.replaceRunning === false ? { replaceRunning: false } : {}),
       ...(slug !== undefined ? { slug } : {}),
+      // The helper records a supervisor WMI starts with this session's elevated token.
+      ...(probe.elevated ? { elevated: true } : {}),
     };
     logger.info(`installing puddled ${version} on ${this.ssh.label}`);
     const boot = { op: 'install' as const, version, request, logger, ...(slug ? { slug } : {}) };
@@ -544,9 +565,11 @@ export class RemoteWindowsHost implements WindowsHostOps {
     opts: { stdin?: string; timeoutMs?: number } = {},
   ): Promise<ConnectorRun> {
     const timeoutMs = opts.timeoutMs ?? 30_000;
+    // An enable may start the supervisor through WMI, with this session's token.
+    const { elevated } = await this.ssh.windowsProbe();
     const value = (await this.run(
       'connector',
-      { args, timeoutMs },
+      { args, timeoutMs, ...(elevated ? { elevated: true } : {}) },
       { payload: opts.stdin ?? '', timeoutMs: timeoutMs + 60_000 },
     )) as Partial<ConnectorRun> | undefined;
     return {

@@ -9,6 +9,7 @@ import {
   unregisterWindowsTask,
   type PowerShellRunner,
 } from '@puddle/shared/node/platform';
+import { ELEVATED_SUPERVISOR } from '../transport/windows-remote.js';
 import { stopWindowsDaemon } from './windows-daemon.js';
 import { CliError, type Logger, silentLogger } from '../types.js';
 
@@ -101,7 +102,9 @@ export async function removeWindowsDaemon(
 
   const targets = opts.purge
     ? [home]
-    : ['bin', 'cache', 'runtime.json', 'supervisor', 'puddled.pid'].map((name) => join(home, name));
+    : ['bin', 'cache', 'runtime.json', 'supervisor', ELEVATED_SUPERVISOR, 'puddled.pid'].map(
+        (name) => join(home, name),
+      );
   const kept: string[] = [];
   for (const target of targets) {
     try {

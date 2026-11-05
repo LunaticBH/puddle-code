@@ -18,7 +18,7 @@ interface Spawned {
   args: string[];
 }
 const spawned = vi.hoisted(() => [] as Spawned[]);
-const answers = vi.hoisted(() => ({ version: '' }));
+const answers = vi.hoisted(() => ({ version: '', elevatedSupervisor: false }));
 
 const probe = JSON.stringify({
   puddle: 'windows-host',
@@ -44,7 +44,11 @@ vi.mock('../../src/lib/transport/spawn.js', () => ({
     });
     const command = args.at(-1) ?? '';
     const reply = command.startsWith('powershell.exe ')
-      ? { code: 1, stdout: `${probe}\r\n`, stderr: 'puddle-exit:0\n' }
+      ? {
+          code: 1,
+          stdout: `${JSON.stringify({ ...JSON.parse(probe), elevatedSupervisor: answers.elevatedSupervisor })}\r\n`,
+          stderr: 'puddle-exit:0\n',
+        }
       : command.includes('--version')
         ? { code: 0, stdout: answers.version, stderr: '' }
         : { code: 0, stdout: '', stderr: '' };
@@ -77,7 +81,11 @@ const host = vi.hoisted(() => ({
   connectorForeground: vi.fn(async (_write: (text: string) => void) => 0),
 }));
 // The Windows SSH host's helper operations (windows-remote-host.ts), scripted.
-vi.mock('../../src/lib/host/windows-remote-host.js', () => ({ remoteWindowsHost: () => host }));
+vi.mock('../../src/lib/host/windows-remote-host.js', async (actual) => ({
+  elevatedWarning: (await actual<typeof import('../../src/lib/host/windows-remote-host.js')>())
+    .elevatedWarning,
+  remoteWindowsHost: () => host,
+}));
 
 import { runRemote } from '../../src/cli/remote.js';
 import { windowsRemoteCommand } from '../../src/lib/transport/windows-remote.js';
@@ -100,6 +108,7 @@ afterAll(() => {
 });
 beforeEach(() => {
   spawned.length = 0;
+  answers.elevatedSupervisor = false;
   host.connector.mockClear();
   host.connectorForeground.mockClear();
   vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
@@ -131,6 +140,26 @@ describe('puddle remote on a Windows host whose default shell is Git Bash', () =
     // The helper's guard and the Windows enable's time to start the supervisor.
     expect(configure![1]!.timeoutMs).toBe(120_000);
     expect(JSON.parse(configure![1]!.stdin!)).toMatchObject({ setup: { managed: true } });
+  });
+
+  it('warns after enabling when the supervisor runs with an elevated session’s token', async () => {
+    answers.version = posixVersion.replace('\n', '; platform win32\n');
+    answers.elevatedSupervisor = true;
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      await runRemote({
+        cmd: 'remote',
+        action: 'enable',
+        host: 'alice@gitbash',
+        profile: 'b'.repeat(10),
+        foreground: false,
+      });
+      expect(stderr.mock.calls.map(([text]) => String(text)).join('')).toContain(
+        'puddled on alice@gitbash runs elevated',
+      );
+    } finally {
+      stderr.mockRestore();
+    }
   });
 
   it('runs the connector’s foreground manager through the host helper', async () => {

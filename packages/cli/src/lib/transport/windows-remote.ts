@@ -234,6 +234,9 @@ export function windowsScript(body: string, opts: WindowsScriptOptions = {}): st
   return `${PRELUDE}${home}${body}\n`;
 }
 
+/** The home file naming a supervisor WMI started from an elevated session (windows-host-ops.ts). */
+export const ELEVATED_SUPERVISOR = 'supervisor-elevated';
+
 /**
  * What a Windows host reports about itself: the probe that recognises one,
  * and the facts every later operation needs (the installed runtime, its
@@ -245,6 +248,13 @@ $target = $null
 $link = Get-Item -LiteralPath $current -Force -ErrorAction SilentlyContinue
 if ($link -and $link.Target) { $target = [string]@($link.Target)[0] }
 $principal = New-Object Security.Principal.WindowsPrincipal ([Security.Principal.WindowsIdentity]::GetCurrent())
+$elevatedSupervisor = $false
+$mark = Join-Path $h ${psQuote(ELEVATED_SUPERVISOR)}
+[int]$markPid = 0
+if ([IO.File]::Exists($mark) -and [int]::TryParse(([IO.File]::ReadAllText($mark)).Trim(), [ref]$markPid) -and $markPid -gt 0) {
+  $process = Get-CimInstance Win32_Process -Filter "ProcessId = $markPid" -ErrorAction SilentlyContinue
+  $elevatedSupervisor = [bool]($process -and "$($process.CommandLine)" -like '*supervisor.mjs*')
+}
 Write-PuddleLine (ConvertTo-Json -Compress -InputObject @{
   puddle = 'windows-host'
   home = [string]$h
@@ -253,6 +263,7 @@ Write-PuddleLine (ConvertTo-Json -Compress -InputObject @{
   arch = Get-PuddleArch
   build = [int][Environment]::OSVersion.Version.Build
   elevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+  elevatedSupervisor = $elevatedSupervisor
   temp = [IO.Path]::GetTempPath()
 })`;
 
@@ -267,6 +278,11 @@ export interface WindowsProbe {
   build: number;
   /** An administrator's SSH session, which Windows OpenSSH runs elevated. */
   elevated: boolean;
+  /**
+   * The home's supervisor runs with the elevated token of the SSH session
+   * whose WMI start created it (ELEVATED_SUPERVISOR names its pid).
+   */
+  elevatedSupervisor: boolean;
   temp: string;
 }
 
@@ -295,7 +311,8 @@ export function parseProbe(stdout: string): WindowsProbe | null {
     !optional('current') ||
     !optional('node') ||
     typeof v.build !== 'number' ||
-    typeof v.elevated !== 'boolean'
+    typeof v.elevated !== 'boolean' ||
+    (v.elevatedSupervisor !== undefined && typeof v.elevatedSupervisor !== 'boolean')
   ) {
     return null;
   }
@@ -306,6 +323,7 @@ export function parseProbe(stdout: string): WindowsProbe | null {
     arch: v.arch as string,
     build: v.build,
     elevated: v.elevated,
+    elevatedSupervisor: v.elevatedSupervisor === true,
     temp: v.temp as string,
   };
 }

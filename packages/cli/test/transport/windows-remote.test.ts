@@ -87,7 +87,14 @@ describe('the Windows remote command', () => {
       temp: 'C:\\Users\\a\\AppData\\Local\\Temp\\',
     };
     const { puddle: _marker, ...facts } = answer;
-    expect(parseProbe(`${JSON.stringify(answer)}\r\n`)).toEqual(facts);
+    expect(parseProbe(`${JSON.stringify(answer)}\r\n`)).toEqual({
+      ...facts,
+      elevatedSupervisor: false,
+    });
+    expect(
+      parseProbe(JSON.stringify({ ...answer, elevatedSupervisor: true }))?.elevatedSupervisor,
+    ).toBe(true);
+    expect(parseProbe(JSON.stringify({ ...answer, elevatedSupervisor: 'yes' }))).toBeNull();
     expect(parseProbe(JSON.stringify({ ...answer, current: null, node: null }))).toMatchObject({
       current: null,
       node: null,
@@ -299,6 +306,32 @@ describe.runIf(process.platform === 'win32')('the loader on Windows', () => {
       node: null,
       arch: expect.stringMatching(/^(x64|arm64)$/),
     });
+  }, 60_000);
+
+  it('reports a supervisor an elevated session started for as long as it runs', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'puddle-elevated-'));
+    const probeOf = async () => {
+      const result = await viaShell('cmd', frame(windowsScript(PROBE_SCRIPT, { home })));
+      expect(parseTrailer(result.stderr).code).toBe(0);
+      return parseProbe(result.stdout.toString('utf8'))!.elevatedSupervisor;
+    };
+    expect(await probeOf()).toBe(false);
+    // A process standing in for that supervisor: its command line names supervisor.mjs.
+    const supervisor = spawn(
+      process.execPath,
+      ['-e', 'setInterval(() => {}, 1000)', 'supervisor.mjs'],
+      { stdio: 'ignore', windowsHide: true },
+    );
+    try {
+      await new Promise((resolve) => supervisor.once('spawn', resolve));
+      writeFileSync(join(home, 'supervisor-elevated'), `${supervisor.pid}\n`);
+      expect(await probeOf()).toBe(true);
+      // Any other process holding that number is not it.
+      writeFileSync(join(home, 'supervisor-elevated'), `${process.pid}\n`);
+      expect(await probeOf()).toBe(false);
+    } finally {
+      supervisor.kill();
+    }
   }, 60_000);
 
   it('stages the helper and clears what interrupted operations left in %TEMP%', async () => {

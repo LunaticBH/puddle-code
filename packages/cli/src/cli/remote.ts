@@ -9,7 +9,7 @@ import {
   remoteOriginSchema,
   remoteSecretSchema,
 } from '@puddle/shared';
-import { remoteWindowsHost } from '../lib/host/windows-remote-host.js';
+import { elevatedWarning, remoteWindowsHost } from '../lib/host/windows-remote-host.js';
 import { windowsOps } from '../lib/host/windows-ops.js';
 import {
   connectorEnvironment,
@@ -249,6 +249,10 @@ export async function runRemote(
       );
     if (command.action === 'enable' && command.foreground)
       process.stdout.write('Run puddle remote run under your external supervisor.\n');
+    // The connector runs as the supervisor's child, with its token.
+    const ssh = remoteWindows(transport);
+    if (command.action === 'enable' && ssh && (await ssh.windowsProbe(true)).elevatedSupervisor)
+      process.stderr.write(`Puddle: ${elevatedWarning(ssh.label, 'wmi')}\n`);
     return 0;
   } finally {
     transport.dispose();

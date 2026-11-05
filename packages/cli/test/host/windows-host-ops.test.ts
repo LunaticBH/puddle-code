@@ -1,5 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import type { Server, Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,7 +15,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { PROTOCOL_VERSION } from '@puddle/shared';
 import { ipcPath, ipcProof, listenPrivate } from '@puddle/shared/node';
 import type { PowerShellRunner } from '@puddle/shared/node/platform';
-import { runWindowsHostOp, testSupervision } from '../../src/lib/host/windows-host-ops.js';
+import {
+  recordElevation,
+  runWindowsHostOp,
+  testSupervision,
+} from '../../src/lib/host/windows-host-ops.js';
 import { parseHelperMessage } from '../../src/lib/host/windows-host-protocol.js';
 
 /**
@@ -236,6 +247,41 @@ describe('the host helper’s other operations', () => {
     expect(asked).toEqual([expect.stringContaining('supervisor.mjs')]);
     // Past the guard: whatever the (absent) connector then says, it is not session_bound.
     expect(lines().filter((line) => line.code === 'session_bound')).toEqual([]);
+  });
+
+  it('records a supervisor it started through WMI from an elevated session, for later warnings', async () => {
+    for (const elevated of [true, false]) {
+      const at = home();
+      const powershell: PowerShellRunner = async (_script, env) => {
+        if ('PUDDLE_PROCESS_COMMAND' in env) server = await serveSupervisor(at);
+        return {
+          code: 0,
+          stdout: JSON.stringify({ code: 0, pid: 4242, ran: false, state: 'absent', error: '' }),
+          stderr: '',
+        };
+      };
+      const configure = io();
+      const done = runWindowsHostOp(
+        'connector',
+        { args: ['--configure'], ...(elevated ? { elevated: true } : {}) },
+        { home: at, powershell, ...configure },
+      );
+      configure.stdin.end(JSON.stringify({ profile: 'default', setup: { managed: true } }) + '\n');
+      await done;
+      const marker = join(at, 'supervisor-elevated');
+      expect(existsSync(marker) ? readFileSync(marker, 'utf8') : null).toBe(
+        elevated ? '4242\n' : null,
+      );
+      await new Promise<void>((resolve) => server!.close(() => resolve()));
+      server = undefined;
+    }
+  });
+
+  it('forgets an elevated supervisor once the logon task starts one', async () => {
+    const at = home();
+    writeFileSync(join(at, 'supervisor-elevated'), '4242\n');
+    await recordElevation(at, 'task', true);
+    expect(existsSync(join(at, 'supervisor-elevated'))).toBe(false);
   });
 
   it('refuses remote access beside a daemon attached to an SSH session, starting nothing', async () => {

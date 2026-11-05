@@ -388,6 +388,10 @@ describe('a Windows SSH host’s client', () => {
       return warned;
     };
     expect((await warnings('process', true)).join('\n')).toContain('runs elevated');
+    // Logging on alone does not replace it: the remedy restarts it through the task.
+    expect((await warnings('process', true)).join('\n')).toContain(
+      'then run puddle upgrade daemon alice@winbox',
+    );
     // The logon task runs without elevation, and one already running was not started here.
     expect(await warnings('task', true)).toEqual([]);
     expect(await warnings('running', true)).toEqual([]);
@@ -423,6 +427,45 @@ describe('a Windows SSH host’s client', () => {
       if (saved === undefined) delete process.env.PUDDLE_REPO;
       else process.env.PUDDLE_REPO = saved;
     }
+  });
+
+  it('warns, once per client, while the home’s supervisor runs with an elevated token', async () => {
+    const warned: string[] = [];
+    const logger = { info() {}, warn: (m: string) => warned.push(m) };
+    const { ssh, probes } = fakeSsh(() => ({ code: 0 }), { elevatedSupervisor: true });
+    const host = new RemoteWindowsHost(ssh);
+    await host.warnElevated(logger);
+    await host.warnElevated(logger, { refresh: true });
+    expect(warned).toHaveLength(1);
+    expect(warned[0]).toContain('puddled on alice@winbox runs elevated');
+    expect(probes.count).toBe(1);
+    const plain = fakeSsh(() => ({ code: 0 }), { elevatedSupervisor: false });
+    await new RemoteWindowsHost(plain.ssh).warnElevated(logger);
+    expect(warned).toHaveLength(1);
+  });
+
+  it('tells the helper its session is elevated, for a supervisor an install or enable starts', async () => {
+    const { ssh, sent } = fakeSsh(
+      () => ({ code: 0, lines: [{ t: 'result', value: { code: 0 } }] }),
+      {
+        current: 'C:\\h\\bin\\versions\\0.3.13',
+        node: 'x64',
+        elevated: true,
+      },
+    );
+    const host = new RemoteWindowsHost(ssh);
+    await host.connector(['--configure'], { stdin: '{}' });
+    await host.install({ version: '0.3.14' });
+    expect(
+      requestOf(sent.find((s) => opOf(s.script) === 'connector')!.script, 'connector'),
+    ).toMatchObject({
+      elevated: true,
+    });
+    expect(
+      requestOf(sent.find((s) => opOf(s.script) === 'install')!.script, 'install'),
+    ).toMatchObject({
+      elevated: true,
+    });
   });
 
   it('bootstraps a host with no runtime of its architecture by download', async () => {
