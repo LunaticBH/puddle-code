@@ -180,6 +180,17 @@ describe('ConptyHelper', () => {
     expect(await helper.adopt({ pid: 7001, createdAtMs: 5, parentPid: 4000 })).toBeNull();
     const host = await helper.adopt({ pid: 7000, createdAtMs: 5, parentPid: 4000 });
     expect(host?.host).toEqual({ pid: 7000, createdAtMs: 5 });
+    expect(host?.rootCreatedAtMs).toBeNull();
+    // With the PTY's root, while it is still the one recorded.
+    const root = { pid: 10, createdAtMs: 4 };
+    const held = await helper.adopt({ pid: 7000, createdAtMs: 5, parentPid: 4000, root });
+    expect(held).toMatchObject({ rootCreatedAtMs: 4, host: { pid: 7000, createdAtMs: 5 } });
+    expect(await held!.alive()).toEqual({ root: true, host: true });
+    const other = { pid: 1010, createdAtMs: 4 };
+    expect(
+      (await helper.adopt({ pid: 7000, createdAtMs: 5, parentPid: 4000, root: other }))
+        ?.rootCreatedAtMs,
+    ).toBeNull();
     const classified = await helper.classify([
       { pid: 20, createdAtMs: 1 },
       { pid: 1020, createdAtMs: 2 },
@@ -412,6 +423,45 @@ describe.skipIf(process.platform !== 'win32')('the ConPTY helper on Windows', ()
       await helper.adopt({ pid: child.pid!, createdAtMs: now, parentPid: process.pid }),
     ).toBeNull();
     child.kill();
+  });
+
+  it('adopts a recorded console host with its root only while the root is the process recorded', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'puddle-helper-'));
+    markers.push(dir);
+    const fromMs = Date.now();
+    const proc = pty.spawn('cmd.exe', ['/d', '/k', `rem ${dir}:root`], {
+      cols: 100,
+      rows: 30,
+      cwd: dir,
+    });
+    const toMs = Date.now();
+    guardConsoleListKill(proc);
+    consoles.push(proc);
+    const [host] = await conptyHosts(fromMs, toMs);
+    const root = (await listWindowsProcesses({ fresh: true })).find((p) => p.pid === proc.pid)!;
+    const recorded = { pid: host!.pid, createdAtMs: host!.createdAtMs!, parentPid: process.pid };
+    // One helper each: a host one holds is never another's.
+    const [first, second] = [new ConptyHelper(), new ConptyHelper()];
+    helpers.push(first, second);
+    // Created at another time: another process's pid.
+    const later = await first.adopt({
+      ...recorded,
+      root: { pid: proc.pid, createdAtMs: root.createdAtMs! + 1000 },
+    });
+    expect(later?.host?.pid).toBe(host!.pid);
+    expect(later?.rootCreatedAtMs).toBeNull();
+    const held = await second.adopt({
+      ...recorded,
+      root: { pid: proc.pid, createdAtMs: root.createdAtMs! },
+    });
+    expect(Math.abs(held!.rootCreatedAtMs! - root.createdAtMs!)).toBeLessThanOrEqual(1);
+    expect(await held!.alive()).toEqual({ root: true, host: true });
+    // Held, it is ended as the root; then its host, which node-pty no longer closes.
+    expect(await held!.terminate(['root'])).toBe(1);
+    expect((await held!.alive())?.root).toBe(false);
+    expect(await held!.terminate(['host'])).toBe(1);
+    later!.release();
+    held!.release();
   });
 
   /** The real helper, spoken to as the headless driver speaks to it (terminal-source.ts). */

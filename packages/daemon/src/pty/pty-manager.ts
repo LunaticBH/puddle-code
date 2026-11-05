@@ -275,6 +275,9 @@ export class PtyManager extends EventEmitter {
           startedAtMs: state.startedAtMs,
           spawnedAtMs: state.spawnedAtMs,
         };
+        if (state.held && state.held.rootCreatedAtMs !== null) {
+          record.createdAtMs = state.held.rootCreatedAtMs;
+        }
         if (state.exitedAtMs !== undefined) record.exitedAtMs = state.exitedAtMs;
         if (state.held?.host) record.host = { ...state.held.host };
         return record;

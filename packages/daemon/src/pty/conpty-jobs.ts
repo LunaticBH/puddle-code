@@ -143,12 +143,15 @@ export interface ConsoleInspector {
   /**
    * Holds the console host a crashed daemon `parentPid` recorded, if it
    * still is that process (`createdAtMs`, a headless conhost.exe child of
-   * that daemon); null when it has exited, or on no answer.
+   * that daemon); null when it has exited, or on no answer. With it the
+   * PTY's `root`, while it still is the process recorded (the console's
+   * `rootCreatedAtMs` says whether it is held).
    */
   adopt(host: {
     pid: number;
     createdAtMs: number;
     parentPid: number;
+    root?: { pid: number; createdAtMs: number };
   }): Promise<ConptyConsole | null>;
   /**
    * Holds each process still running as created then and says what it is,
@@ -302,7 +305,7 @@ public static class PuddleConsoles
         if (f.Length == 4 && f[1] == "scan") return Scan(f[2], f[3] == "1");
         if (f.Length >= 3 && f[1] == "terminate") return Terminate(f[2], f, 3);
         if (f.Length == 3 && f[1] == "release") return Release(f[2]);
-        if (f.Length == 6 && f[1] == "adopt") return Adopt(f[2], int.Parse(f[3]), long.Parse(f[4]), int.Parse(f[5]));
+        if (f.Length == 8 && f[1] == "adopt") return Adopt(f[2], int.Parse(f[3]), long.Parse(f[4]), int.Parse(f[5]), int.Parse(f[6]), long.Parse(f[7]));
         if (f.Length >= 3 && f[1] == "classify") return Classify(f[2], f, 3);
         if (f.Length == 7 && f[1] == "own") return Own(f[2], int.Parse(f[3]), long.Parse(f[4]), long.Parse(f[5]), int.Parse(f[6]));
         return "error usage";
@@ -875,16 +878,32 @@ public static class PuddleConsoles
         return "ok";
     }
 
-    // A console host a crashed daemon recorded, held while it is still that process.
-    static string Adopt(string id, int pid, long createdMs, int parent)
+    // A console host a crashed daemon recorded, held while it is still that
+    // process, and the PTY's root (rootPid 0: none recorded) while it is
+    // still the one recorded, a process that daemon created then. Replies
+    // with the host's creation and the root's (0: not held).
+    static string Adopt(string id, int pid, long createdMs, int parent, int rootPid, long rootCreated)
     {
         var pty = new Pty();
         pty.From = createdMs - 1;
         pty.To = createdMs + 1;
         pty.Parent = parent;
-        pty.Host = OpenHost(pid, pty, parent, Table());
+        var table = Table();
+        pty.Host = OpenHost(pid, pty, parent, table);
+        if (pty.Host != null && rootPid > 0)
+        {
+            Pin root = Open(rootPid);
+            Entry entry;
+            if (root != null && Math.Abs(root.Created - rootCreated) <= 1 &&
+                table.TryGetValue(rootPid, out entry) && (int)entry.Parent == parent && !IsHeadlessHost(root, entry))
+            {
+                root.Parent = parent;
+                pty.Root = root;
+            }
+            else Close(root);
+        }
         Put(id, pty);
-        return pty.Host != null ? "ok " + pty.Host.Created : "gone";
+        return pty.Host != null ? "ok " + pty.Host.Created + " " + (pty.Root != null ? pty.Root.Created : 0) : "gone";
     }
 
     // Holds 'pid', provided 'parent' created it between fromMs and toMs, as
@@ -1247,16 +1266,26 @@ export class ConptyHelper implements ConptyJobs, ConsoleInspector {
     pid: number;
     createdAtMs: number;
     parentPid: number;
+    root?: { pid: number; createdAtMs: number };
   }): Promise<ConptyConsole | null> {
+    const positive = (value: number) => Number.isSafeInteger(value) && value > 0;
     const values = [host.pid, host.createdAtMs, host.parentPid];
-    if (!values.every((value) => Number.isSafeInteger(value) && value > 0)) return null;
+    if (!values.every(positive)) return null;
+    const root =
+      host.root && positive(host.root.pid) && positive(host.root.createdAtMs) ? host.root : null;
     const id = `a${++this.sequence}`;
-    const reply = await this.ask(`adopt ${id} ${values.join(' ')}`);
+    const reply = await this.ask(
+      `adopt ${id} ${values.join(' ')} ${root?.pid ?? 0} ${root?.createdAtMs ?? 0}`,
+    );
     if (!reply?.startsWith('ok ')) {
       if (reply === 'gone') void this.ask(`release ${id}`);
       return null;
     }
-    return this.console(id, null, { pid: host.pid, createdAtMs: Number(reply.slice(3)) });
+    const [, hostCreated, rootCreated] = reply.split(' ').map(Number);
+    return this.console(id, root && positive(rootCreated!) ? rootCreated! : null, {
+      pid: host.pid,
+      createdAtMs: hostCreated!,
+    });
   }
 
   async classify(

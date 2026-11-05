@@ -19,6 +19,7 @@ describe('the ConPTY roots record', () => {
       pid: 20,
       startedAtMs: 2000,
       spawnedAtMs: 2005,
+      createdAtMs: 2004,
       exitedAtMs: 9000,
       host: { pid: 30, createdAtMs: 2002 },
     },
@@ -51,8 +52,15 @@ describe('the ConPTY roots record', () => {
           { pid: -1, startedAtMs: 1, spawnedAtMs: 1 },
           { pid: 7, startedAtMs: 'soon', spawnedAtMs: 1 },
           null,
-          // A host or exit that is not one is dropped, the root kept.
-          { pid: 8, startedAtMs: 1, spawnedAtMs: 2, exitedAtMs: 'later', host: { pid: 0 } },
+          // A creation, host or exit that is not one is dropped, the root kept.
+          {
+            pid: 8,
+            startedAtMs: 1,
+            spawnedAtMs: 2,
+            createdAtMs: 1.5,
+            exitedAtMs: 'later',
+            host: { pid: 0 },
+          },
         ],
       }),
     );

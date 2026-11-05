@@ -10,10 +10,10 @@ import { renameWithRetrySync } from '@puddle/shared/node/platform';
  * once it runs, through each PTY's console host, or, for a PTY whose host
  * has gone, the console programmes below its root that still name it, and
  * for one whose host was never told apart, those attached to one of the
- * daemon's PTY consoles or to one that has gone
- * (supervision/reap-daemon.ts). Host-local
- * state, never on the wire. This module must not load node-pty: the
- * supervisor's bundle imports it.
+ * daemon's PTY consoles or to one that has gone, each root last, once it has
+ * had the time Windows gives it to handle its console's close
+ * (supervision/reap-daemon.ts). Host-local state, never on the wire. This
+ * module must not load node-pty: the supervisor's bundle imports it.
  */
 
 export interface PtyRootRecord {
@@ -22,6 +22,11 @@ export interface PtyRootRecord {
   startedAtMs: number;
   /** The clock just after `pty.spawn` returned. */
   spawnedAtMs: number;
+  /**
+   * The root's creation time, as the ConPTY helper held it (conpty-jobs.ts):
+   * with it the supervisor holds the root again, should it outlive the daemon.
+   */
+  createdAtMs?: number;
   /** When the root exited (node-pty's own callback), while its PTY was still being torn down. */
   exitedAtMs?: number;
   /** The PTY's headless console host, as the ConPTY helper told it apart (conpty-jobs.ts). */
@@ -79,13 +84,17 @@ export function readPtyRoots(file: string, daemon: number): PtyRootRecord[] | nu
     const roots: PtyRootRecord[] = [];
     for (const root of parsed.roots as unknown[]) {
       if (typeof root !== 'object' || root === null) continue;
-      const { pid, startedAtMs, spawnedAtMs, exitedAtMs, host } = root as Record<string, unknown>;
+      const { pid, startedAtMs, spawnedAtMs, createdAtMs, exitedAtMs, host } = root as Record<
+        string,
+        unknown
+      >;
       if (!isId(pid) || !Number.isFinite(startedAtMs) || !Number.isFinite(spawnedAtMs)) continue;
       const record: PtyRootRecord = {
         pid,
         startedAtMs: startedAtMs as number,
         spawnedAtMs: spawnedAtMs as number,
       };
+      if (isId(createdAtMs)) record.createdAtMs = createdAtMs;
       if (Number.isFinite(exitedAtMs)) record.exitedAtMs = exitedAtMs as number;
       const held = host as { pid?: unknown; createdAtMs?: unknown } | null | undefined;
       if (held && isId(held.pid) && isId(held.createdAtMs)) {

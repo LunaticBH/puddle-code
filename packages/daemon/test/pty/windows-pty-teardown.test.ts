@@ -354,6 +354,12 @@ describe.skipIf(process.platform !== 'win32')(
         'both hosts recorded',
       );
       expect(roots.map((r) => r.host!.pid).sort()).toEqual(hosts.map((h) => h.pid).sort());
+      // And each root's creation, with which the supervisor holds it again after a crash.
+      const table = await listWindowsProcesses({ fresh: true });
+      for (const r of roots) {
+        const created = table.find((p) => p.pid === r.pid)!.createdAtMs!;
+        expect(Math.abs(r.createdAtMs! - created)).toBeLessThanOrEqual(1);
+      }
       const first = hosts.find(
         (h) => h.pid === roots.find((r) => r.pid === ptys.pidFor('a', 'agent'))!.host!.pid,
       )!;

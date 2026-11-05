@@ -15,6 +15,7 @@
 // that other spawn's host. A claim holds the host it is given, if it is one
 // of those. A scan names the root (pid 10), a console child (11), a GUI
 // programme (12), what it started (14) and another console's process (13).
+// An adopt holds the host 7000 only, and with it a root below 1000.
 // A classify answers pids below 1000 as console programmes on console 7000,
 // from 1000 as GUI programmes, from 2000 as detached, and leaves out those
 // from 3000 (no longer running).
@@ -73,9 +74,11 @@ if (mode === 'mute') {
       held.delete(args[0]);
       reply('ok');
     } else if (verb === 'adopt') {
-      const [id, pid, created] = args;
-      held.set(id, { root: false, host: true });
-      reply(pid === '7000' ? `ok ${created}` : 'gone');
+      const [id, pid, created, , root, rootCreated] = args;
+      // A root below 1000 is still the one recorded.
+      const rootHeld = root !== '0' && Number(root) < 1000;
+      held.set(id, { root: rootHeld, host: true });
+      reply(pid === '7000' ? `ok ${created} ${rootHeld ? rootCreated : 0}` : 'gone');
     } else if (verb === 'classify') {
       const items = args.slice(1).flatMap((key) => {
         const [pid, created] = key.split('@').map(Number);
