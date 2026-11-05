@@ -126,6 +126,8 @@ export async function installDaemon(
   const result = await transport.exec(`sh -s -- ${quoted}`, {
     stdin: script,
     timeoutMs: 10 * 60_000,
+    // install.sh names a Git Bash kernel when one runs it.
+    revealsWindows: true,
     onStdout: (chunk) => {
       for (const line of chunk.split('\n')) if (line.trim() !== '') logger.info(line.trimEnd());
     },

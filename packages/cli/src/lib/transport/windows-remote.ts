@@ -118,11 +118,33 @@ function Write-PuddleLog([string]$Message) { Write-PuddleLine (ConvertTo-Json -C
 function Get-PuddleHome { if ($env:PUDDLE_HOME) { $env:PUDDLE_HOME } else { Join-Path $env:USERPROFILE '.puddle' } }
 function Get-PuddleTemp {
   $dir = Join-Path ([IO.Path]::GetTempPath()) 'puddle-host'
-  if (Test-Path -LiteralPath $dir) {
-    $item = Get-Item -LiteralPath $dir -Force
-    if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "$dir is not a plain directory" }
-  } else { [void][IO.Directory]::CreateDirectory($dir) }
+  $me = [Security.Principal.WindowsIdentity]::GetCurrent().User
+  if (-not (Test-Path -LiteralPath $dir)) {
+    # Owner-only from the start, whatever its parent lets others do (TEMP=C:\Temp).
+    $sec = New-Object Security.AccessControl.DirectorySecurity
+    $sec.SetOwner($me)
+    $sec.SetAccessRuleProtection($true, $false)
+    $sec.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($me, [Security.AccessControl.FileSystemRights]::FullControl, [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit', [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow)))
+    [void][IO.Directory]::CreateDirectory($dir, $sec)
+  }
+  $item = Get-Item -LiteralPath $dir -Force
+  if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "$dir is not a plain directory" }
+  # As the home is checked: owned by this account (or SYSTEM or Administrators),
+  # and granting nobody else anything, so nobody else can plant or swap what runs.
+  $acl = $item.GetAccessControl([Security.AccessControl.AccessControlSections]'Owner, Access')
+  $sid = [Security.Principal.SecurityIdentifier]
+  $trusted = @($me.Value, 'S-1-5-18', 'S-1-5-32-544')
+  if ($trusted -notcontains $acl.GetOwner($sid).Value) { throw "$dir belongs to another account" }
+  $allowed = $trusted + @('S-1-3-0', 'S-1-3-4')
+  foreach ($rule in $acl.GetAccessRules($true, $true, $sid)) {
+    if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and $allowed -notcontains $rule.IdentityReference.Value) {
+      throw "$dir is open to other accounts: delete it, then connect again"
+    }
+  }
   $dir
+}
+function Test-PuddleHelper([string]$Path, [string]$Sha256) {
+  [IO.File]::Exists($Path) -and (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash -eq $Sha256
 }
 function ConvertTo-PuddleArgument([string]$Value) {
   if ($Value.Contains('"')) { throw 'an argument holds a quotation mark' }
@@ -212,6 +234,9 @@ export function windowsScript(body: string, opts: WindowsScriptOptions = {}): st
   return `${PRELUDE}${home}${body}\n`;
 }
 
+/** The home file naming a supervisor WMI started from an elevated session (windows-host-ops.ts). */
+export const ELEVATED_SUPERVISOR = 'supervisor-elevated';
+
 /**
  * What a Windows host reports about itself: the probe that recognises one,
  * and the facts every later operation needs (the installed runtime, its
@@ -223,6 +248,13 @@ $target = $null
 $link = Get-Item -LiteralPath $current -Force -ErrorAction SilentlyContinue
 if ($link -and $link.Target) { $target = [string]@($link.Target)[0] }
 $principal = New-Object Security.Principal.WindowsPrincipal ([Security.Principal.WindowsIdentity]::GetCurrent())
+$elevatedSupervisor = $false
+$mark = Join-Path $h ${psQuote(ELEVATED_SUPERVISOR)}
+[int]$markPid = 0
+if ([IO.File]::Exists($mark) -and [int]::TryParse(([IO.File]::ReadAllText($mark)).Trim(), [ref]$markPid) -and $markPid -gt 0) {
+  $process = Get-CimInstance Win32_Process -Filter "ProcessId = $markPid" -ErrorAction SilentlyContinue
+  $elevatedSupervisor = [bool]($process -and "$($process.CommandLine)" -like '*supervisor.mjs*')
+}
 Write-PuddleLine (ConvertTo-Json -Compress -InputObject @{
   puddle = 'windows-host'
   home = [string]$h
@@ -231,6 +263,7 @@ Write-PuddleLine (ConvertTo-Json -Compress -InputObject @{
   arch = Get-PuddleArch
   build = [int][Environment]::OSVersion.Version.Build
   elevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+  elevatedSupervisor = $elevatedSupervisor
   temp = [IO.Path]::GetTempPath()
 })`;
 
@@ -245,6 +278,11 @@ export interface WindowsProbe {
   build: number;
   /** An administrator's SSH session, which Windows OpenSSH runs elevated. */
   elevated: boolean;
+  /**
+   * The home's supervisor runs with the elevated token of the SSH session
+   * whose WMI start created it (ELEVATED_SUPERVISOR names its pid).
+   */
+  elevatedSupervisor: boolean;
   temp: string;
 }
 
@@ -273,7 +311,8 @@ export function parseProbe(stdout: string): WindowsProbe | null {
     !optional('current') ||
     !optional('node') ||
     typeof v.build !== 'number' ||
-    typeof v.elevated !== 'boolean'
+    typeof v.elevated !== 'boolean' ||
+    (v.elevatedSupervisor !== undefined && typeof v.elevatedSupervisor !== 'boolean')
   ) {
     return null;
   }
@@ -284,6 +323,7 @@ export function parseProbe(stdout: string): WindowsProbe | null {
     arch: v.arch as string,
     build: v.build,
     elevated: v.elevated,
+    elevatedSupervisor: v.elevatedSupervisor === true,
     temp: v.temp as string,
   };
 }
@@ -310,9 +350,12 @@ Write-PuddleBytes ([IO.File]::ReadAllBytes($path))`;
 
 /**
  * Stage the host helper as `%TEMP%\puddle-host\<name>` from the payload
- * that follows the script, keeping an identical file already there; prints
- * its path. The user's temporary directory lies in the profile, which only
- * its owner can open.
+ * that follows the script, and print its path. That folder is this
+ * account's alone (Get-PuddleTemp creates it owner-only and refuses one
+ * that is not: %TEMP% may be C:\Temp, which every user can write), and
+ * the copy just received and checked always replaces whatever has the
+ * name; one already there is kept only while another operation holds it
+ * open, and only when it is identical.
  *
  * Staging runs once per client process, so it also clears what operations
  * ended midway by the SSH session's job left behind, their `finally` never
@@ -336,9 +379,8 @@ $tmp = $dest + '.' + [Guid]::NewGuid().ToString('N')
 try {
   Receive-PuddlePayload $tmp ${length}
   if ((Get-FileHash -Algorithm SHA256 -LiteralPath $tmp).Hash -ne $want) { throw 'the host helper arrived damaged' }
-  if (-not ([IO.File]::Exists($dest) -and (Get-FileHash -Algorithm SHA256 -LiteralPath $dest).Hash -eq $want)) {
-    Move-Item -LiteralPath $tmp -Destination $dest -Force
-  }
+  try { Move-Item -LiteralPath $tmp -Destination $dest -Force }
+  catch { if (-not (Test-PuddleHelper $dest $want)) { throw } }
 } finally { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
 Write-PuddleLine (ConvertTo-Json -Compress -InputObject @{ path = [string]$dest })`;
 }
@@ -353,22 +395,42 @@ export type HelperRuntime =
    */
   | 'copy';
 
-/** Status 3: the staged helper has gone (Storage Sense clears %TEMP%), so stage it again. */
+/**
+ * Status 3: the staged helper has gone (Storage Sense clears %TEMP%), or is
+ * no longer the bytes staged, so stage it again.
+ */
 export const HELPER_MISSING_EXIT = 3;
+
+/** The staged helper: its path on the host and the SHA-256 it must still have when it runs. */
+export interface StagedHelper {
+  path: string;
+  sha256: string;
+}
+
+/** Exit 3 unless the staged helper is still the bytes staged, checked just before it runs. */
+function helperCheck(helper: StagedHelper): string {
+  if (!/^[0-9a-f]{64}$/.test(helper.sha256)) throw new Error('bad helper digest');
+  return String.raw`$helper = ${psQuote(helper.path)}
+$null = Get-PuddleTemp
+if (-not (Test-PuddleHelper $helper ${psQuote(helper.sha256.toUpperCase())})) { $global:PuddleExit = ${HELPER_MISSING_EXIT}; return }`;
+}
 
 /** Status 4: no runtime is installed, so no node.exe can run the helper. */
 export const NO_RUNTIME_EXIT = 4;
 
-/** Run the staged helper's `op` with a base64 JSON request; its stdin and stdout are the connection's. */
+/**
+ * Run the staged helper's `op` with a base64 JSON request; its stdin and
+ * stdout are the connection's. The staging folder's privacy and the
+ * helper's digest are checked again first.
+ */
 export function runHelperScript(
-  helper: string,
+  helper: StagedHelper,
   op: string,
   request: unknown,
   runtime: HelperRuntime,
 ): string {
   if (!/^[a-z-]+$/.test(op)) throw new Error(`bad helper op: ${op}`);
-  return String.raw`$helper = ${psQuote(helper)}
-if (-not [IO.File]::Exists($helper)) { $global:PuddleExit = ${HELPER_MISSING_EXIT}; return }
+  return String.raw`${helperCheck(helper)}
 $node = Join-Path (Get-PuddleHome) 'bin\current\bin\node.exe'
 if (-not [IO.File]::Exists($node)) { $global:PuddleExit = ${NO_RUNTIME_EXIT}; return }
 $copy = $null
@@ -384,12 +446,22 @@ try {
 }`;
 }
 
+/** What a bootstrap runs with the archive's own node.exe. */
+export type BootstrapOp =
+  /** A first install, or one over a tree of another build: the archive is installed. */
+  | 'install'
+  /** A broken install's removal and sweep: the archive only lends its node.exe. */
+  | 'remove'
+  | 'sweep';
+
 export interface BootstrapRequest {
   version: string;
-  /** The helper's install request, run by the archive's own node.exe. */
+  /** The helper operation; `install` when omitted. */
+  op?: BootstrapOp;
+  /** The helper's request for that operation, run by the archive's own node.exe. */
   install: unknown;
-  /** Already-staged helper path. */
-  helper: string;
+  /** The staged helper, checked again before anything is fetched. */
+  helper: StagedHelper;
   /** `owner/repo` to download from; absent with a streamed archive. */
   slug?: string;
   /** A streamed archive: its release name, size and SHA-256, and whether that sum is authentic. */
@@ -403,8 +475,13 @@ export interface BootstrapRequest {
  * script; verify it with Get-FileHash; unpack only `bin\node.exe` with
  * System32's tar.exe; then let the helper, run by that node.exe, install the
  * archive as `installWindowsDaemon` installs a local one. Everything happens
- * in the user's temporary directory, inside the profile; the helper copies
- * the archive into the home it creates privately.
+ * in the account's private staging folder (Get-PuddleTemp); the helper
+ * copies the archive into the home it creates privately.
+ *
+ * A home whose `bin\current\bin\node.exe` is gone (a quarantined runtime,
+ * a deleted version folder) is removed and swept the same way: the
+ * archive's node.exe runs the helper's `remove` or `sweep`, which need no
+ * runtime of the home's own.
  */
 export function bootstrapScript(request: BootstrapRequest): string {
   const { version, archive } = request;
@@ -412,7 +489,8 @@ export function bootstrapScript(request: BootstrapRequest): string {
   if (archive && !/^[\x21-\x7e]+$/.test(archive.name)) throw new Error('bad archive name');
   if (request.slug !== undefined && !/^[\w.-]+\/[\w.-]+$/.test(request.slug))
     throw new Error('bad slug');
-  return String.raw`$work = Join-Path (Get-PuddleTemp) ('boot-' + [Guid]::NewGuid().ToString('N'))
+  return String.raw`${helperCheck(request.helper)}
+$work = Join-Path (Get-PuddleTemp) ('boot-' + [Guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($work)
 try {
   $arch = Get-PuddleArch
@@ -428,11 +506,22 @@ try {
   if ($run.code -ne 0 -or -not [IO.File]::Exists($node)) { throw "the archive has no bin\node.exe: $($run.output)" }
   $machine = Get-PuddlePeMachine $node
   if ($machine -ne $arch) { throw "$name is the win32-$machine build; this machine needs puddled-v${version}-win32-$arch.zip" }
-  # The archive's path follows the request: the helper installs it as a local --tarball.
-  $global:PuddleExit = Invoke-PuddleNode $node @(${psQuote(request.helper)}, 'install', ${psQuote(b64json(request.install))}, (Join-Path $work $name))
+  ${helperRun(request)}
 } finally {
   Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 }`;
+}
+
+/** The helper's run by the archive's node.exe; only an install is given the archive. */
+function helperRun(request: BootstrapRequest): string {
+  const op = request.op ?? 'install';
+  if (!['install', 'remove', 'sweep'].includes(op)) throw new Error(`bad bootstrap op: ${op}`);
+  const args = ['$helper', psQuote(op), psQuote(b64json(request.install))];
+  if (op === 'install') {
+    // The archive's path follows the request: the helper installs it as a local --tarball.
+    args.push('(Join-Path $work $name)');
+  }
+  return `$global:PuddleExit = Invoke-PuddleNode $node @(${args.join(', ')})`;
 }
 
 function receiveArchive(archive: NonNullable<BootstrapRequest['archive']>): string {

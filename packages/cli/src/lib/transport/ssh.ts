@@ -57,6 +57,16 @@ export interface SshOptions {
   windowsHome?: string;
 }
 
+/** A PowerShell operation's outcome on a Windows host. */
+export interface WindowsExecResult extends ExecResult {
+  /**
+   * The loader never reported the script's status: ssh failed (255), the
+   * connection dropped, or a timeout or abort killed the operation. `code`
+   * is then ssh's own status, not the host's.
+   */
+  incomplete?: true;
+}
+
 /** Options for one PowerShell operation on a Windows host. */
 export interface WindowsExecOptions {
   /** Bytes that follow the script on the same standard input. */
@@ -237,6 +247,16 @@ export class SshTransport implements Transport {
     return true;
   }
 
+  /**
+   * A host whose own answer says it is Windows (its connector's `--version`,
+   * reached through a Git Bash default shell), confirmed with the probe;
+   * true once the transport is win32. A ConstrainedLanguage session rejects.
+   */
+  async confirmWindows(): Promise<boolean> {
+    if (this.remotePlatform === 'win32') return true;
+    return this.recogniseWindows();
+  }
+
   private async openWindows(): Promise<void> {
     await this.windowsProbe(true);
   }
@@ -289,16 +309,23 @@ export class SshTransport implements Transport {
   }
 
   /**
-   * `sh -c <command>` on a POSIX host. A failure that reads as Windows
-   * answering it (a Git Bash default shell passes `true`, then its node.exe
-   * or `uname` gives the host away) is confirmed with the PowerShell probe;
-   * the result is returned unchanged either way, and the caller re-dispatches
-   * on the transport's platform.
+   * `sh -c <command>` on a POSIX host. For a command that may reveal a
+   * Windows host (`revealsWindows`: a Git Bash default shell passes `true`,
+   * then the helper stage's node.exe or install.sh's `uname` gives it away),
+   * a failure that reads as Windows answering it is confirmed with the
+   * PowerShell probe. ssh's own failure (255) and a killed command (-1) are
+   * no answer from the host. The result is returned unchanged either way,
+   * and the caller re-dispatches on the transport's platform.
    */
   exec(command: string, opts: ExecOptions = {}): Promise<ExecResult> {
     if (this.remotePlatform === 'win32') return Promise.reject(this.posixRefusal());
     return this.execPosix(command, opts).then(async (result) => {
-      if (result.code !== 0 && isWindowsHostFailure(result)) {
+      if (
+        opts.revealsWindows === true &&
+        result.code !== 255 &&
+        result.code !== -1 &&
+        isWindowsHostFailure(result)
+      ) {
         await this.recogniseWindows().catch(() => false);
       }
       return result;
@@ -447,7 +474,7 @@ export class SshTransport implements Transport {
    * never rejects on a non-zero status, except for a ConstrainedLanguage
    * session, where no operation can run.
    */
-  execWindows(script: string, opts: WindowsExecOptions = {}): Promise<ExecResult> {
+  execWindows(script: string, opts: WindowsExecOptions = {}): Promise<WindowsExecResult> {
     return new Promise((resolve, reject) => {
       const child = this.spawnWindows(script);
       const out: Buffer[] = [];
@@ -472,7 +499,12 @@ export class SshTransport implements Transport {
       child.stderr!.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
       child.on('error', (err) => {
         if (timer) clearTimeout(timer);
-        resolve({ code: -1, stdout: Buffer.concat(out).toString('utf8'), stderr: String(err) });
+        resolve({
+          code: -1,
+          stdout: Buffer.concat(out).toString('utf8'),
+          stderr: String(err),
+          incomplete: true,
+        });
       });
       child.on('close', (code) => {
         if (timer) clearTimeout(timer);
@@ -486,6 +518,7 @@ export class SshTransport implements Transport {
           code: trailer.code ?? code ?? -1,
           stdout: Buffer.concat(out).toString('utf8'),
           stderr: trailer.stderr,
+          ...(trailer.code === null ? { incomplete: true as const } : {}),
         });
       });
       const payload = opts.payload;
@@ -531,13 +564,28 @@ export class SshTransport implements Transport {
     };
   }
 
-  /** A credential channel to a Windows host: openChannel's counterpart, framed. */
-  openWindowsChannel(script: string): Duplex {
+  /**
+   * A credential channel to a Windows host: openChannel's counterpart,
+   * framed. `onExit` receives the script's own status from the loader's
+   * trailer as the channel ends (null without one).
+   */
+  openWindowsChannel(
+    script: string,
+    opts: { onExit?: (code: number | null) => void } = {},
+  ): Duplex {
     const child = this.spawnWindows(script, ['-T']);
     const stream = Duplex.from({ readable: child.stdout!, writable: child.stdin! });
-    child.stderr!.resume(); // diagnostics must not enter the credential protocol
+    // Diagnostics must not enter the credential protocol: only the end of
+    // standard error is kept, for the trailer.
+    let stderr = '';
+    child.stderr!.on('data', (chunk: Buffer) => {
+      stderr = (stderr + chunk.toString()).slice(-4096);
+    });
     child.once('error', () => stream.destroy(new Error('SSH control channel failed')));
-    child.once('close', () => stream.destroy());
+    child.once('close', () => {
+      opts.onExit?.(parseTrailer(stderr).code);
+      stream.destroy();
+    });
     stream.once('close', () => child.kill('SIGTERM'));
     return stream;
   }

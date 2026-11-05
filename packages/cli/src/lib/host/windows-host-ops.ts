@@ -1,8 +1,9 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { closeSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { connect } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { controlRequestSchema, controlResponseSchema } from '@puddle/shared';
 import {
   checkIpcEndpoint,
@@ -17,6 +18,7 @@ import {
   daemonEnvironment,
   openRotated,
   runWindowsPowerShell,
+  startWindowsSupervisor,
   supervisorRequest,
   type PowerShellRunner,
   type SupervisorStart,
@@ -34,6 +36,7 @@ import { installWindowsDaemon, windowsInstalledVersion } from '../installation/w
 import { removeWindowsDaemon, sweepWindowsWorktrees } from '../installation/windows-remove.js';
 import { CliError, type Logger } from '../types.js';
 import { showWindowsLogs } from '../windows-logs.js';
+import { ELEVATED_SUPERVISOR } from '../transport/windows-remote.js';
 import { errorMessage, type HelperMessage } from './windows-host-protocol.js';
 
 /**
@@ -60,6 +63,11 @@ export interface HostOpContext {
    * `session` refuses WMI too, as on a host that blocks it.
    */
   supervision?: 'wmi' | 'session';
+  /**
+   * Test seam: Task Scheduler and WMI as a test scripts them, in place of
+   * the `supervision` mode's. Never set outside tests.
+   */
+  powershell?: PowerShellRunner;
 }
 
 /**
@@ -67,23 +75,43 @@ export interface HostOpContext {
  * account's temporary directory, where no real home lives (Storage Sense
  * empties it): a real home is always supervised through Task Scheduler,
  * whatever its host's environment says.
+ *
+ * Both paths are compared in their on-disk spelling, case-insensitively on
+ * Windows: %TEMP% may hold an 8.3 name (`C:\Users\RUNNER~1\…`) or a junction,
+ * and a home the first install has yet to create would otherwise keep that
+ * spelling while the temporary directory loses it, so the seam would be
+ * refused and a real task registered.
  */
 export function testSupervision(
   env: NodeJS.ProcessEnv,
   home: string,
   temp: string = tmpdir(),
+  platform: NodeJS.Platform = process.platform,
 ): 'wmi' | 'session' | undefined {
   const mode = env.PUDDLE_TEST_WINDOWS_SUPERVISION;
   if (mode !== 'wmi' && mode !== 'session') return undefined;
-  const real = (path: string) => {
-    try {
-      return realpathSync.native(path);
-    } catch {
-      return resolve(path);
-    }
-  };
-  const inside = relative(real(temp), real(home));
+  const fold = (path: string) => (platform === 'win32' ? path.toLowerCase() : path);
+  const inside = relative(fold(onDiskPath(temp)), fold(onDiskPath(home)));
   return inside !== '' && !inside.startsWith('..') && !isAbsolute(inside) ? mode : undefined;
+}
+
+/**
+ * The on-disk spelling of `path`, which may not exist yet: its nearest
+ * existing ancestor's real path, followed by the segments still missing.
+ */
+function onDiskPath(path: string): string {
+  const missing: string[] = [];
+  let at = resolve(path);
+  for (;;) {
+    try {
+      return join(realpathSync.native(at), ...missing.reverse());
+    } catch {
+      const parent = dirname(at);
+      if (parent === at) return resolve(path);
+      missing.push(basename(at));
+      at = parent;
+    }
+  }
 }
 
 /** Connector modes a client may ask for; anything else is refused. */
@@ -148,7 +176,11 @@ export async function runWindowsHostOp(
     info: (message) => emit({ t: 'log', level: 'info', message }),
     warn: (message) => emit({ t: 'log', level: 'warn', message }),
   };
-  const seams = context.supervision ? { powershell: testPowerShell(context.supervision) } : {};
+  const seams = context.powershell
+    ? { powershell: context.powershell }
+    : context.supervision
+      ? { powershell: testPowerShell(context.supervision) }
+      : {};
   const body = record(request);
   try {
     switch (op) {
@@ -190,6 +222,7 @@ export async function runWindowsHostOp(
           detachedStart: false,
           onSupervisorStart: (how) => (started = how),
         });
+        await recordElevation(home, started, body.elevated === true);
         // How the supervisor started: the client warns when WMI started it
         // from an elevated session, whose token the daemon then carries.
         emit({ t: 'result', value: started === undefined ? {} : { started } });
@@ -241,7 +274,9 @@ export async function runWindowsHostOp(
         const timeoutMs = typeof body.timeoutMs === 'number' ? body.timeoutMs : 30_000;
         // Registration values travel on standard input only, never the command line.
         const stdin = await readAll(context.stdin);
-        if (args.includes('--configure') && managedSetup(stdin)) await requireSupervisor(home);
+        if (args.includes('--configure') && managedSetup(stdin)) {
+          await requireSupervisor(home, seams, logger, body.elevated === true);
+        }
         const run = await runWindowsConnector(home, args as string[], { stdin, timeoutMs });
         emit({ t: 'result', value: run });
         return 0;
@@ -271,21 +306,95 @@ function managedSetup(stdin: string): boolean {
 
 /**
  * A supervised connector needs the home's supervisor running outside this
- * SSH session. Without one, `--configure` would start it, and inside the
- * session's kill-on-close job its last way, a detached child, would end with
- * this operation's channel; under an attached lease it would also start a
- * daemon that competes with the lease's own. So it is refused, as an
- * installation that cannot outlive the session is.
+ * SSH session. One that is not running is started here as an install starts
+ * it, through the home's logon task and then WMI, never as a detached child
+ * of this session's kill-on-close job, which would end with this
+ * operation's channel (and is the connector's own last way, so
+ * `--configure` must find the supervisor answering). Under a daemon that
+ * runs without a supervisor, an attached lease's, a supervisor would only
+ * stand down beside it, so that is refused outright, as is a start that
+ * neither way makes.
  */
-async function requireSupervisor(home: string): Promise<void> {
-  if ((await supervisorRequest(home, 'status')).kind === 'answered') return;
-  throw new CliError(
-    'session_bound',
-    'remote access needs the Puddle supervisor running on this host outside the SSH session, ' +
-      'and neither Task Scheduler nor WMI has started it',
-    'log on to the machine once (its logon task then runs puddled), or allow WMI process ' +
-      'creation there, then launch again',
-  );
+async function requireSupervisor(
+  home: string,
+  seams: { powershell?: PowerShellRunner },
+  logger: Logger,
+  elevated: boolean,
+): Promise<void> {
+  const supervisor = (await supervisorRequest(home, 'status')).kind;
+  if (supervisor === 'answered') return;
+  if (supervisor !== 'absent') {
+    // Its pipe is served, by a supervisor too busy to answer or by another program.
+    throw new CliError(
+      'session_bound',
+      'remote access needs the Puddle supervisor, and the one serving this home does not answer',
+      'retry in a moment, or restart it with puddle upgrade daemon',
+    );
+  }
+  const pipe = await controlPipeState(home);
+  if (pipe === 'daemon' || pipe === 'unknown') {
+    throw new CliError(
+      'session_bound',
+      'remote access needs the Puddle supervisor, and puddled runs on this host without one, ' +
+        'attached to an SSH session',
+      'close the cockpit that keeps it attached, then launch again once the logon task or WMI ' +
+        'can start the supervisor',
+    );
+  }
+  try {
+    const started = await startWindowsSupervisor(home, {
+      ...seams,
+      task: readMarker(join(home, 'supervisor')) === 'task',
+      spawnDetached: () => refusedChild(),
+      logger,
+    });
+    await recordElevation(home, started, elevated);
+  } catch {
+    throw new CliError(
+      'session_bound',
+      'remote access needs the Puddle supervisor running on this host outside the SSH session, ' +
+        'and neither Task Scheduler nor WMI could start it',
+      'log on to the machine once (its logon task then runs puddled), or allow WMI process ' +
+        'creation there, then enable it again',
+    );
+  }
+}
+
+/**
+ * `<home>\supervisor-elevated`: the pid of a supervisor WMI started from an
+ * administrator's elevated SSH session, whose token it and every daemon it
+ * restarts carry. The probe reports it for as long as that process runs, so
+ * every later launch and enable warns again; a start by the logon task,
+ * which runs without elevation, clears it.
+ */
+export async function recordElevation(
+  home: string,
+  how: SupervisorStart | undefined,
+  elevated: boolean,
+): Promise<void> {
+  const marker = join(home, ELEVATED_SUPERVISOR);
+  if (how === 'task' || (how === 'process' && !elevated)) {
+    rmSync(marker, { force: true });
+    return;
+  }
+  if (how !== 'process') return;
+  const answer = await supervisorRequest(home, 'status');
+  if (answer.kind === 'answered') writeFileSync(marker, `${answer.state.pid}\n`);
+}
+
+function readMarker(path: string): string | undefined {
+  try {
+    return readFileSync(path, 'utf8').trim();
+  } catch {
+    return undefined;
+  }
+}
+
+/** Stands in for the detached start this session refuses: it never spawns. */
+function refusedChild(): ChildProcess {
+  const child = Object.assign(new EventEmitter(), { unref() {} });
+  setImmediate(() => child.emit('error', new Error('refused inside an SSH session')));
+  return child as unknown as ChildProcess;
 }
 
 /**

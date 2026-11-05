@@ -9,7 +9,7 @@ import {
   remoteOriginSchema,
   remoteSecretSchema,
 } from '@puddle/shared';
-import { remoteWindowsHost } from '../lib/host/windows-remote-host.js';
+import { elevatedWarning, remoteWindowsHost } from '../lib/host/windows-remote-host.js';
 import { windowsOps } from '../lib/host/windows-ops.js';
 import {
   connectorEnvironment,
@@ -156,22 +156,41 @@ export async function runRemote(
     const base = `${hostPaths.current}/bin/node ${hostPaths.current}/daemon/connector.mjs`;
     // A Windows host (this machine or an SSH one) has no shell for the fixed
     // commands: its installed node.exe runs the connector.
-    const hostOps = windowsOps(transport, {
-      home: () => home,
-      ...(windows.run ? { run: windows.run } : {}),
-    });
+    const seams = { home: () => home, ...(windows.run ? { run: windows.run } : {}) };
+    let hostOps = windowsOps(transport, seams);
     const connector = (flag: string, opts: { stdin?: string; timeoutMs?: number }) =>
       hostOps ? hostOps.connector([flag], opts) : transport.exec(`${base} ${flag}`, opts);
-    const installed = hostOps
-      ? (await hostOps.connectorInstalled()).installed
-      : (await transport.exec(`test -f ${hostPaths.current}/daemon/connector.mjs`)).code === 0;
-    if (!installed)
-      throw new CliError(
-        'not_installed',
-        'The installed daemon does not include mobile access',
-        `puddle upgrade daemon${command.host ? ` ${command.host}` : ''}`,
-      );
-    const capabilities = await connector('--version', { timeoutMs: 10_000 });
+    const capabilitiesOf = async () => {
+      const installed = hostOps
+        ? (await hostOps.connectorInstalled()).installed
+        : (await transport.exec(`test -f ${hostPaths.current}/daemon/connector.mjs`)).code === 0;
+      if (!installed)
+        throw new CliError(
+          'not_installed',
+          'The installed daemon does not include mobile access',
+          `puddle upgrade daemon${command.host ? ` ${command.host}` : ''}`,
+        );
+      return connector('--version', { timeoutMs: 10_000 });
+    };
+    let capabilities = await capabilitiesOf();
+    // A Windows host whose OpenSSH default shell is Git Bash passes `true` and
+    // answers both POSIX commands; its connector gives it away. Every later
+    // step goes through the host helper over PowerShell instead, with its
+    // session-bound guard, and Git Bash runs nothing more.
+    if (
+      hostOps === null &&
+      transport instanceof SshTransport &&
+      /; platform win32\b/.test(capabilities.stdout)
+    ) {
+      if (!(await transport.confirmWindows()))
+        throw new CliError(
+          'unsupported_platform',
+          `${transport.label} runs a Windows connector but does not answer as a Windows host`,
+          'report it with the command you ran',
+        );
+      hostOps = windowsOps(transport, seams);
+      capabilities = await capabilitiesOf();
+    }
     if (capabilities.code !== 0 || !capabilities.stdout.includes('cockpit controls 2'))
       throw new CliError(
         'protocol_mismatch',
@@ -230,6 +249,15 @@ export async function runRemote(
       );
     if (command.action === 'enable' && command.foreground)
       process.stdout.write('Run puddle remote run under your external supervisor.\n');
+    // The connector runs as the supervisor's child, with its token. Only a
+    // warning, after the enable succeeded: a host that stops answering here
+    // fails nothing.
+    const ssh = remoteWindows(transport);
+    if (command.action === 'enable' && ssh) {
+      const probe = await ssh.windowsProbe(true).catch(() => null);
+      if (probe?.elevatedSupervisor)
+        process.stderr.write(`Puddle: ${elevatedWarning(ssh.label, 'wmi')}\n`);
+    }
     return 0;
   } finally {
     transport.dispose();

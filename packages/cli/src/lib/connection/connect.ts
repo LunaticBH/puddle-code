@@ -8,6 +8,7 @@ import { waitForHttp } from '../transport/net.js';
 import { clientHome } from '../paths.js';
 import { startUiServer } from '../serve/ui-server.js';
 import { RemoteAccessControl } from '../host/remote-access.js';
+import { remoteWindowsHost } from '../host/windows-remote-host.js';
 import { openCallbackForward, openTunnel } from '../transport/tunnel.js';
 import { LocalTransport } from '../transport/local.js';
 import { SshTransport } from '../transport/ssh.js';
@@ -108,6 +109,8 @@ export async function connectRemote(opts: ConnectOptions): Promise<RunningCockpi
         ssh.remotePlatform === 'win32' ? attachedWindowsDaemon.start() : attachedDaemon.start(),
     });
     endpointResource = endpoint;
+    // A supervisor an elevated SSH session started through WMI stays elevated.
+    if (ssh.remotePlatform === 'win32') await remoteWindowsHost(ssh).warnElevated(logger);
     let remotePort = opts.remotePort ?? endpoint.port;
     const eventCbs = new Set<(e: CliEvent) => void>();
 

@@ -44,6 +44,8 @@ vi.mock('../../src/lib/transport/spawn.js', () => ({
 }));
 
 import { launcherRemotePlatform } from '../../src/cli/detach.js';
+import { inspectHost } from '../../src/lib/auth/control-channel.js';
+import { installDaemon } from '../../src/lib/installation/bootstrap.js';
 import { hostPaths } from '../../src/lib/paths.js';
 import { SshTransport } from '../../src/lib/transport/ssh.js';
 import { windowsRemoteCommand } from '../../src/lib/transport/windows-remote.js';
@@ -176,7 +178,7 @@ describe('a host recognised by a failed POSIX command', () => {
     const ssh = new SshTransport('alice@gitbash', { platform: 'linux' });
     await ssh.open();
     expect(ssh.remotePlatform).toBeUndefined();
-    const result = await ssh.exec('node -e stage');
+    const result = await ssh.exec('node -e stage', { revealsWindows: true });
     expect(result).toEqual({
       code: 1,
       stdout: '',
@@ -184,6 +186,64 @@ describe('a host recognised by a failed POSIX command', () => {
     });
     expect(ssh.remotePlatform).toBe('win32');
   });
+
+  it('recognises a Git Bash host from the control-helper stage and from install.sh', async () => {
+    const gitBash = (failure: Reply) => (s: Spawned) =>
+      isProbe(s)
+        ? { code: 0, stdout: probe, stderr: 'puddle-exit:0\n' }
+        : s.args.at(-1) === 'true'
+          ? { code: 0 }
+          : failure;
+    host.reply = gitBash({ code: 1, stderr: 'TypeError: process.getuid is not a function\n' });
+    const staged = new SshTransport('alice@gitbash', { platform: 'linux' });
+    await staged.open();
+    await inspectHost(staged).catch(() => null);
+    expect(staged.remotePlatform).toBe('win32');
+
+    host.reply = gitBash({ code: 1, stdout: 'install.sh: unsupported OS MINGW64_NT-10.0-26200\n' });
+    const installing = new SshTransport('alice@gitbash', { platform: 'linux' });
+    await installing.open();
+    const repo = process.env.PUDDLE_REPO;
+    process.env.PUDDLE_REPO = 'acme/puddle';
+    try {
+      await installDaemon(installing, { version: '1.2.3' }).catch(() => null);
+    } finally {
+      if (repo === undefined) delete process.env.PUDDLE_REPO;
+      else process.env.PUDDLE_REPO = repo;
+    }
+    expect(installing.remotePlatform).toBe('win32');
+  });
+
+  it('never probes after a command whose output relays user content', async () => {
+    // `puddle logs --follow` on a POSIX host whose agent printed Windows errors,
+    // then lost its connection: the log text is not the host answering.
+    host.reply = (s) =>
+      isProbe(s)
+        ? { code: 0, stdout: probe, stderr: 'puddle-exit:0\n' }
+        : {
+            code: 1,
+            stdout: "'x' is not recognized as an internal or external command\nMINGW64_NT-10.0\n",
+          };
+    const ssh = new SshTransport('alice@devbox', { platform: 'linux' });
+    const relayed: string[] = [];
+    await ssh.exec('tail -f -c 262144 agent.log', { onStdout: (text) => relayed.push(text) });
+    expect(relayed.join('')).toContain('MINGW64_NT');
+    expect(spawned).toHaveLength(1);
+    expect(ssh.remotePlatform).toBeUndefined();
+  });
+
+  for (const code of [255, -1]) {
+    it(`never probes after ssh’s own failure or a killed command (${code})`, async () => {
+      host.reply = (s) =>
+        isProbe(s)
+          ? { code: 0, stdout: probe, stderr: 'puddle-exit:0\n' }
+          : { code, stderr: 'TypeError: process.getuid is not a function\n' };
+      const ssh = new SshTransport('alice@devbox', { platform: 'linux' });
+      await ssh.exec('node -e stage', { revealsWindows: true });
+      expect(spawned).toHaveLength(1);
+      expect(ssh.remotePlatform).toBeUndefined();
+    });
+  }
 
   it('sends nothing more after an ordinary POSIX failure', async () => {
     host.reply = () => ({ code: 127, stderr: 'sh: 1: node: not found\n' });
@@ -229,5 +289,30 @@ describe('a host recognised by a failed POSIX command', () => {
       stderr: 'note',
     });
     expect(spawned[0]!.stdin.endsWith('data')).toBe(true);
+  });
+
+  it('reports a control channel’s own status as it ends, keeping stderr out of it', async () => {
+    host.reply = () => ({ code: 1, stdout: '', stderr: 'diagnostics\npuddle-exit:3\n' });
+    const ssh = new SshTransport('alice@winbox', { platform: 'linux', remotePlatform: 'win32' });
+    let read = '';
+    const status = await new Promise((resolve) => {
+      const channel = ssh.openWindowsChannel('$global:PuddleExit = 3', { onExit: resolve });
+      channel.on('data', (chunk: Buffer) => (read += chunk.toString()));
+      channel.on('error', () => {});
+      channel.end();
+    });
+    expect(status).toBe(3);
+    expect(read).toBe('');
+  });
+
+  it('marks an operation whose loader never reported its status as incomplete', async () => {
+    host.reply = () => ({ code: 255, stderr: 'Connection to winbox closed.\n' });
+    const ssh = new SshTransport('alice@winbox', { platform: 'linux', remotePlatform: 'win32' });
+    expect(await ssh.execWindows('$global:PuddleExit = 0')).toEqual({
+      code: 255,
+      stdout: '',
+      stderr: 'Connection to winbox closed.\n',
+      incomplete: true,
+    });
   });
 });

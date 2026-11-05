@@ -1,9 +1,15 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterAll, describe, expect, it, onTestFailed } from 'vitest';
-import { killProcessTree, listWindowsProcesses } from '@puddle/shared/node/platform';
+import {
+  killProcessTree,
+  listWindowsProcesses,
+  supervisorTaskName,
+  unregisterWindowsTask,
+  windowsTaskState,
+} from '@puddle/shared/node/platform';
 import { controlPipePresent, stopWindowsDaemon } from '../src/lib/installation/windows-daemon.js';
 import { windowsRemoteCommand } from '../src/lib/transport/windows-remote.js';
 import { fakeWindowsSshBinary } from '../test/helpers/fake-ssh.js';
@@ -18,8 +24,9 @@ import { root, stop, until } from './helpers.js';
  * control channel, the tunnel, the API, logs, kill and remove --purge. Task
  * Scheduler is never asked: the host helper's PUDDLE_TEST_WINDOWS_SUPERVISION
  * seam holds for a home in the host's temporary directory, so each host's
- * home lies there. The supervisor starts through WMI, in that home only, or
- * the daemon stays attached to the cockpit.
+ * home lies there; every test checks that no home got a task, and a leaked
+ * one is removed and fails the run. The supervisor starts through WMI, in
+ * that home only, or the daemon stays attached to the cockpit.
  */
 
 const release = join(root, 'dist-release');
@@ -44,11 +51,23 @@ it.runIf(process.platform === 'win32' && process.env.CI !== undefined)(
 describe.runIf(process.platform === 'win32' && zip !== undefined && existsSync(helper))(
   'SSH to a Windows host, through a fake Windows OpenSSH server',
   () => {
-    const base = mkdtempSync(join(tmpdir(), 'puddle-winssh-e2e-'));
+    // The on-disk spelling (TEMP may hold an 8.3 name): every command line the
+    // host starts, and the task name a home would get, use it.
+    const base = realpathSync.native(mkdtempSync(join(tmpdir(), 'puddle-winssh-e2e-')));
     const bin = join(base, 'bin');
     fakeWindowsSshBinary(bin);
     const running: ChildProcess[] = [];
     const homes: string[] = [];
+
+    /** The homes' scheduled tasks: none may ever be registered (read-only lookups). */
+    async function registeredTasks(): Promise<string[]> {
+      const found: string[] = [];
+      for (const home of homes) {
+        const name = supervisorTaskName(home);
+        if ((await windowsTaskState(name)).state !== 'absent') found.push(name);
+      }
+      return found;
+    }
 
     afterAll(async () => {
       for (const child of running) await stop(child).catch(() => undefined);
@@ -59,12 +78,16 @@ describe.runIf(process.platform === 'win32' && zip !== undefined && existsSync(h
         p.commandLine?.toLowerCase().includes(marker),
       );
       for (const p of leftovers) await killProcessTree(p.pid, { platform: 'win32' });
+      // A task the seam failed to prevent is removed, and fails the run.
+      const leaked = await registeredTasks();
+      for (const name of leaked) await unregisterWindowsTask(name).catch(() => false);
       // Best effort: the release zip each host received is large.
       try {
         rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
       } catch {
         // A file Defender still scans; the OS's temporary clean-up takes it.
       }
+      expect(leaked, 'the e2e registered real scheduled tasks').toEqual([]);
     }, 120_000);
 
     /** One client home and one Windows "host" profile, its home in its temporary directory. */
@@ -154,6 +177,8 @@ describe.runIf(process.platform === 'win32' && zip !== undefined && existsSync(h
       });
       expect(response.status).toBe(200);
       const { credential } = (await response.json()) as { credential: string };
+      // Task Scheduler was refused without being asked: the home has no task.
+      expect(await registeredTasks()).toEqual([]);
       const api = (path: string) =>
         fetch(`${origin}${path}`, {
           headers: { origin: origin!, authorization: `Bearer ${credential}` },
@@ -176,6 +201,7 @@ describe.runIf(process.platform === 'win32' && zip !== undefined && existsSync(h
       expect(await remove.exited, remove.output()).toBe(0);
       expect(remove.output()).toContain('%USERPROFILE%\\.puddle deleted');
       expect(existsSync(host.home)).toBe(false);
+      expect(await registeredTasks()).toEqual([]);
       const marker = host.home.toLowerCase();
       expect(
         (await listWindowsProcesses()).filter((p) => p.commandLine?.toLowerCase().includes(marker)),
@@ -231,6 +257,7 @@ describe.runIf(process.platform === 'win32' && zip !== undefined && existsSync(h
         30_000,
       );
       expect(existsSync(join(host.home, 'runtime.json'))).toBe(false);
+      expect(await registeredTasks()).toEqual([]);
     }, 300_000);
 
     // OpenSSH's DefaultShell set to Git Bash: POSIX `true` passes, so the host
@@ -254,6 +281,22 @@ describe.runIf(process.platform === 'win32' && zip !== undefined && existsSync(h
         expect(cockpit.output()).toContain('(supervisor: detached)');
         const hostInfo = (await (await api('/api/host')).json()) as { platform?: string };
         expect(hostInfo.platform).toBe('win32');
+
+        // `puddle remote` starts a transport of its own: the connector's
+        // `--version` gives the host away, and PowerShell does the rest.
+        const before = host.sent().length;
+        const status = host.puddle('remote', 'status', '--profile', '0123456789', 'alice@winhost');
+        await status.exited;
+        const remote = host.sent().slice(before);
+        expect(remote[0]!.command, status.output()).toBe('true');
+        const version = remote.findIndex((s) => s.command?.includes('connector.mjs --version'));
+        expect(version, status.output()).toBeGreaterThan(0);
+        expect(remote[version + 1]!.command).toBe(windowsRemoteCommand());
+        expect(
+          remote.slice(version + 1).every((s) => s.command === windowsRemoteCommand()),
+          status.output(),
+        ).toBe(true);
+        expect(status.output()).not.toContain('POSIX host command');
 
         await killAndPurge(host, cockpit);
       },

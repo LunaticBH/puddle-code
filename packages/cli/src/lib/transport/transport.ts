@@ -17,6 +17,14 @@ export interface ExecOptions {
   timeoutMs?: number;
   /** Stream stdout as it arrives (for `logs -f` and installer progress). */
   onStdout?: (chunk: string) => void;
+  /**
+   * SSH only: a failure of this command may give away a Windows host whose
+   * default shell is Git Bash (the control-helper stage, install.sh), so a
+   * Windows signature in its own output is confirmed with the PowerShell
+   * probe. Never set for a command that relays user content (logs, the
+   * connector's foreground run): their text is not the host speaking.
+   */
+  revealsWindows?: boolean;
 }
 
 export interface Transport {

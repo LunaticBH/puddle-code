@@ -17,8 +17,11 @@ import {
 
 const home = process.env.PUDDLE_HOME ?? join(homedir(), '.puddle');
 if (process.argv.includes('--version')) {
+  // A Windows connector says so: a client that reached it through a Git Bash
+  // default shell then drives the host through PowerShell (docs/windows.md).
+  const platform = process.platform === 'win32' ? '; platform win32' : '';
   process.stdout.write(
-    `puddle-connector remote protocol ${REMOTE_PROTOCOL_VERSION}; daemon protocol ${PROTOCOL_VERSION.major}.${PROTOCOL_VERSION.minor}; cockpit controls 2; delete registration 1\n`,
+    `puddle-connector remote protocol ${REMOTE_PROTOCOL_VERSION}; daemon protocol ${PROTOCOL_VERSION.major}.${PROTOCOL_VERSION.minor}; cockpit controls 2; delete registration 1${platform}\n`,
   );
 } else if (process.argv.includes('--disable-all')) {
   const legacy = join(home, 'remote', 'config.json');

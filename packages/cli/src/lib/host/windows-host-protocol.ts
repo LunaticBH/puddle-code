@@ -73,8 +73,16 @@ export function parseHelperMessage(line: string): HelperMessage | null {
   }
 }
 
+/**
+ * `code` of a failure that was no CliError on the host (EBUSY, a bug): on
+ * the client it stays a plain Error, as it would on a local Windows host,
+ * so nothing reads it as a tree that cannot run.
+ */
+const UNEXPECTED = 'unexpected';
+
 /** The CliError a helper reported, with its code when it is one the client knows. */
-export function helperError(message: Extract<HelperMessage, { t: 'error' }>): CliError {
+export function helperError(message: Extract<HelperMessage, { t: 'error' }>): Error {
+  if (message.code === UNEXPECTED) return new Error(message.message);
   const code = (CODES as readonly string[]).includes(message.code)
     ? (message.code as CliErrorCode)
     : 'not_installed';
@@ -93,7 +101,7 @@ export function errorMessage(err: unknown): Extract<HelperMessage, { t: 'error' 
   }
   return {
     t: 'error',
-    code: 'not_installed',
+    code: UNEXPECTED,
     message: err instanceof Error ? err.message : String(err),
   };
 }

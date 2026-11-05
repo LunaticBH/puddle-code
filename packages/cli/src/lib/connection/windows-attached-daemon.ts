@@ -1,5 +1,10 @@
+import { DAEMON_ALREADY_ACTIVE_EXIT } from '@puddle/shared/node/platform';
 import type { HostConnection } from '../auth/connection-authority.js';
-import { elevatedWarning, remoteWindowsHost } from '../host/windows-remote-host.js';
+import {
+  elevatedWarning,
+  HelperMissingError,
+  remoteWindowsHost,
+} from '../host/windows-remote-host.js';
 import { hostPaths } from '../paths.js';
 import { sleep } from '../transport/net.js';
 import type { RunningSshCommand, SshTransport } from '../transport/ssh.js';
@@ -67,10 +72,30 @@ export class WindowsAttachedDaemon implements DaemonLease {
     if (!exited) command.terminate();
   }
 
+  /**
+   * Start the attached daemon and wait for it. A helper that %TEMP% clean-up
+   * removed since it was staged (a cockpit reconnecting days later) is
+   * staged again once.
+   */
   private async launchAndWait(
     preferredPort?: number,
   ): Promise<{ port: number; authority: HostConnection }> {
-    const { command, pid } = await remoteWindowsHost(this.ssh).attached(preferredPort);
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.launchOnce(preferredPort, attempt > 0);
+      } catch (err) {
+        if (!(err instanceof HelperMissingError) || attempt > 0) throw err;
+      }
+    }
+  }
+
+  private async launchOnce(
+    preferredPort: number | undefined,
+    restage: boolean,
+  ): Promise<{ port: number; authority: HostConnection }> {
+    const { command, pid, exited } = await remoteWindowsHost(this.ssh).attached(preferredPort, {
+      restage,
+    });
     this.command = command;
     this.commandExited = false;
     this.pid = null;
@@ -90,9 +115,10 @@ export class WindowsAttachedDaemon implements DaemonLease {
           kind: 'started' as const,
           started,
         })),
-        // The helper reports a failure to start, or the channel's end.
+        // The helper reports a failure to start, or the channel's end, before
+        // the daemon runs or after: one that exits at once fails the start now.
         pid.then(
-          () => new Promise<never>(() => {}),
+          () => exited.then((status) => ({ kind: 'exited' as const, error: this.exit(status) })),
           (error: unknown) => ({ kind: 'exited' as const, error }),
         ),
       ]);
@@ -114,14 +140,30 @@ export class WindowsAttachedDaemon implements DaemonLease {
       outcome.started.authority.close();
       command.terminate();
       this.clear();
-      throw new CliError(
-        'daemon_start_timeout',
-        `another puddled process won the startup race on ${this.ssh.label}`,
-        'close the other cockpit or wait for its daemon to stop, then launch again',
-      );
+      throw this.lostRace();
     }
     if (this.command === command && !this.commandExited) this.pid = claimed;
     return outcome.started;
+  }
+
+  /** Why a daemon that had started ended before it answered. */
+  private exit(status: number | null): CliError {
+    // Another daemon serves the home's control pipe: this one stood down.
+    if (status === DAEMON_ALREADY_ACTIVE_EXIT) return this.lostRace();
+    return new CliError(
+      'daemon_start_timeout',
+      `puddled exited while starting on ${this.ssh.label}` +
+        (status === null ? '' : ` (status ${status})`),
+      `inspect it with: puddle logs ${this.ssh.label}`,
+    );
+  }
+
+  private lostRace(): CliError {
+    return new CliError(
+      'daemon_start_timeout',
+      `another puddled process won the startup race on ${this.ssh.label}`,
+      'close the other cockpit or wait for its daemon to stop, then launch again',
+    );
   }
 
   private async runtimePid(): Promise<number | null> {
