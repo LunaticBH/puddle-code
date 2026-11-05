@@ -1,5 +1,4 @@
 import {
-  windowsDescendantsOf,
   windowsProcessTree,
   type WindowsProcess,
   type WindowsProcessSource,
@@ -44,20 +43,22 @@ const CLOCK_SLACK_MS = 100;
  * Stops what an exited Windows daemon left running, resolving with how many
  * processes that was, by the rule its PTYs' teardown follows (docs/windows.md,
  * decision 8): a session's end ends what is attached to its console, and
- * never a GUI programme or a process that left the console.
+ * never a GUI programme, what one started, or a process that left the
+ * console (detached, or in a console of its own).
  *
  * A dead daemon's pseudoconsoles close with it, and Windows ends what is
  * attached to them; for each console host it recorded that still runs (it
  * is the one recorded: pid, creation time, headless, the daemon's child),
- * this ends what is still attached to it, then the host. A console host that
- * has gone took its processes with it. For a PTY whose host was never told
- * apart, whose attachment can no longer be read, it ends instead the
- * console programmes below its root that have a console (never a GUI
- * programme, a detached process, or anything they started) and were created
- * before the daemon exited and before the root did; a later holder of the
- * root's pid keeps its own children. Then, as systemd stops a unit's
- * control group, the daemon's own children (not its PTYs' roots and hosts)
- * and their descendants, by the same rule.
+ * this ends what is still attached to it, then the host. For a PTY whose
+ * host was never told apart, or has gone, attachment can no longer be read
+ * through it; this ends instead the console programmes below its root,
+ * created before the daemon exited and before the root did, that are
+ * attached to one of the daemon's PTY consoles (a headless console host the
+ * daemon created) or to a console that has gone, never one in a console of
+ * its own, a detached one, a GUI programme or anything below those; a later
+ * holder of the root's pid keeps its own children. Nothing else is ended:
+ * the daemon's other children end with it (Node holds each in a
+ * kill-on-close job), and what they started is no PTY console's.
  */
 export async function reapWindowsDaemon(
   daemon: Pick<SupervisedChild, 'pid' | 'startedAtMs'>,
@@ -70,28 +71,28 @@ export async function reapWindowsDaemon(
   const helper = consoles && (await consoles.ready()) ? consoles : null;
   let count = 0;
   try {
-    if (helper === null) return 0;
+    if (helper === null || roots === null) return 0;
     const untold: PtyRootRecord[] = [];
-    for (const root of roots ?? []) {
-      if (!root.host) {
+    for (const root of roots) {
+      const held = root.host ? await helper.adopt({ ...root.host, parentPid: daemon.pid }) : null;
+      if (!held) {
         untold.push(root);
         continue;
       }
-      const held = await helper.adopt({ ...root.host, parentPid: daemon.pid });
-      if (!held) continue;
       try {
         // Never attached to: it is closing, and its close would end the helper.
-        count += (await endConsole(root.pid, held, { root: true, host: true, attach: false }))
+        count += (await endConsole(root.pid, held, { root: false, host: true, attach: false }))
           .ended;
       } finally {
         held.release();
       }
     }
-    const targets = belowDaemon(await deps.processes({ fresh: true }), daemon, exitedAtMs, {
-      untold,
-      roots: roots ?? [],
-    });
-    count += await endConsolePrograms(helper, targets);
+    if (untold.length === 0) return count;
+    const trees = belowRoots(await deps.processes({ fresh: true }), exitedAtMs, untold);
+    count += await endConsolePrograms(helper, trees, async () =>
+      // Read after the helper said which host each names, so that every live one is in it.
+      consoleKinds(await deps.processes({ fresh: true }), daemon, exitedAtMs),
+    );
     return count;
   } finally {
     if (roots !== null) clearPtyRoots(deps.rootsFile);
@@ -99,75 +100,76 @@ export async function reapWindowsDaemon(
 }
 
 /**
- * What the process table leads to from a dead daemon: the trees below the
- * roots in `untold` and below the daemon's own children, parents first,
- * each created before the daemon exited.
+ * What the process table leads to from the roots in `untold` of a dead
+ * daemon: the tree below each, parents first, each created before the
+ * daemon exited.
  */
-export function belowDaemon(
+export function belowRoots(
+  table: readonly WindowsProcess[],
+  exitedAtMs: number,
+  untold: readonly PtyRootRecord[],
+): WindowsProcess[][] {
+  const createdBefore = exitedAtMs + CLOCK_SLACK_MS;
+  return untold.map((root) => {
+    const bounds = conptyRootBounds(root);
+    return windowsProcessTree(table, {
+      pid: root.pid,
+      ...bounds,
+      // A recorded root ran when the daemon did: a holder of its pid
+      // created after the daemon exited is another process, and so is the
+      // parent of one created after the root exited.
+      createdBeforeMs: Math.min(bounds.createdBeforeMs, exitedAtMs),
+      exitedBeforeMs: Math.min(root.exitedAtMs ?? Infinity, exitedAtMs + CONSOLE_CLOSE_MS),
+    }).filter((entry) => entry.createdAtMs !== null && entry.createdAtMs <= createdBefore);
+  });
+}
+
+/**
+ * What a classified process is attached to: one of the dead daemon's PTY
+ * consoles (`pty`: a headless console host the daemon created while it ran,
+ * before the process), a console that has gone (`gone`: its host no longer
+ * runs, or its pid is a later process's), or another console (`other`: one
+ * of its own, or one it inherited). Windows leaves a process naming a host
+ * that was terminated, whose pid a later host may hold: a host counts only
+ * when it was created before the process, or is the host of the console the
+ * process created itself (that host's parent, created just after it).
+ */
+export type ConsoleKind = 'pty' | 'gone' | 'other';
+
+export function consoleKinds(
   table: readonly WindowsProcess[],
   daemon: Pick<SupervisedChild, 'pid' | 'startedAtMs'>,
   exitedAtMs: number,
-  options: { untold: readonly PtyRootRecord[]; roots: readonly PtyRootRecord[] },
-): WindowsProcess[][] {
-  const createdBefore = exitedAtMs + CLOCK_SLACK_MS;
-  const trees: WindowsProcess[][] = [];
-  for (const root of options.untold) {
-    const bounds = conptyRootBounds(root);
-    trees.push(
-      windowsProcessTree(table, {
-        pid: root.pid,
-        ...bounds,
-        // A recorded root ran when the daemon did: a holder of its pid
-        // created after the daemon exited is another process, and so is the
-        // parent of one created after the root exited.
-        createdBeforeMs: Math.min(bounds.createdBeforeMs, exitedAtMs),
-        exitedBeforeMs: Math.min(root.exitedAtMs ?? Infinity, exitedAtMs + CONSOLE_CLOSE_MS),
-      }).filter((entry) => entry.createdAtMs !== null && entry.createdAtMs <= createdBefore),
-    );
-  }
-  if (daemon.startedAtMs === undefined) return trees;
-  const from = daemon.startedAtMs - CLOCK_SLACK_MS;
-  const isRoot = (entry: WindowsProcess) =>
-    options.roots.some((root) => {
-      const bounds = conptyRootBounds(root);
-      return (
-        root.pid === entry.pid &&
-        entry.createdAtMs !== null &&
-        entry.createdAtMs >= bounds.startedAtMs - CLOCK_SLACK_MS &&
-        entry.createdAtMs <= bounds.createdBeforeMs + CLOCK_SLACK_MS
-      );
-    });
-  const isConsoleHost = (entry: WindowsProcess) =>
-    entry.name.toLowerCase() === 'conhost.exe' && /--headless/i.test(entry.commandLine ?? '');
-  // Its PTYs' roots and hosts are their consoles' (above), with all below them.
-  const children = table.filter(
-    (entry) =>
-      entry.ppid === daemon.pid &&
-      entry.pid !== daemon.pid &&
-      entry.createdAtMs !== null &&
-      entry.createdAtMs >= from &&
-      entry.createdAtMs <= createdBefore &&
-      !isRoot(entry) &&
-      !isConsoleHost(entry),
-  );
-  trees.push(
-    [...children, ...windowsDescendantsOf(table, children)].filter(
-      (entry) => entry.createdAtMs !== null && entry.createdAtMs <= createdBefore,
-    ),
-  );
-  return trees;
+): (fact: Pick<ClassifiedProcess, 'pid' | 'consoleHost' | 'createdAtMs'>) => ConsoleKind {
+  const from = (daemon.startedAtMs ?? -Infinity) - CLOCK_SLACK_MS;
+  return (fact) => {
+    const host = table.find((entry) => entry.pid === fact.consoleHost);
+    if (!host || host.createdAtMs === null || host.name.toLowerCase() !== 'conhost.exe') {
+      return 'gone';
+    }
+    const before = host.createdAtMs <= fact.createdAtMs + 1;
+    const pty =
+      host.ppid === daemon.pid &&
+      /--headless/i.test(host.commandLine ?? '') &&
+      host.createdAtMs >= from &&
+      host.createdAtMs <= exitedAtMs + CLOCK_SLACK_MS;
+    if (pty) return before ? 'pty' : 'gone';
+    return before || host.ppid === fact.pid ? 'other' : 'gone';
+  };
 }
 
 /**
  * Of `tree` (parents first) as the helper classified it, the processes to
- * end: console programmes with a console. A GUI programme, a process with no
- * console (detached) or one the helper could not say has one, and
- * everything below them, are spared; so is whatever no longer runs as it
- * was created.
+ * end: console programmes attached to a PTY console of the daemon's, or to
+ * a console that has gone, whose attachment can no longer be read. A GUI
+ * programme, a process with no console (detached) or one the helper could
+ * not say has one, one in a console of its own, and everything below them,
+ * are spared; so is whatever no longer runs as it was created.
  */
 export function consolePrograms(
   tree: readonly WindowsProcess[],
   classified: readonly ClassifiedProcess[],
+  kindOf: (fact: ClassifiedProcess) => ConsoleKind,
 ): ClassifiedProcess[] {
   const key = (entry: { pid: number; createdAtMs: number | null }) =>
     `${entry.pid}@${entry.createdAtMs}`;
@@ -190,7 +192,10 @@ export function consolePrograms(
         other.createdAtMs <= entry.createdAtMs,
     );
     const fact = factOf(entry);
-    if ((parent && spared.has(key(parent))) || (fact && (fact.gui || fact.consoleHost <= 0))) {
+    if (
+      (parent && spared.has(key(parent))) ||
+      (fact && (fact.gui || fact.consoleHost <= 0 || kindOf(fact) === 'other'))
+    ) {
       spared.add(key(entry));
       continue;
     }
@@ -203,6 +208,7 @@ export function consolePrograms(
 async function endConsolePrograms(
   helper: ConsoleInspector,
   trees: readonly WindowsProcess[][],
+  kinds: () => Promise<(fact: ClassifiedProcess) => ConsoleKind>,
 ): Promise<number> {
   const all = trees.flat();
   if (all.length === 0) return 0;
@@ -213,8 +219,9 @@ async function endConsolePrograms(
   );
   if (!result) return 0;
   try {
+    const kindOf = await kinds();
     const keys = trees.flatMap((tree) =>
-      consolePrograms(tree, result.processes).map((fact) => fact.key),
+      consolePrograms(tree, result.processes, kindOf).map((fact) => fact.key),
     );
     return keys.length === 0 ? 0 : await result.console.terminate([...new Set(keys)]);
   } finally {

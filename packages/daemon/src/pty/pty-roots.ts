@@ -8,7 +8,9 @@ import { renameWithRetrySync } from '@puddle/shared/node/platform';
  * pseudoconsoles close with it, and Windows ends the processes attached to
  * them; the record lets the supervisor end those that are still attached
  * once it runs, through each PTY's console host, or, for a PTY whose host
- * was never told apart, the console programmes below its root. Host-local
+ * was never told apart or has gone, the console programmes below its root
+ * attached to one of the daemon's PTY consoles or to one that has gone
+ * (supervision/reap-daemon.ts). Host-local
  * state, never on the wire. This module must not load node-pty: the
  * supervisor's bundle imports it.
  */
