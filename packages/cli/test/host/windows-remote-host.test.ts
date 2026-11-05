@@ -248,6 +248,10 @@ describe('a Windows SSH host’s client', () => {
       return warned;
     };
     expect((await warnings('process', true)).join('\n')).toContain('runs elevated');
+    // Until it stops, the user's own unelevated programs there are shut out.
+    expect((await warnings('process', true)).join('\n')).toMatch(
+      /programs there that run without elevation cannot reach it until it stops/,
+    );
     // Logging on alone never replaces it: the logon task leaves a running daemon in place.
     expect((await warnings('process', true)).join('\n')).toMatch(
       /log on to the machine and stay logged on, then run puddle upgrade daemon \S+, which stops it/,

@@ -153,11 +153,15 @@ export class WindowsSupervisor {
       }
       if (holder === 'unavailable') {
         // No squatter: one that answered without the proof would be. A pipe
-        // this process cannot open is typically an elevated supervisor's.
+        // this process cannot open is typically an elevated supervisor's,
+        // which WMI started from an administrator's SSH session; renaming
+        // the pipes would only leave it running beside this one. An elevated
+        // upgrade stops it, then starts this task again.
         this.deps.log(
           'another supervisor holds this home’s pipe, but this process cannot reach it: it may ' +
             'run elevated, started from an administrator’s session; leaving the home to it ' +
-            '(stop it from an elevated session, or restart the machine)',
+            '(to run it without elevation, run puddle upgrade daemon from an elevated session ' +
+            'while logged on, or restart the machine)',
         );
         return 0;
       }

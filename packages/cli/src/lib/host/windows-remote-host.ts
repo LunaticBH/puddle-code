@@ -87,15 +87,18 @@ class NoRuntimeError extends CliError {
 /**
  * The daemon carries an administrator's elevated SSH token: WMI created its
  * supervisor from the session, or it runs attached to the session itself.
- * The logon task runs it without elevation, but only while its user is
- * logged on, and never beside a daemon that already serves the home: the
- * elevated one has to stop first, which only an elevated session can make
- * a WMI-started supervisor do.
+ * Until it stops, its pipes refuse that user's unelevated programs there:
+ * the desktop app, a local CLI, and the logon task's supervisor, which
+ * leaves the home to it. The logon task runs it without elevation, but only
+ * while its user is logged on, and never beside a daemon that already
+ * serves the home: the elevated one has to stop first, which only an
+ * elevated session (or a restart) can make a WMI-started supervisor do.
  */
 export function elevatedWarning(label: string, via: 'wmi' | 'session'): string {
   return (
     `puddled on ${label} runs elevated: an administrator's SSH session started it ` +
-    `${via === 'wmi' ? 'through WMI' : 'as its own child'}, outside Task Scheduler; ` +
+    `${via === 'wmi' ? 'through WMI' : 'as its own child'}, outside Task Scheduler, and ` +
+    'programs there that run without elevation cannot reach it until it stops; ' +
     'to run it without elevation, log on to the machine and stay logged on, then ' +
     (via === 'wmi'
       ? `run puddle upgrade daemon ${label}, which stops it and starts it through its logon task`

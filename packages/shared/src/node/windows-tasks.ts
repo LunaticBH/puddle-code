@@ -327,26 +327,6 @@ const CREATE_PROCESS_SCRIPT = [
   '$out | ConvertTo-Json -Compress',
 ].join('\n');
 
-/**
- * Whether this process runs elevated while its user's own logon token does
- * not: an administrator's elevated session under UAC (an OpenSSH session
- * of an administrator is one). The predicate is the one an SSH client's
- * probe uses (windows-remote.ts), refined by UAC: without it every process
- * of the account runs with the same token, the logon task's included.
- */
-const ELEVATION_SCRIPT = [
-  "$ErrorActionPreference = 'Stop'",
-  'try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}',
-  "$out = @{ elevated = $false; error = '' }",
-  'try {',
-  '  $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())',
-  '  $admin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)',
-  "  $lua = (Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' -Name EnableLUA -ErrorAction SilentlyContinue).EnableLUA",
-  '  $out.elevated = $admin -and $lua -ne 0',
-  '} catch { $out.error = $_.Exception.Message }',
-  '$out | ConvertTo-Json -Compress',
-].join('\n');
-
 /** Every fixed script, for tests that parse them with PowerShell's own parser. */
 export const WINDOWS_TASK_SCRIPTS = {
   register: REGISTER_SCRIPT,
@@ -354,7 +334,6 @@ export const WINDOWS_TASK_SCRIPTS = {
   state: STATE_SCRIPT,
   unregister: UNREGISTER_SCRIPT,
   createProcess: CREATE_PROCESS_SCRIPT,
-  elevation: ELEVATION_SCRIPT,
 } as const;
 
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -510,20 +489,6 @@ export async function unregisterWindowsTask(
   const error = reportedError(report);
   if (error !== undefined) throw new Error(`the scheduled task could not be removed (${error})`);
   return report.removed === true;
-}
-
-/**
- * Whether this process runs elevated under UAC (ELEVATION_SCRIPT). When
- * PowerShell cannot tell, it counts as not elevated: WMI, the only way that
- * asks, runs through PowerShell too.
- */
-export async function windowsProcessElevated(opts: WindowsTaskOptions = {}): Promise<boolean> {
-  try {
-    const report = await run(ELEVATION_SCRIPT, { PUDDLE_QUERY: 'elevation' }, opts);
-    return report.elevated === true;
-  } catch {
-    return false;
-  }
 }
 
 /**

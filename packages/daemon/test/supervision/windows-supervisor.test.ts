@@ -259,7 +259,9 @@ describe('the Windows supervisor', () => {
       expect(h.daemons).toHaveLength(0);
       const log = h.log.join('\n');
       expect(log).toMatch(/cannot reach it: it may run elevated/);
-      expect(log).toMatch(/stop it from an elevated session, or restart the machine/);
+      expect(log).toMatch(
+        /run puddle upgrade daemon from an elevated session while logged on, or restart the machine/,
+      );
       expect(log).not.toMatch(/rename the home’s pipes/);
     } finally {
       await new Promise<void>((resolve) => held.close(() => resolve()));
