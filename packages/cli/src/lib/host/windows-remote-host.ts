@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto';
 import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
 import { basename, dirname, join, win32 } from 'node:path';
+import { Readable, type Duplex } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
-import type { Duplex } from 'node:stream';
 import { parseSums } from '../installation/desktop-update.js';
 import { versionFromLinkTarget } from '../installation/current-link.js';
 import type { ConnectorRun } from '../installation/windows-connector.js';
@@ -17,6 +17,8 @@ import {
   NO_RUNTIME_EXIT,
   runHelperScript,
   stageScript,
+  tarHeader,
+  tarTrailer,
   type HelperRuntime,
   type StagedHelper,
   type WindowsProbe,
@@ -49,6 +51,29 @@ function helperFile(): string {
     );
   }
   return file;
+}
+
+/**
+ * `length` bytes of `path` as a one-entry tar stream (windows-remote.ts's
+ * tarHeader), failing if the file is shorter: the host checks the digest of
+ * what it unpacked.
+ */
+function tarStream(path: string, length: number): Readable {
+  return Readable.from(
+    (async function* () {
+      yield tarHeader(length);
+      let sent = 0;
+      if (length > 0) {
+        for await (const chunk of createReadStream(path, { end: length - 1 })) {
+          sent += (chunk as Buffer).length;
+          yield chunk as Buffer;
+        }
+      }
+      if (sent !== length) throw new Error(`${path} changed while it was being sent`);
+      yield tarTrailer(length);
+    })(),
+    { objectMode: false },
+  );
 }
 
 /** Splits streamed standard output into the helper's JSON lines. */
@@ -183,7 +208,8 @@ export class RemoteWindowsHost implements WindowsHostOps {
     const sha256 = createHash('sha256').update(code).digest('hex');
     const name = `windows-host-${sha256.slice(0, 16)}.mjs`;
     const result = await this.ssh.execWindows(stageScript(name, sha256, code.length), {
-      payload: code,
+      // tar.exe reads it on the host, never PowerShell (windows-remote.ts).
+      payload: Buffer.concat([tarHeader(code.length), code, tarTrailer(code.length)]),
       timeoutMs: 60_000,
     });
     let path: unknown;
@@ -471,18 +497,22 @@ export class RemoteWindowsHost implements WindowsHostOps {
         helper: await this.helper(attempt > 0),
         ...(archive ? { archive } : { ...(opts.slug !== undefined ? { slug: opts.slug } : {}) }),
       });
-      const outcome = await this.collectStream(script, logger, tarball);
+      const outcome = await this.collectStream(
+        script,
+        logger,
+        tarball !== undefined && archive ? { path: tarball, length: archive.length } : undefined,
+      );
       // Checked before anything is fetched: a helper %TEMP% clean-up removed is staged again.
       if (missing(outcome) && attempt === 0) continue;
       return this.settle(op === 'install' ? 'installation' : op, outcome);
     }
   }
 
-  /** collect() with a file streamed after the script. */
+  /** collect() with a file streamed after the script, as the one entry of a tar stream. */
   private async collectStream(
     script: string,
     logger: Logger,
-    file?: string,
+    file?: { path: string; length: number },
   ): Promise<HelperOutcome> {
     let result: { value?: unknown } | undefined;
     let error: Error | undefined;
@@ -494,7 +524,7 @@ export class RemoteWindowsHost implements WindowsHostOps {
     const outcome = await this.ssh.execWindows(script, {
       onStdout: read,
       timeoutMs: INSTALL_TIMEOUT_MS,
-      ...(file !== undefined ? { payload: createReadStream(file) } : {}),
+      ...(file !== undefined ? { payload: tarStream(file.path, file.length) } : {}),
     });
     return {
       code: outcome.code,

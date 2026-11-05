@@ -33,8 +33,16 @@
  * one. FAKE_WINDOWS_SSH_UNREACHABLE makes every connection fail with ssh's
  * own status 255. Each invocation is appended to FAKE_WINDOWS_SSH_LOG as a
  * JSON line (argv, options, command).
+ *
+ * A real Windows OpenSSH session's PowerShell cannot read much of its own
+ * standard input: a read loop stalls after a few tens of kilobytes, where
+ * native programs (tar.exe, node.exe) drain it. A session running Puddle's
+ * loader models that limit (relayStdin): its script frame must fit in
+ * 64 KB, and once more than 64 KB of what follows the frame has been read,
+ * a native program must be reading it, or the session fails with ssh's
+ * status 255 and says why.
  */
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, copyFileSync, mkdirSync } from 'node:fs';
 import { connect, createServer } from 'node:net';
 import { basename, dirname, join, win32 } from 'node:path';
@@ -192,8 +200,9 @@ function session() {
             ['/d', '/s', '/c', `"${command}"`],
             true,
           ];
+  const loader = command.includes(' -EncodedCommand ');
   const child = spawn(file, args, {
-    stdio: 'inherit',
+    stdio: [loader ? 'pipe' : 'inherit', 'inherit', 'inherit'],
     cwd: home,
     env,
     windowsHide: true,
@@ -203,12 +212,132 @@ function session() {
     process.stderr.write(`fake-windows-ssh: ${err.message}\n`);
     process.exit(255);
   });
+  if (loader) relayStdin(child);
   const watchdog = child.pid === undefined ? undefined : watchSession(child.pid, started);
   // The session ended by itself: the operation and everything it waited for are done.
   child.on('close', (code) => {
     watchdog?.kill();
     process.exit(code ?? 255);
   });
+}
+
+/** What PowerShell may read of a session's standard input: the script frame, then this much. */
+const POWERSHELL_STDIN_LIMIT = 64 * 1024;
+/** A margin for what the session's stdin pipe holds before its reader reads (64 KB). */
+const PIPE_BUFFER = 64 * 1024;
+
+/**
+ * Relays the client's standard input to the loader's session, as sshd
+ * does, modelling the limit a real server imposes: a script frame larger
+ * than 64 KB fails, and so does a session that has read more than 64 KB
+ * past its frame while no native program runs in it to read them.
+ * Delivered bytes are counted as the pipe accepts them, so whoever reads
+ * has consumed all but the pipe's own buffer.
+ */
+function relayStdin(child) {
+  const input = process.stdin;
+  let header = '';
+  let frameEnd;
+  let delivered = 0;
+  let checked = false;
+  let ended = false;
+  const fail = (why) => {
+    process.stderr.write(
+      `fake-windows-ssh: ${why}, which stalls on a real Windows OpenSSH server\n`,
+    );
+    if (child.pid !== undefined) {
+      spawnSync(
+        join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe'),
+        ['/T', '/F', '/PID', String(child.pid)],
+        { stdio: 'ignore', windowsHide: true },
+      );
+    }
+    process.exit(255);
+  };
+  child.stdin.on('error', () => {});
+  child.once('exit', () => {
+    ended = true;
+    input.destroy();
+  });
+  input.on('data', (chunk) => {
+    if (ended) return;
+    if (frameEnd === undefined) {
+      const newline = chunk.indexOf(10);
+      header += chunk.subarray(0, newline === -1 ? chunk.length : newline).toString('latin1');
+      if (newline !== -1) {
+        const match = /^PUDDLE1 (\d{1,9})$/.exec(header);
+        // Not a frame: the loader refuses it, reading no further.
+        frameEnd = match ? header.length + 1 + Number(match[1]) : Infinity;
+        if (match && Number(match[1]) > POWERSHELL_STDIN_LIMIT) {
+          fail(`PowerShell was sent a script of ${match[1]} bytes`);
+        }
+      }
+    }
+    if (
+      !checked &&
+      frameEnd !== undefined &&
+      delivered - frameEnd > POWERSHELL_STDIN_LIMIT + PIPE_BUFFER
+    ) {
+      checked = true;
+      if (!nativeReader(child.pid)) {
+        fail(
+          `PowerShell itself read more than ${POWERSHELL_STDIN_LIMIT / 1024} KB of the ` +
+            "session's standard input past its script",
+        );
+      }
+    }
+    input.pause();
+    child.stdin.write(chunk, () => {
+      delivered += chunk.length;
+      if (!ended) input.resume();
+    });
+  });
+  input.on('end', () => {
+    if (!ended) child.stdin.end();
+  });
+}
+
+/** Whether a native program (no shell, no PowerShell) runs in the session that `root` heads. */
+function nativeReader(root) {
+  const ps = join(
+    process.env.SystemRoot ?? 'C:\\Windows',
+    'System32',
+    'WindowsPowerShell',
+    'v1.0',
+    'powershell.exe',
+  );
+  const list = JSON.parse(
+    execFileSync(
+      ps,
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        '@(Get-CimInstance Win32_Process | ForEach-Object { @{ pid = [int]$_.ProcessId; parent = [int]$_.ParentProcessId; name = [string]$_.Name } }) | ConvertTo-Json -Compress',
+      ],
+      { encoding: 'utf8', windowsHide: true },
+    ) || '[]',
+  );
+  const shells = new Set([
+    'powershell.exe',
+    'pwsh.exe',
+    'cmd.exe',
+    'bash.exe',
+    'sh.exe',
+    'conhost.exe',
+  ]);
+  const session = new Set([root]);
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const p of list) {
+      if (session.has(p.pid) || !session.has(p.parent)) continue;
+      session.add(p.pid);
+      grew = true;
+    }
+  }
+  return list.some(
+    (p) => p.pid !== root && session.has(p.pid) && !shells.has(p.name.toLowerCase()),
+  );
 }
 
 /**
