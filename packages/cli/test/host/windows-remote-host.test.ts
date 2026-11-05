@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Readable } from 'node:stream';
+import { PassThrough, Readable } from 'node:stream';
 import { describe, expect, it } from 'vitest';
 import { RemoteWindowsHost } from '../../src/lib/host/windows-remote-host.js';
 import { errorMessage, helperError } from '../../src/lib/host/windows-host-protocol.js';
@@ -75,9 +75,35 @@ function fakeSsh(
         ...(reply.incomplete ? { incomplete: true } : {}),
       };
     },
+    /** The control channel: it ends at once with the script's status. */
+    openWindowsChannel(script: string, opts: { onExit?: (code: number | null) => void } = {}) {
+      sent.push({ script, payload: undefined });
+      const reply = answer(script);
+      const stream = new PassThrough();
+      setImmediate(() => {
+        opts.onExit?.(reply.code);
+        stream.destroy();
+      });
+      return stream;
+    },
+    /** The attached daemon's channel, which ends with the script's status. */
+    runAttachedWindows(script: string, opts: { onStdout?: (chunk: string) => void } = {}) {
+      sent.push({ script, payload: undefined });
+      const reply = answer(script);
+      const stdout = (reply.lines ?? []).map((l) => JSON.stringify(l) + '\n').join('');
+      const result = new Promise((resolve) =>
+        setImmediate(() => {
+          opts.onStdout?.(stdout);
+          resolve({ code: reply.code, stdout, stderr: '' });
+        }),
+      );
+      return { result, terminate() {} };
+    },
   };
   return { ssh: ssh as unknown as SshTransport, sent, probes };
 }
+
+const isStage = (s: Sent) => s.script.includes('Receive-PuddlePayload $tmp');
 
 const opOf = (script: string) => /@\(\$helper, '([a-z-]+)'/.exec(script)?.[1];
 const requestOf = (script: string, op: string) =>
@@ -108,6 +134,70 @@ describe('a Windows SSH host’s client', () => {
         .digest('hex')
         .toUpperCase(),
     );
+  });
+
+  it('restages a helper the control channel found gone, for the next channel', async () => {
+    let missing = true;
+    const { ssh, sent } = fakeSsh((script) => {
+      if (opOf(script) !== 'channel') return { code: 0 };
+      const code = missing ? HELPER_MISSING_EXIT : 0;
+      missing = false;
+      return { code };
+    });
+    const host = new RemoteWindowsHost(ssh);
+    const first = await host.openChannel();
+    await new Promise((resolve) => first.once('close', resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    await host.openChannel();
+    expect(sent.filter(isStage)).toHaveLength(2);
+    // A channel that ends for any other reason keeps the staged copy.
+    const again = await host.openChannel();
+    await new Promise((resolve) => again.once('close', resolve));
+    await host.openChannel();
+    expect(sent.filter(isStage)).toHaveLength(2);
+  });
+
+  it('restages a helper an attached daemon’s start found gone', async () => {
+    let missing = true;
+    const { ssh, sent } = fakeSsh((script) => {
+      if (opOf(script) !== 'attached') return { code: 0 };
+      if (missing) {
+        missing = false;
+        return { code: HELPER_MISSING_EXIT };
+      }
+      return { code: 0, lines: [{ t: 'started', pid: 4242 }] };
+    });
+    const host = new RemoteWindowsHost(ssh);
+    const first = await host.attached();
+    await expect(first.pid).rejects.toMatchObject({
+      message: 'the Puddle host helper was missing on alice@winbox',
+    });
+    const second = await host.attached();
+    expect(await second.pid).toBe(4242);
+    expect(sent.filter(isStage)).toHaveLength(2);
+  });
+
+  it('restages a helper before the connector’s foreground run and a bootstrap', async () => {
+    const saved = process.env.PUDDLE_REPO;
+    process.env.PUDDLE_REPO = 'acme/puddle';
+    try {
+      const missing = new Set(['connector-run', 'bootstrap']);
+      const { ssh, sent } = fakeSsh((script) => {
+        const op = script.includes("Join-Path $system 'curl.exe'") ? 'bootstrap' : opOf(script);
+        if (op !== undefined && missing.delete(op)) return { code: HELPER_MISSING_EXIT };
+        return { code: 0, lines: [{ t: 'result', value: {} }] };
+      });
+      const host = new RemoteWindowsHost(ssh);
+      expect(await host.connectorForeground(() => {})).toBe(0);
+      expect(sent.filter(isStage)).toHaveLength(2);
+      // No runtime of this machine's build: the bootstrap's own check.
+      await host.install({ version: '1.2.3' });
+      expect(sent.filter(isStage)).toHaveLength(3);
+      expect(missing.size).toBe(0);
+    } finally {
+      if (saved === undefined) delete process.env.PUDDLE_REPO;
+      else process.env.PUDDLE_REPO = saved;
+    }
   });
 
   it('relays log lines and output, and raises the helper’s own CliError', async () => {

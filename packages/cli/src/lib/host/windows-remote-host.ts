@@ -64,6 +64,11 @@ function lineReader(receive: (message: HelperMessage) => void): (chunk: string) 
   };
 }
 
+/** Status 3 with nothing from the helper: it never ran, its staged copy being gone. */
+function missing(outcome: HelperOutcome): boolean {
+  return outcome.code === HELPER_MISSING_EXIT && !outcome.result && !outcome.error;
+}
+
 function lastLines(text: string, count = 3): string {
   return text.trim().split('\n').slice(-count).join('\n');
 }
@@ -92,6 +97,16 @@ interface HelperOutcome {
 class NoRuntimeError extends CliError {
   constructor(label: string) {
     super('not_installed', `no Puddle runtime is installed on ${label}`);
+  }
+}
+
+/**
+ * The staged helper was gone (or changed) when an attached daemon was to
+ * start: the client has forgotten it, so the next attempt stages it again.
+ */
+export class HelperMissingError extends CliError {
+  constructor(label: string) {
+    super('daemon_start_timeout', `the Puddle host helper was missing on ${label}`);
   }
 }
 
@@ -137,6 +152,20 @@ export class RemoteWindowsHost implements WindowsHostOps {
     return this.staged!;
   }
 
+  /**
+   * A run of `helper` found it gone (status 3): the next operation stages
+   * it again. A cockpit lives for days, and %TEMP% clean-up does not wait.
+   */
+  private forget(helper: StagedHelper): void {
+    const pending = this.staged;
+    void pending?.then(
+      (current) => {
+        if (current === helper && this.staged === pending) this.staged = undefined;
+      },
+      () => {},
+    );
+  }
+
   private async stage(): Promise<StagedHelper> {
     const code = readFileSync(helperFile());
     const sha256 = createHash('sha256').update(code).digest('hex');
@@ -171,7 +200,7 @@ export class RemoteWindowsHost implements WindowsHostOps {
       const helper = await this.helper(attempt > 0);
       const script = runHelperScript(helper, op, request, opts.runtime ?? 'current');
       const outcome = await this.collect(script, opts);
-      if (outcome.code === HELPER_MISSING_EXIT && attempt === 0) continue;
+      if (missing(outcome) && attempt === 0) continue;
       if (outcome.code === NO_RUNTIME_EXIT) throw new NoRuntimeError(this.ssh.label);
       return this.settle(op, outcome);
     }
@@ -248,7 +277,12 @@ export class RemoteWindowsHost implements WindowsHostOps {
    */
   async openChannel(): Promise<Duplex> {
     const helper = await this.helper();
-    return this.ssh.openWindowsChannel(runHelperScript(helper, 'channel', {}, 'current'));
+    // The control client opens a new channel after a closed one: that one restages.
+    return this.ssh.openWindowsChannel(runHelperScript(helper, 'channel', {}, 'current'), {
+      onExit: (code) => {
+        if (code === HELPER_MISSING_EXIT) this.forget(helper);
+      },
+    });
   }
 
   /** From the probe: no node.exe has to start, and a tree of another architecture is none. */
@@ -345,7 +379,6 @@ export class RemoteWindowsHost implements WindowsHostOps {
     logger: Logger,
     tarball?: string,
   ): Promise<unknown> {
-    const helper = await this.helper();
     let archive: Parameters<typeof bootstrapScript>[0]['archive'];
     if (tarball !== undefined) {
       const name = process.platform === 'win32' ? win32.basename(tarball) : basename(tarball);
@@ -360,15 +393,19 @@ export class RemoteWindowsHost implements WindowsHostOps {
       archive = { name, length: statSync(tarball).size, sha256, verified: listed !== undefined };
       logger.info(`delivering ${name} to ${this.ssh.label}`);
     }
-    const script = bootstrapScript({
-      version,
-      install,
-      helper,
-      ...(archive ? { archive } : {}),
-      ...(typeof install.slug === 'string' ? { slug: install.slug } : {}),
-    });
-    const outcome = await this.collectStream(script, logger, tarball);
-    return this.settle('installation', outcome);
+    for (let attempt = 0; ; attempt++) {
+      const script = bootstrapScript({
+        version,
+        install,
+        helper: await this.helper(attempt > 0),
+        ...(archive ? { archive } : {}),
+        ...(typeof install.slug === 'string' ? { slug: install.slug } : {}),
+      });
+      const outcome = await this.collectStream(script, logger, tarball);
+      // Checked before anything is fetched: a helper %TEMP% clean-up removed is staged again.
+      if (missing(outcome) && attempt === 0) continue;
+      return this.settle('installation', outcome);
+    }
   }
 
   /** collect() with a file streamed after the script. */
@@ -477,12 +514,16 @@ export class RemoteWindowsHost implements WindowsHostOps {
 
   /** `puddle remote run`: the connector's manager, its output passed through as it comes. */
   async connectorForeground(write: (text: string) => void): Promise<number> {
-    const helper = await this.helper();
-    const result = await this.ssh.execWindows(
-      runHelperScript(helper, 'connector-run', {}, 'current'),
-      { onStdout: write },
-    );
-    return result.code;
+    for (let attempt = 0; ; attempt++) {
+      const helper = await this.helper(attempt > 0);
+      const result = await this.ssh.execWindows(
+        runHelperScript(helper, 'connector-run', {}, 'current'),
+        { onStdout: write },
+      );
+      // Status 3 comes before the helper starts, so nothing was written yet.
+      if (result.code === HELPER_MISSING_EXIT && attempt === 0) continue;
+      return result.code;
+    }
   }
 
   /**
@@ -491,12 +532,15 @@ export class RemoteWindowsHost implements WindowsHostOps {
    * `exited` resolves with the daemon's own status once the channel ends
    * (null when the helper never reported one).
    */
-  async attached(port?: number): Promise<{
+  async attached(
+    port?: number,
+    opts: { restage?: boolean } = {},
+  ): Promise<{
     command: RunningSshCommand;
     pid: Promise<number>;
     exited: Promise<number | null>;
   }> {
-    const helper = await this.helper();
+    const helper = await this.helper(opts.restage === true);
     let started: (pid: number) => void = () => {};
     let failed: (err: Error) => void = () => {};
     const pid = new Promise<number>((resolve, reject) => {
@@ -516,15 +560,19 @@ export class RemoteWindowsHost implements WindowsHostOps {
       runHelperScript(helper, 'attached', port === undefined ? {} : { port }, 'current'),
       { onStdout: read },
     );
-    void command.result.then((result) =>
+    void command.result.then((result) => {
+      if (result.code === HELPER_MISSING_EXIT) {
+        this.forget(helper);
+        return failed(new HelperMissingError(this.ssh.label));
+      }
       failed(
         new CliError(
           'daemon_start_timeout',
           `puddled exited while starting on ${this.ssh.label}`,
           lastLines(result.stderr) || undefined,
         ),
-      ),
-    );
+      );
+    });
     return { command, pid, exited: command.result.then(() => status) };
   }
 }

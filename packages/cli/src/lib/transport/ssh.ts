@@ -564,13 +564,28 @@ export class SshTransport implements Transport {
     };
   }
 
-  /** A credential channel to a Windows host: openChannel's counterpart, framed. */
-  openWindowsChannel(script: string): Duplex {
+  /**
+   * A credential channel to a Windows host: openChannel's counterpart,
+   * framed. `onExit` receives the script's own status from the loader's
+   * trailer as the channel ends (null without one).
+   */
+  openWindowsChannel(
+    script: string,
+    opts: { onExit?: (code: number | null) => void } = {},
+  ): Duplex {
     const child = this.spawnWindows(script, ['-T']);
     const stream = Duplex.from({ readable: child.stdout!, writable: child.stdin! });
-    child.stderr!.resume(); // diagnostics must not enter the credential protocol
+    // Diagnostics must not enter the credential protocol: only the end of
+    // standard error is kept, for the trailer.
+    let stderr = '';
+    child.stderr!.on('data', (chunk: Buffer) => {
+      stderr = (stderr + chunk.toString()).slice(-4096);
+    });
     child.once('error', () => stream.destroy(new Error('SSH control channel failed')));
-    child.once('close', () => stream.destroy());
+    child.once('close', () => {
+      opts.onExit?.(parseTrailer(stderr).code);
+      stream.destroy();
+    });
     stream.once('close', () => child.kill('SIGTERM'));
     return stream;
   }

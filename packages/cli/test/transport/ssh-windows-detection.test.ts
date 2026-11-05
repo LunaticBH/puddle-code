@@ -291,6 +291,20 @@ describe('a host recognised by a failed POSIX command', () => {
     expect(spawned[0]!.stdin.endsWith('data')).toBe(true);
   });
 
+  it('reports a control channel’s own status as it ends, keeping stderr out of it', async () => {
+    host.reply = () => ({ code: 1, stdout: '', stderr: 'diagnostics\npuddle-exit:3\n' });
+    const ssh = new SshTransport('alice@winbox', { platform: 'linux', remotePlatform: 'win32' });
+    let read = '';
+    const status = await new Promise((resolve) => {
+      const channel = ssh.openWindowsChannel('$global:PuddleExit = 3', { onExit: resolve });
+      channel.on('data', (chunk: Buffer) => (read += chunk.toString()));
+      channel.on('error', () => {});
+      channel.end();
+    });
+    expect(status).toBe(3);
+    expect(read).toBe('');
+  });
+
   it('marks an operation whose loader never reported its status as incomplete', async () => {
     host.reply = () => ({ code: 255, stderr: 'Connection to winbox closed.\n' });
     const ssh = new SshTransport('alice@winbox', { platform: 'linux', remotePlatform: 'win32' });

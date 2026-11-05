@@ -1,6 +1,10 @@
 import { DAEMON_ALREADY_ACTIVE_EXIT } from '@puddle/shared/node/platform';
 import type { HostConnection } from '../auth/connection-authority.js';
-import { elevatedWarning, remoteWindowsHost } from '../host/windows-remote-host.js';
+import {
+  elevatedWarning,
+  HelperMissingError,
+  remoteWindowsHost,
+} from '../host/windows-remote-host.js';
 import { hostPaths } from '../paths.js';
 import { sleep } from '../transport/net.js';
 import type { RunningSshCommand, SshTransport } from '../transport/ssh.js';
@@ -68,10 +72,30 @@ export class WindowsAttachedDaemon implements DaemonLease {
     if (!exited) command.terminate();
   }
 
+  /**
+   * Start the attached daemon and wait for it. A helper that %TEMP% clean-up
+   * removed since it was staged (a cockpit reconnecting days later) is
+   * staged again once.
+   */
   private async launchAndWait(
     preferredPort?: number,
   ): Promise<{ port: number; authority: HostConnection }> {
-    const { command, pid, exited } = await remoteWindowsHost(this.ssh).attached(preferredPort);
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.launchOnce(preferredPort, attempt > 0);
+      } catch (err) {
+        if (!(err instanceof HelperMissingError) || attempt > 0) throw err;
+      }
+    }
+  }
+
+  private async launchOnce(
+    preferredPort: number | undefined,
+    restage: boolean,
+  ): Promise<{ port: number; authority: HostConnection }> {
+    const { command, pid, exited } = await remoteWindowsHost(this.ssh).attached(preferredPort, {
+      restage,
+    });
     this.command = command;
     this.commandExited = false;
     this.pid = null;
