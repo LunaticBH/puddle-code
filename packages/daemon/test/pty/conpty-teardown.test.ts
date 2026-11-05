@@ -1,8 +1,10 @@
+import { MessageChannel, Worker } from 'node:worker_threads';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ConptyConsole, ConsoleMember, ConsoleScan } from '../../src/pty/conpty-jobs.js';
 import {
   consoleTargets,
   endConsole,
+  endRootByPid,
   ExitDeadline,
   guiAttached,
 } from '../../src/pty/conpty-teardown.js';
@@ -224,6 +226,69 @@ describe('endConsole', () => {
     await endConsole(ROOT, c.hold, { root: true, host: true, attach: true });
     expect(c.asked).toEqual(['scan+list', 'scan+list']);
     expect(c.terminated).toEqual([['root', '11@200']]);
+  });
+});
+
+describe('endRootByPid', () => {
+  it('ends the root by its pid while node-pty has not seen it exit', async () => {
+    const killed: number[] = [];
+    expect(
+      await endRootByPid(
+        ROOT,
+        () => false,
+        (pid) => void killed.push(pid),
+      ),
+    ).toBe(true);
+    expect(killed).toEqual([ROOT]);
+    // Never once it has.
+    expect(
+      await endRootByPid(
+        ROOT,
+        () => true,
+        (pid) => void killed.push(pid),
+      ),
+    ).toBe(false);
+    expect(killed).toEqual([ROOT]);
+    // A root that exited meanwhile is no error.
+    const gone = () => {
+      throw Object.assign(new Error('kill ESRCH'), { code: 'ESRCH' });
+    };
+    expect(await endRootByPid(ROOT, () => false, gone)).toBe(true);
+  });
+
+  it('never ends a root whose exit is already queued on a busy event loop', async () => {
+    // node-pty's thread closes its handle on the root, then queues the exit
+    // callback; a busy event loop runs it late. A worker posting to this
+    // thread, while it is busy, queues a callback the same way (uv_async).
+    const { port1, port2 } = new MessageChannel();
+    let exited = false;
+    port1.on('message', () => (exited = true));
+    const posted = new Int32Array(new SharedArrayBuffer(4));
+    const worker = new Worker(
+      `const { workerData } = require('node:worker_threads');
+       workerData.port.postMessage('exit');
+       Atomics.store(workerData.posted, 0, 1);
+       Atomics.notify(workerData.posted, 0);`,
+      { eval: true, workerData: { port: port2, posted }, transferList: [port2] },
+    );
+    try {
+      // Busy until the exit is queued: no callback runs meanwhile.
+      expect(Atomics.wait(posted, 0, 0, 10_000)).not.toBe('timed-out');
+      expect(exited).toBe(false);
+      const killed: number[] = [];
+      expect(
+        await endRootByPid(
+          ROOT,
+          () => exited,
+          (pid) => void killed.push(pid),
+        ),
+      ).toBe(false);
+      expect(killed).toEqual([]);
+      expect(exited).toBe(true);
+    } finally {
+      port1.close();
+      await worker.terminate();
+    }
   });
 });
 

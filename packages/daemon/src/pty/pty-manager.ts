@@ -8,7 +8,7 @@ import {
   type ConptyConsole,
   type ConptyJobs,
 } from './conpty-jobs.js';
-import { endConsole, ExitDeadline, guiAttached } from './conpty-teardown.js';
+import { endConsole, endRootByPid, ExitDeadline, guiAttached } from './conpty-teardown.js';
 import { EnvOscFilter, type EnvDelta } from './env-osc.js';
 import { writePtyRoots, type PtyRootRecord } from './pty-roots.js';
 import { planPtySpawn } from './pty-spawn.js';
@@ -476,7 +476,7 @@ export class PtyManager extends EventEmitter {
         else if (state.exitedAtMs === undefined) await this.rootGrace(state);
       }
       // A root that outstayed its grace goes first, whatever the helper does.
-      this.endRoot(live);
+      await this.endRoot(live);
       let answered = false;
       if (held) {
         ({ answered } = await endConsole(live.proc.pid, held, {
@@ -525,18 +525,14 @@ export class PtyManager extends EventEmitter {
   }
 
   /**
-   * Ends the root by its pid, only while node-pty has not seen it exit:
-   * until then its pid is its own (the helper holds it, or else node-pty
-   * does, but for the moment between its thread closing its handle and
-   * calling back).
+   * Ends the root by its pid, only while node-pty has not seen it exit,
+   * once the event loop has polled (endRootByPid): until then its pid is
+   * its own (the helper holds it, or else node-pty does, but for a moment
+   * as its thread closes its handle and calls back).
    */
-  private endRoot(live: Live): void {
-    if (live.conpty!.exitedAtMs !== undefined) return;
-    try {
-      process.kill(live.proc.pid);
-    } catch {
-      // It exited meanwhile.
-    }
+  private endRoot(live: Live): Promise<boolean> {
+    const state = live.conpty!;
+    return endRootByPid(live.proc.pid, () => state.exitedAtMs !== undefined);
   }
 
   private exited(live: Live, exitCode: number | undefined): void {
@@ -817,15 +813,15 @@ export class PtyManager extends EventEmitter {
   }
 
   /**
-   * SIGKILL (see stop). The root goes first, by its pid: node-pty has not
-   * seen it exit, so its pid is still its own. The console is closed too
-   * unless the helper may be attached to it, or a stop found a GUI
-   * programme attached to it, so Windows ends what is attached as the
-   * teardown does.
+   * SIGKILL (see stop). The root goes first, by its pid, unless node-pty
+   * has seen it exit once the event loop has polled (endRootByPid). The
+   * console is closed too unless the helper may be attached to it, or a
+   * stop found a GUI programme attached to it, so Windows ends what is
+   * attached as the teardown does.
    */
   private killConpty(rec: Live, state: ConptyState): void {
     if (!state.settling && !state.scanning && !state.spareGui) this.closeConsole(rec, state);
-    this.endRoot(rec);
+    void this.endRoot(rec);
   }
 
   private closeConsole(rec: Live, state: ConptyState): void {

@@ -131,6 +131,42 @@ export async function endConsole(
   return { ended, answered: true };
 }
 
+/** Resolves once the event loop has been through a whole poll phase after this call. */
+function afterPoll(): Promise<void> {
+  return new Promise((resolve) => setImmediate(() => setImmediate(resolve)));
+}
+
+/**
+ * Ends a ConPTY's root by its pid, unless node-pty has seen it exit by the
+ * time the event loop has polled (`exited`). Resolves with whether it tried.
+ *
+ * node-pty's thread closes its handle on the root as it exits, then queues
+ * the exit callback for the event loop's poll phase; from that close the
+ * pid may name another process, unless the ConPTY helper holds the root.
+ * Asked before that callback has run, a kill would reach whatever holds
+ * the pid by then, however long the event loop takes to come round (a
+ * busy one, a long one). Waiting for a poll phase first runs any callback
+ * already queued: what is left is the root exiting within the moment
+ * between that poll and the kill, which, when nothing holds the root (no
+ * helper, as under Constrained Language Mode, or a root it did not tell
+ * apart), is accepted.
+ */
+export async function endRootByPid(
+  pid: number,
+  exited: () => boolean,
+  kill: (pid: number) => void = (target) => process.kill(target),
+): Promise<boolean> {
+  if (exited()) return false;
+  await afterPoll();
+  if (exited()) return false;
+  try {
+    kill(pid);
+  } catch {
+    // It exited meanwhile.
+  }
+  return true;
+}
+
 /**
  * When a ConPTY's exit is reported at the latest (PtyManager): set by the
  * first stop request and by the root's own exit, brought forward by a
