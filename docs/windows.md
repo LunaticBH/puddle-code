@@ -219,11 +219,14 @@ supported release) and through native system tools (`tar.exe`, `curl.exe`, `task
     reported a status (a dropped connection) is `ssh_unreachable`, never `not_installed`. Every operation is
     `powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand
     <loader>`, which parses identically under a cmd.exe, PowerShell or Git Bash default shell. The
-    loader reads a length-framed UTF-8 script (`PUDDLE1 <bytes>`) from raw stdin and runs it with
-    the rest of the stream, reports errors as plain UTF-8 and ends stderr with `puddle-exit:<n>`,
-    since PowerShell shells collapse exit statuses. A first install downloads the zip and
-    `SHA256SUMS` with System32 `curl.exe`, checks them with `Get-FileHash`, and unpacks only
-    `bin\node.exe`; `--tarball` streams the zip over the operation's own stdin. Everything else runs
+    loader reads a length-framed UTF-8 script (`PUDDLE1 <bytes>`, at most 64 KB) from raw stdin,
+    reports errors as plain UTF-8 and ends stderr with `puddle-exit:<n>`, since PowerShell shells
+    collapse exit statuses. PowerShell never reads more than its script: on a real Windows OpenSSH
+    server its own stdin reads stall after some tens of kilobytes, while native programs that
+    inherit the connection's stdin drain it. So the helper's stage and a `--tarball` zip follow the
+    script as a one-entry tar stream that System32 `tar.exe` unpacks into a private folder, checked
+    by SHA-256. A first install downloads the zip and `SHA256SUMS` with System32 `curl.exe`, checks
+    them with `Get-FileHash`, and unpacks only `bin\node.exe`. Everything else runs
     in the CLI's own host helper, `windows-host.mjs`, staged per process in `%TEMP%\puddle-host`
     (created with an owner-only DACL and refused unless private; stale copies are cleared after a
     day) and run by the host's `node.exe`; the folder and the helper's SHA-256 are rechecked just
@@ -258,6 +261,9 @@ supported release) and through native system tools (`tar.exe`, `curl.exe`, `task
 - An SSH session whose OpenSSH default shell is WSL's bash lands in Linux, and Puddle treats that
   host as Linux.
 - Windows clients re-authenticate SSH for every operation (no ControlMaster).
+- On first contact with a Windows host whose OpenSSH default shell is cmd.exe, the terminal shows
+  cmd's "'true' is not recognized" line once, because SSH's stderr stays on the terminal for
+  host-key and password prompts.
 - Interrupting a notebook cell blocked in `time.sleep` takes effect when the call returns.
 - File watchers held by live compilation targets can make pruning their worktree answer
   `worktree_busy` until the target stops.
@@ -293,7 +299,9 @@ A signed `Puddle.exe` accepts only an update installer from the same signer.
 - Run Windows tests from PowerShell, as CI does; no test or script may rely on Git Bash or a `bash`
   on `PATH`. Tests never register real scheduled tasks: every Task Scheduler and WMI call goes
   through an injectable `PowerShellRunner`.
-- `test/helpers/fake-windows-ssh.mjs` is a fake Windows OpenSSH server for end-to-end tests
+- `test/helpers/fake-windows-ssh.mjs` is a fake Windows OpenSSH server for end-to-end tests; it
+  models the real server's limit (a script over 64 KB, or PowerShell itself reading more than
+  64 KB past it, fails)
   (`e2e/windows-ssh.test.ts`, `FAKE_WINDOWS_SSH_SHELL=cmd|powershell|bash`). The real-host test,
   `ssh-test/windows-host.test.ts`, runs when `PUDDLE_TEST_WINDOWS_SSH` (user@host),
   `PUDDLE_TEST_WINDOWS_SSH_KEY` and `PUDDLE_TEST_WINDOWS_SSH_TARBALL` are set; it uses an isolated
