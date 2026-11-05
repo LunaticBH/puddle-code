@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { writeFakeExecutable } from '../../daemon/test/helpers/fake-executable.js';
 import { connectRemote } from '../src/lib/connection/connect.js';
 import type { RunningCockpit } from '../src/lib/connection/cockpit.js';
+import { remoteWindowsHost } from '../src/lib/host/windows-remote-host.js';
 import { removeDaemon } from '../src/lib/installation/remove-daemon.js';
 import { showLogs } from '../src/lib/logs.js';
 import { SshTransport } from '../src/lib/transport/ssh.js';
@@ -39,6 +40,55 @@ describe.runIf(configured)('a real Windows OpenSSH host', () => {
   let cockpit: RunningCockpit | undefined;
   const transport = (opts: { remotePlatform?: 'win32' } = {}) =>
     new SshTransport(target!, { sshBinary: ssh, batchMode: true, windowsHome: home, ...opts });
+
+  /**
+   * The daemon runtime.json names, as the host sees it: whether it runs, its
+   * Windows session and its token's elevation (TokenElevation: 0 or 1), the
+   * home's supervisor marker, and whether this SSH session is elevated.
+   */
+  async function daemonProcess(): Promise<{
+    pid: number;
+    alive: boolean;
+    sessionId: number;
+    elevated: number;
+    marker: string;
+    elevatedSession: boolean;
+  }> {
+    const result = await transport({ remotePlatform: 'win32' }).execWindows(
+      String.raw`Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class PuddleTestToken {
+  [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+  [DllImport("advapi32.dll", SetLastError = true)] static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+  [DllImport("advapi32.dll", SetLastError = true)] static extern bool GetTokenInformation(IntPtr token, int kind, out int value, int length, out int written);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+  public static int Elevation(int pid) {
+    IntPtr process = OpenProcess(0x1000, false, pid);
+    if (process == IntPtr.Zero) return -1;
+    IntPtr token;
+    try { if (!OpenProcessToken(process, 0x8, out token)) return -2; } finally { CloseHandle(process); }
+    try { int value, written; return GetTokenInformation(token, 20, out value, 4, out written) ? value : -3; } finally { CloseHandle(token); }
+  }
+}
+'@
+$h = Get-PuddleHome
+$daemon = [int]([IO.File]::ReadAllText((Join-Path $h 'runtime.json')) | ConvertFrom-Json).pid
+$process = Get-CimInstance Win32_Process -Filter "ProcessId = $daemon"
+$principal = New-Object Security.Principal.WindowsPrincipal ([Security.Principal.WindowsIdentity]::GetCurrent())
+Write-PuddleLine (ConvertTo-Json -Compress -InputObject @{
+  pid = $daemon
+  alive = [bool]$process
+  sessionId = if ($process) { [int]$process.SessionId } else { -1 }
+  elevated = [PuddleTestToken]::Elevation($daemon)
+  marker = ([IO.File]::ReadAllText((Join-Path $h 'supervisor'))).Trim()
+  elevatedSession = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+})`,
+      { timeoutMs: 60_000 },
+    );
+    expect(result.code, result.stderr).toBe(0);
+    return JSON.parse(result.stdout.trim()) as Awaited<ReturnType<typeof daemonProcess>>;
+  }
 
   beforeAll(async () => {
     process.env.PUDDLE_HOME = join(temporary, 'client');
@@ -125,8 +175,26 @@ Remove-Item -LiteralPath $home_ -Recurse -Force -ErrorAction SilentlyContinue`,
     await showLogs(transport({ remotePlatform: 'win32' }), { write: (text) => (logs += text) });
     expect(logs).toContain('puddled');
 
+    // The logon task started it, outside the SSH session, in the desktop
+    // session and without elevation, though every SSH session here is elevated.
+    const daemon = await daemonProcess();
+    expect(daemon.marker).toBe('task');
+    expect(daemon.elevatedSession).toBe(true);
+    expect(daemon.sessionId).toBeGreaterThan(0);
+    expect(daemon.elevated).toBe(0);
+    expect((await transport({ remotePlatform: 'win32' }).windowsProbe()).elevatedSupervisor).toBe(
+      false,
+    );
+
     await cockpit.stop();
     cockpit = undefined;
+    // Every SSH session the cockpit held has closed; the daemon runs on.
+    const after = await daemonProcess();
+    expect(after.pid).toBe(daemon.pid);
+    expect(after.alive).toBe(true);
+    expect(await remoteWindowsHost(transport({ remotePlatform: 'win32' })).pipePresent()).toBe(
+      true,
+    );
     await removeDaemon(transport({ remotePlatform: 'win32' }), { purge: true });
     const left = await transport({ remotePlatform: 'win32' }).execWindows(
       `if (Test-Path -LiteralPath ${psQuote(home)}) { $global:PuddleExit = 1 }`,
