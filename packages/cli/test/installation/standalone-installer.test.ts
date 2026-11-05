@@ -61,10 +61,12 @@ function fixture() {
   });
   writeFileSync(join(stage, 'STANDALONE'), 'puddle-cli\n');
   writeFileSync(join(stage, 'VERSION'), '1.2.3\n');
+  // The layout every published release has had since the first standalone
+  // archive: no windows-host.mjs or install-cli.ps1, which later archives add.
+  // Pinned installs and rollbacks run the current install.sh on these.
   for (const file of [
     'index.js',
     'host-control.mjs',
-    'windows-host.mjs',
     'public/index.html',
     'install.sh',
     'install-cli.sh',
@@ -132,7 +134,16 @@ describe.skipIf(process.platform === 'win32')('standalone CLI installer', () => 
   it('installs, upgrades and removes both owned launchers; supports older archives', async () => {
     const f = fixture();
     const script = join(f.home, '.local/bin/pudl');
+    // A release published before the Windows host helper existed.
+    expect(existsSync(join(f.stage, 'cli/windows-host.mjs'))).toBe(false);
     f.install();
+    expect(execFileSync(f.launcher, ['--help'], { encoding: 'utf8' })).toContain('fixture CLI');
+    // A current archive also ships it, and installs the same way.
+    writeFileSync(join(f.stage, 'cli/windows-host.mjs'), 'fixture');
+    writeFileSync(join(f.stage, 'cli/install-cli.ps1'), 'fixture');
+    f.pack();
+    f.install();
+    expect(existsSync(join(f.prefix, 'current/cli/windows-host.mjs'))).toBe(true);
     writeFileSync(join(f.stage, 'pudl'), '#!/bin/sh\nprintf "fixture pudl help\\n"\n', {
       mode: 0o755,
     });
