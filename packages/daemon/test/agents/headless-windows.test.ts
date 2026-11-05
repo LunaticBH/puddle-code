@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Duplex } from 'node:stream';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { WindowsProcess } from '@puddle/shared/node/platform';
+import { listWindowsProcesses, type WindowsProcess } from '@puddle/shared/node/platform';
 import type { LifecycleLaunchContext } from '../../src/agents/adapter.js';
 import {
   admitWithToken,
@@ -15,6 +15,7 @@ import {
 } from '../../src/agents/headless/control.js';
 import { codexDriver } from '../../src/agents/codex/headless.js';
 import { LogStore } from '../../src/logs/log-store.js';
+import { isConptyHelper } from '../../src/pty/conpty-jobs.js';
 import { PtyManager } from '../../src/pty/pty-manager.js';
 import { waitFor } from '../helpers/daemon-fixtures.js';
 import { stopPtysAfterFile } from '../helpers/process-guard.js';
@@ -295,6 +296,29 @@ describe.runIf(process.platform === 'win32')('a Windows headless CLI’s end', (
 
   it('a cancelled turn ends what is attached to the CLI’s console before the next, and nothing that left it', async () => {
     const { control, abort, turn, attached, left } = await headlessTree();
+    abort.abort();
+    await expect(turn).rejects.toThrow('cancelled');
+    expect(await survivors(attached)).toEqual([]);
+    expect((await stillRunning(left)).map(role).sort()).toEqual([...LEFT].sort());
+    expect(control.ready).toBe(true);
+  });
+
+  it('replaces a ConPTY helper that exits mid-turn, which still ends what is attached to the CLI’s console', async () => {
+    const { ptys, control, abort, turn, attached, left } = await headlessTree();
+    const driver = ptys.pidFor('h', 'agent')!;
+    const helpers = async () =>
+      (await listWindowsProcesses({ fresh: true })).filter(
+        (p) => p.ppid === driver && isConptyHelper(p.commandLine ?? ''),
+      );
+    let first: WindowsProcess[] = [];
+    await waitUntil(async () => (first = await helpers()).length === 1, 30_000, 'its helper');
+    // As an agent's `Stop-Process -Name powershell` would.
+    process.kill(first[0]!.pid);
+    await waitUntil(
+      async () => (await helpers()).some((p) => p.createdAtMs !== first[0]!.createdAtMs),
+      30_000,
+      'a helper in its place',
+    );
     abort.abort();
     await expect(turn).rejects.toThrow('cancelled');
     expect(await survivors(attached)).toEqual([]);

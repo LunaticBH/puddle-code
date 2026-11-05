@@ -17,11 +17,16 @@
  * process's: never a GUI programme nor what one started, nor what left the
  * console (a detached process, one in a console of its own), as the PTY's
  * teardown spares them. The next turn is admitted only once that is done.
- * Without the helper (Constrained Language Mode, or one too slow to start),
- * only the CLI is ended, through its own handle. A driver ended before it
- * could do this (a SIGKILL) takes the CLI and its helper with it (libuv
- * holds the children it starts in a kill-on-close job), but nothing else
- * attached to the CLI's console.
+ * A helper that exits (an agent's `Stop-Process -Name powershell`, say) is
+ * replaced, and the running turn's CLI held again a second on; one that
+ * could not start (Constrained Language Mode, or too slow) is tried again
+ * five minutes on, as the daemon retries its own. Until a helper holds the
+ * CLI, only the CLI is ended, through its own handle; nothing is logged. A
+ * driver ended before it could do this (a SIGKILL, or the supervisor's reap
+ * after a daemon crash once the driver has outlasted Windows' 5 s for a
+ * console's close) takes the CLI and its helper with it (libuv holds the
+ * children it starts in a kill-on-close job), but nothing else attached to
+ * the CLI's console.
  */
 export const HEADLESS_TERMINAL_SOURCE = String.raw`
 const net = require('node:net');
@@ -31,32 +36,42 @@ const token = process.argv[2];
 const windows = process.platform === 'win32';
 let child = null, current = null, buffer = '', stopping = false, killTimer = null, release = null;
 let launch = null, helper = null, asked = 0, holds = 0;
-const answers = new Map();
 const send = (message) => {
   if (!socket.destroyed) return socket.write(JSON.stringify(message) + '\n');
   return false;
 };
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-// Windows: this driver's ConPTY helper, started once, ending with this process.
+// Windows: this driver's ConPTY helper, ending with this process. One that
+// exits is replaced: at once if it had started (the running turn's CLI is
+// held again a second on), else five minutes on, as the daemon retries its own.
 const startHelper = () => {
-  if (helper || !launch) return helper;
+  if (!launch) return null;
+  if (helper && (!helper.dead || Date.now() < helper.retry)) return helper;
   let proc;
   try {
     proc = spawn(launch.file, launch.args, {
       env: { ...process.env, ...launch.env }, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true,
     });
   } catch {
-    return (helper = { dead: true, up: Promise.resolve(false) });
+    return (helper = { dead: true, retry: Date.now() + 300000, up: Promise.resolve(false) });
   }
-  const self = helper = { proc, dead: false, up: null };
-  let text = '';
+  const self = helper = { proc, dead: false, retry: 0, up: null, answers: new Map() };
+  let text = '', ready = false;
   self.up = new Promise((resolve) => {
-    const timer = setTimeout(() => { resolve(false); gone(); proc.kill(); }, 15000);
+    const timer = setTimeout(() => { gone(); proc.kill(); }, 15000);
     const gone = () => {
       clearTimeout(timer);
-      self.dead = true;
       resolve(false);
-      for (const answer of [...answers.values()]) answer(null);
+      if (self.dead) return;
+      self.dead = true;
+      self.retry = ready ? 0 : Date.now() + 300000;
+      for (const answer of [...self.answers.values()]) answer(null);
+      // What it held is let go: the running turn's CLI is held through the next one.
+      const cli = child;
+      if (!ready || !cli || stopping) return;
+      setTimeout(() => {
+        if (child === cli && !stopping && !killTimer && cli.helper === self) cli.held = hold(cli);
+      }, 1000);
     };
     proc.on('error', gone);
     proc.on('exit', gone);
@@ -68,8 +83,8 @@ const startHelper = () => {
         if (end < 0) break;
         const line = text.slice(0, end).trim(); text = text.slice(end + 1);
         const space = line.indexOf(' ');
-        if (line === 'ready') { clearTimeout(timer); resolve(true); }
-        else if (space > 0) answers.get(line.slice(0, space))?.(line.slice(space + 1));
+        if (line === 'ready') { ready = true; clearTimeout(timer); resolve(true); }
+        else if (space > 0) self.answers.get(line.slice(0, space))?.(line.slice(space + 1));
       }
     });
   });
@@ -77,34 +92,45 @@ const startHelper = () => {
   proc.stdout.on('error', () => {});
   return self;
 };
-// One request to the helper; null when it is not available or does not answer within ms.
-const ask = (line, ms) => {
-  const active = startHelper();
+// One request to a helper, the current one unless named; null when it is not
+// available or does not answer within ms.
+const ask = (line, ms, active = startHelper()) => {
   if (!active) return Promise.resolve(null);
   return active.up.then((up) => !up || active.dead ? null : new Promise((resolve) => {
     const seq = String(++asked);
     const done = (answer) => {
       clearTimeout(timer);
-      answers.delete(seq);
+      active.answers.delete(seq);
       resolve(answer === null || answer.startsWith('error') ? null : answer);
     };
     const timer = setTimeout(() => done(null), ms);
-    answers.set(seq, done);
+    active.answers.set(seq, done);
     active.proc.stdin.write(seq + ' ' + line + '\n');
   }));
 };
-// The helper's hold on a CLI this driver spawned between from and to, and on
-// the console host of its own console; null without one.
-const hold = (proc, from, to) => {
-  if (!launch || !proc.pid) return Promise.resolve(null);
+// A helper's hold on a CLI this driver spawned (between proc.from and
+// proc.to), and on the console host of its own console; null without one.
+const hold = (proc) => {
+  const active = startHelper();
+  if (!active || !proc.pid) return Promise.resolve(null);
+  proc.helper = active;
   const id = 'cli' + (++holds);
-  const request = ['own', id, proc.pid, from - 100, to + 100, process.pid].join(' ');
-  return ask(request, 20000).then((answer) => {
+  const request = ['own', id, proc.pid, proc.from - 100, proc.to + 100, process.pid].join(' ');
+  return ask(request, 20000, active).then((answer) => {
     const [state, , host, hostCreated] = String(answer).split(' ');
-    if (state === 'ok') return { id, host: Number(host), hostCreated: Number(hostCreated) };
-    if (answer !== null) ask('release ' + id, 1000);
+    if (state === 'ok') {
+      return { id, helper: active, host: Number(host), hostCreated: Number(hostCreated) };
+    }
+    if (answer !== null) ask('release ' + id, 1000, active);
     return null;
   });
+};
+// What a promise settles to by until; undefined while it has not.
+const settled = async (promise, until) => {
+  let value;
+  promise.then((result) => (value = result));
+  while (value === undefined && Date.now() < until) await pause(25);
+  return value;
 };
 // Ends the CLI and what is attached to its console, held by the helper:
 // created after its host and naming it, or listed by the console itself;
@@ -112,12 +138,15 @@ const hold = (proc, from, to) => {
 // nothing is attached). Then the CLI by its handle, should the helper not have.
 const endCli = async (active) => {
   // A helper still starting is waited for, less long once the driver is stopping.
-  const asking = Date.now();
-  let held;
-  active.held.then((value) => (held = value));
-  while (held === undefined && Date.now() - asking < (stopping ? 1500 : 5000)) await pause(25);
+  const until = Date.now() + (stopping ? 1500 : 5000);
+  let held = await settled(active.held, until);
+  // The helper that held it, or tried to, has exited: held through the next
+  // one, if one may start.
+  if (held !== undefined && active.helper?.dead && startHelper() !== active.helper) {
+    held = await settled((active.held = hold(active)), until);
+  }
   for (let round = 0; held && round < 3; round++) {
-    const scan = await ask('scan ' + held.id + ' ' + (round === 0 ? 1 : 0), 1500);
+    const scan = await ask('scan ' + held.id + ' ' + (round === 0 ? 1 : 0), 1500, held.helper);
     const fields = (scan || '').split(' ');
     if (fields[0] !== 'ok') break;
     const targets = fields[1] === '1' ? ['root'] : [];
@@ -128,7 +157,7 @@ const endCli = async (active) => {
       if (attached && subsystem !== 2 && guiStarted !== 1) targets.push(pid + '@' + created);
     }
     if (targets.length === 0) break;
-    await ask('terminate ' + held.id + ' ' + targets.join(' '), 1500);
+    await ask('terminate ' + held.id + ' ' + targets.join(' '), 1500, held.helper);
   }
   if (active.exitCode === null && active.signalCode === null) {
     try { active.kill(); } catch {}
@@ -203,7 +232,10 @@ socket.on('data', (data) => {
         env, detached: !windows, stdio: ['pipe', 'pipe', 'pipe'],
         ...(windows ? { windowsHide: true, windowsVerbatimArguments: message.verbatim === true } : {}),
       });
-      if (windows) proc.held = hold(proc, from, Date.now());
+      if (windows) {
+        proc.from = from; proc.to = Date.now();
+        proc.held = hold(proc);
+      }
       for (const name of ['stdout', 'stderr']) proc[name].on('data', (bytes) => {
         if (!send({ type: name, id, data: bytes.toString('base64') })) proc[name].pause();
       });
@@ -217,7 +249,7 @@ socket.on('data', (data) => {
         release = () => {
           child = null; current = null; release = null;
           // Windows: the turn's processes are ended, or exited: the helper lets them go.
-          if (windows) proc.held.then((held) => held && ask('release ' + held.id, 1000));
+          if (windows) proc.held.then((held) => held && ask('release ' + held.id, 1000, held.helper));
           send({ type: 'exit', id, code, signal });
         };
         if (killTimer && !windows) {
