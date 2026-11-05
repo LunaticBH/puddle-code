@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { closeSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { connect } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { controlRequestSchema, controlResponseSchema } from '@puddle/shared';
 import {
   checkIpcEndpoint,
@@ -67,23 +67,43 @@ export interface HostOpContext {
  * account's temporary directory, where no real home lives (Storage Sense
  * empties it): a real home is always supervised through Task Scheduler,
  * whatever its host's environment says.
+ *
+ * Both paths are compared in their on-disk spelling, case-insensitively on
+ * Windows: %TEMP% may hold an 8.3 name (`C:\Users\RUNNER~1\…`) or a junction,
+ * and a home the first install has yet to create would otherwise keep that
+ * spelling while the temporary directory loses it, so the seam would be
+ * refused and a real task registered.
  */
 export function testSupervision(
   env: NodeJS.ProcessEnv,
   home: string,
   temp: string = tmpdir(),
+  platform: NodeJS.Platform = process.platform,
 ): 'wmi' | 'session' | undefined {
   const mode = env.PUDDLE_TEST_WINDOWS_SUPERVISION;
   if (mode !== 'wmi' && mode !== 'session') return undefined;
-  const real = (path: string) => {
-    try {
-      return realpathSync.native(path);
-    } catch {
-      return resolve(path);
-    }
-  };
-  const inside = relative(real(temp), real(home));
+  const fold = (path: string) => (platform === 'win32' ? path.toLowerCase() : path);
+  const inside = relative(fold(onDiskPath(temp)), fold(onDiskPath(home)));
   return inside !== '' && !inside.startsWith('..') && !isAbsolute(inside) ? mode : undefined;
+}
+
+/**
+ * The on-disk spelling of `path`, which may not exist yet: its nearest
+ * existing ancestor's real path, followed by the segments still missing.
+ */
+function onDiskPath(path: string): string {
+  const missing: string[] = [];
+  let at = resolve(path);
+  for (;;) {
+    try {
+      return join(realpathSync.native(at), ...missing.reverse());
+    } catch {
+      const parent = dirname(at);
+      if (parent === at) return resolve(path);
+      missing.push(basename(at));
+      at = parent;
+    }
+  }
 }
 
 /** Connector modes a client may ask for; anything else is refused. */

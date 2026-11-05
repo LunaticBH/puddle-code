@@ -198,6 +198,35 @@ describe('the host helper’s other operations', () => {
     expect(testSupervision({}, join(temp, 'h'), temp)).toBeUndefined();
   });
 
+  it('honours the seam for a home not yet created under a temporary directory spelled through a link', () => {
+    // As on GitHub's windows-latest (TEMP=C:\Users\RUNNER~1\…): the first
+    // install runs before the home exists, so only its parent has a real path.
+    const real = mkdtempSync(join(tmpdir(), 'puddle-seam-real-'));
+    mkdirSync(join(real, 'Temp'));
+    const link = join(mkdtempSync(join(tmpdir(), 'puddle-seam-link-')), 'short');
+    symlinkSync(real, link, 'junction');
+    const temp = join(link, 'Temp');
+    const env = { PUDDLE_TEST_WINDOWS_SUPERVISION: 'session' };
+    expect(testSupervision(env, join(temp, 'puddle-test-home'), temp)).toBe('session');
+    expect(testSupervision(env, join(temp, 'not', 'yet', 'here'), temp)).toBe('session');
+    // The real spelling of the same directory counts as inside it too.
+    expect(testSupervision(env, join(real, 'Temp', 'puddle-test-home'), temp)).toBe('session');
+    // Still nothing beside or above it.
+    expect(testSupervision(env, join(link, 'home', '.puddle'), temp)).toBeUndefined();
+    expect(testSupervision(env, temp, temp)).toBeUndefined();
+    expect(testSupervision(env, link, temp)).toBeUndefined();
+  });
+
+  it('compares a Windows host’s paths case-insensitively', () => {
+    const temp = mkdtempSync(join(tmpdir(), 'puddle-seam-case-'));
+    const env = { PUDDLE_TEST_WINDOWS_SUPERVISION: 'wmi' };
+    const upper = join(temp, 'PUDDLE-TEST-HOME');
+    expect(testSupervision(env, upper.replace(/seam-case/, 'SEAM-CASE'), temp, 'win32')).toBe(
+      'wmi',
+    );
+    expect(testSupervision(env, join(temp, '..'), temp.toUpperCase(), 'win32')).toBeUndefined();
+  });
+
   it('runs only the connector modes a client may ask for', async () => {
     const connector = io();
     await runWindowsHostOp(
