@@ -7,7 +7,7 @@ import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it } from 'vitest';
 import { PROTOCOL_VERSION } from '@puddle/shared';
 import { ipcPath, ipcProof, listenPrivate } from '@puddle/shared/node';
-import { runWindowsHostOp } from '../../src/lib/host/windows-host-ops.js';
+import { runWindowsHostOp, testSupervision } from '../../src/lib/host/windows-host-ops.js';
 import { parseHelperMessage } from '../../src/lib/host/windows-host-protocol.js';
 
 /**
@@ -179,6 +179,23 @@ describe('the host helper’s other operations', () => {
     ]);
     // The registration code never reaches the answer.
     expect(JSON.stringify(configure.lines())).not.toContain('c'.repeat(64));
+  });
+
+  it('honours the supervision test seam for a home in the temporary directory only', () => {
+    const temp = mkdtempSync(join(tmpdir(), 'puddle-seam-'));
+    const env = { PUDDLE_TEST_WINDOWS_SUPERVISION: 'wmi' };
+    expect(testSupervision(env, join(temp, 'puddle-test-home'), temp)).toBe('wmi');
+    expect(
+      testSupervision({ PUDDLE_TEST_WINDOWS_SUPERVISION: 'session' }, join(temp, 'h'), temp),
+    ).toBe('session');
+    // A real home, beside the temporary directory or above it, is always supervised for real.
+    expect(testSupervision(env, join(temp, '..', 'home', '.puddle'), temp)).toBeUndefined();
+    expect(testSupervision(env, temp, temp)).toBeUndefined();
+    expect(testSupervision(env, join(temp, '..'), temp)).toBeUndefined();
+    expect(
+      testSupervision({ PUDDLE_TEST_WINDOWS_SUPERVISION: 'task' }, join(temp, 'h'), temp),
+    ).toBeUndefined();
+    expect(testSupervision({}, join(temp, 'h'), temp)).toBeUndefined();
   });
 
   it('runs only the connector modes a client may ask for', async () => {

@@ -1,8 +1,8 @@
 import { spawn } from 'node:child_process';
-import { closeSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { connect } from 'node:net';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { controlRequestSchema, controlResponseSchema } from '@puddle/shared';
 import {
   checkIpcEndpoint,
@@ -53,13 +53,37 @@ export interface HostOpContext {
   /** The archive a bootstrap unpacked, after the request on the command line. */
   archive?: string;
   /**
-   * Test seam (PUDDLE_TEST_WINDOWS_SUPERVISION, for test homes only): Task
-   * Scheduler is refused without being asked, so no test registers a task;
-   * `wmi` still creates the supervisor through WMI, as on a host without an
-   * interactive logon, and `session` refuses WMI too, as on a host that
-   * blocks it.
+   * Test seam (testSupervision: PUDDLE_TEST_WINDOWS_SUPERVISION, for a home
+   * in the temporary directory only): Task Scheduler is refused without
+   * being asked, so no test registers a task; `wmi` still creates the
+   * supervisor through WMI, as on a host without an interactive logon, and
+   * `session` refuses WMI too, as on a host that blocks it.
    */
   supervision?: 'wmi' | 'session';
+}
+
+/**
+ * The supervision test seam's mode, honoured only for a home inside this
+ * account's temporary directory, where no real home lives (Storage Sense
+ * empties it): a real home is always supervised through Task Scheduler,
+ * whatever its host's environment says.
+ */
+export function testSupervision(
+  env: NodeJS.ProcessEnv,
+  home: string,
+  temp: string = tmpdir(),
+): 'wmi' | 'session' | undefined {
+  const mode = env.PUDDLE_TEST_WINDOWS_SUPERVISION;
+  if (mode !== 'wmi' && mode !== 'session') return undefined;
+  const real = (path: string) => {
+    try {
+      return realpathSync.native(path);
+    } catch {
+      return resolve(path);
+    }
+  };
+  const inside = relative(real(temp), real(home));
+  return inside !== '' && !inside.startsWith('..') && !isAbsolute(inside) ? mode : undefined;
 }
 
 /** Connector modes a client may ask for; anything else is refused. */
