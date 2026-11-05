@@ -3,6 +3,7 @@ import {
   stopWindowsProcessTree,
   type WindowsProcess,
 } from '@puddle/shared/node/platform';
+import { isConptyJobHost } from '../../src/pty/conpty-jobs.js';
 
 /**
  * Keeps the test suites from leaving processes behind (docs/windows.md,
@@ -72,6 +73,8 @@ export async function runTeardowns(): Promise<void> {
 export interface PtyOwner {
   killAll(stream?: string, signal?: string): void;
   liveCount(): number;
+  /** Windows: the process-table passes that outlasted their PTYs' deadlines. */
+  settled?(ms: number): Promise<void>;
 }
 
 async function drained(ptys: PtyOwner, ms: number): Promise<boolean> {
@@ -88,11 +91,14 @@ async function drained(ptys: PtyOwner, ms: number): Promise<boolean> {
  * on Windows each PTY reports its exit only once its whole tree is stopped.
  */
 export async function stopPtys(ptys: PtyOwner): Promise<void> {
-  if (ptys.liveCount() === 0) return;
-  ptys.killAll();
-  if (await drained(ptys, 5000)) return;
-  ptys.killAll(undefined, 'SIGKILL');
-  await drained(ptys, 15_000);
+  if (ptys.liveCount() > 0) {
+    ptys.killAll();
+    if (!(await drained(ptys, 5000))) {
+      ptys.killAll(undefined, 'SIGKILL');
+      await drained(ptys, 15_000);
+    }
+  }
+  await ptys.settled?.(15_000);
 }
 
 /** stopPtys after this test file; `before` runs first (a service's beginShutdown). */
@@ -105,13 +111,15 @@ export function stopPtysAfterFile(ptys: PtyOwner, before?: () => void): void {
 
 /**
  * Helpers a worker keeps that end with it, not leaks: the process table's
- * PowerShell worker (which also idles out) and esbuild's service.
+ * PowerShell worker (which also idles out), the ConPTY job host and
+ * esbuild's service.
  */
 function isWorkerHelper(entry: WindowsProcess): boolean {
   const line = entry.commandLine ?? '';
   return (
     (entry.name.toLowerCase() === 'powershell.exe' &&
-      /-NonInteractive -ExecutionPolicy Bypass -Command -\s*$/i.test(line)) ||
+      (/-NonInteractive -ExecutionPolicy Bypass -Command -\s*$/i.test(line) ||
+        isConptyJobHost(line))) ||
     (entry.name.toLowerCase() === 'esbuild.exe' && /\s--service=\S+/.test(line))
   );
 }

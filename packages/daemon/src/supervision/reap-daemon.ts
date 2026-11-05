@@ -18,13 +18,15 @@ const CONSOLE_CLOSE_MS = 5000;
 
 /**
  * Stops what an exited Windows daemon left running, resolving with how many
- * processes that was: first the trees below the ConPTY roots it recorded,
- * whose pseudoconsoles ended those roots with the daemon, orphaning what
- * they started; then the daemon's own children, which name its pid and
- * were created while it ran. A root's pid may already belong to another
- * process by now: one created after the root could have been, or after the
- * daemon exited, is left alone with its children, and so is a process
- * naming the pid created after the root must have exited.
+ * processes that was. The daemon's ConPTY jobs (pty/conpty-jobs.ts) end
+ * with it, so this finds only what they could not hold: first the trees
+ * below the ConPTY roots it recorded, whose pseudoconsoles ended those roots
+ * with the daemon, orphaning what they started; then the daemon's own
+ * children, which name its pid and were created while it ran. A root's pid
+ * may already belong to another process by now: one created after the root
+ * could have been, or after the daemon exited, is left alone with its
+ * children, and so is a process naming the pid created after the root must
+ * have exited.
  */
 export async function reapWindowsDaemon(
   daemon: Pick<SupervisedChild, 'pid' | 'startedAtMs'>,

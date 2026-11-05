@@ -2,7 +2,13 @@ import { EventEmitter } from 'node:events';
 import pty from 'node-pty';
 import { killProcessTree, type WindowsProcess } from '@puddle/shared/node/platform';
 import type { LogStore } from '../logs/log-store.js';
-import { conptyTeardownDeps, reapConptyTree, snapshotConptyTree } from './conpty-teardown.js';
+import { sharedConptyJobs, type ConptyJob, type ConptyJobs } from './conpty-jobs.js';
+import {
+  conptyTeardownDeps,
+  ExitDeadline,
+  reapConptyTree,
+  snapshotConptyTree,
+} from './conpty-teardown.js';
 import { EnvOscFilter, type EnvDelta } from './env-osc.js';
 import { conptyRootBounds, writePtyRoots } from './pty-roots.js';
 import { planPtySpawn } from './pty-spawn.js';
@@ -64,10 +70,13 @@ interface Live {
  * never re-applied.
  *
  * `startedAtMs` and `spawnedAtMs` bracket `pty.spawn`, which creates the
- * console host: with them the process table tells this PTY's root, its
- * orphans and its host apart from other processes (conpty-teardown.ts).
- * `closing` is set once a kill has begun to close the pseudoconsole, and
- * `members` is the tree read just before it did.
+ * root and the console host: with them the process table tells this PTY's
+ * root, its orphans and its host apart from other processes, and the job
+ * host its root (conpty-teardown.ts, conpty-jobs.ts). `job` is the PTY's
+ * kill-on-close job. `closing` is set once a stop has begun to close the
+ * pseudoconsole, `killing` once a SIGKILL has, and `members` is the tree
+ * read just before (at `membersAtMs`). `deadline` is when the exit is
+ * reported at the latest, whatever the process table does.
  */
 interface ConptyState {
   ready: boolean;
@@ -76,20 +85,57 @@ interface ConptyState {
   size: { cols: number; rows: number };
   startedAtMs: number;
   spawnedAtMs: number;
+  job: Promise<ConptyJob | null>;
+  /** `job` once it has settled; undefined until then. */
+  assigned: ConptyJob | null | undefined;
   closing: boolean;
+  killing: boolean;
   members: WindowsProcess[];
+  membersAtMs: number | undefined;
+  deadline: ExitDeadline;
 }
 
 /**
- * Bound on stopping what a ConPTY root left running before its exit is
- * reported anyway (the stopping goes on): within a session kill's wait.
+ * Bounds on reporting a ConPTY's exit, the stopping going on after it: from
+ * the first stop request, from a SIGKILL, and from the root's own exit when
+ * nobody asked. SessionService.kill sends SIGKILL 4 s after its stop and
+ * gives up 2 s later, so a stop answers within that even when the process
+ * table is slow or wedged (a query may take its whole 8 s): by then the
+ * PTY's job has ended, and only the table's own pass may still be running.
  */
+const STOP_BOUND_MS = 4500;
+const KILL_BOUND_MS = 250;
 const CONPTY_TEARDOWN_MS = 5000;
+
+/** A root still running has its grace until this long before the deadline, for its job's end. */
+const JOB_END_MARGIN_MS = 300;
+
+/** Bound on ending a job once the deadline has come (the host answers in milliseconds). */
+const JOB_END_BOUND_MS = 750;
 
 /** Bound on reading a ConPTY's tree before a kill closes its console (a cold table takes ~0.5 s). */
 const SNAPSHOT_BOUND_MS = 1500;
 
+/** Bound on the daemon's start waiting for its job host (it starts in ~0.5 s). */
+const JOBS_READY_BOUND_MS = 5000;
+
 const windows = process.platform === 'win32';
+
+/** Between this process's clock and the creation times Windows records (measured within 10 ms). */
+const CLOCK_SLACK_MS = 100;
+
+/** Resolves once `work` settles or `ms` passes, whichever is first; never rejects. */
+function within(work: Promise<unknown>, ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    void work
+      .catch(() => undefined)
+      .finally(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+  });
+}
 
 /**
  * The size a PTY starts at when no viewer has ever sized this (stream, term) —
@@ -132,14 +178,48 @@ export class PtyManager extends EventEmitter {
     stateDir?: string,
     onScreenHealth?: (degraded: boolean) => void,
     /**
-     * Windows: where to record the live ConPTY roots for the resident
-     * supervisor (pty-roots.ts); the daemon passes `<home>\pty-roots.json`.
+     * Windows: `rootsFile` is where to record the live ConPTY roots for the
+     * resident supervisor (pty-roots.ts; the daemon passes
+     * `<home>\pty-roots.json`), and `jobs` the job host (conpty-jobs.ts),
+     * this process's shared one by default; null runs without one.
      */
-    private readonly rootsFile?: string,
+    conpty: { rootsFile?: string; jobs?: ConptyJobs | null } = {},
   ) {
     super();
     this.screens = new TerminalScreenStateStore(stateDir, onScreenHealth);
+    this.rootsFile = conpty.rootsFile;
+    this.jobs = windows ? (conpty.jobs === undefined ? sharedConptyJobs() : conpty.jobs) : null;
+    // Started now, so that the first PTY's root is not kept waiting for its job.
+    void this.jobs?.ready();
     this.recordRoots();
+  }
+
+  private readonly rootsFile: string | undefined;
+  private readonly jobs: ConptyJobs | null;
+  /** Windows: the process-table passes still stopping what exited PTYs left. */
+  private readonly teardowns = new Set<Promise<unknown>>();
+
+  /**
+   * Windows: resolves once the job host can take this process's PTYs, or
+   * cannot start, within a bound. A root assigned to its job before it
+   * starts anything leaves nothing outside it.
+   */
+  async prepare(): Promise<void> {
+    if (this.jobs) await within(this.jobs.ready(), JOBS_READY_BOUND_MS);
+  }
+
+  /**
+   * Windows: waits, up to `ms`, for every process-table pass still stopping
+   * what exited PTYs left (their exits were reported at their deadlines).
+   */
+  async settled(ms: number): Promise<void> {
+    if (this.teardowns.size > 0) await within(Promise.allSettled([...this.teardowns]), ms);
+  }
+
+  private track(work: Promise<unknown>): void {
+    const tracked = work.catch(() => undefined);
+    this.teardowns.add(tracked);
+    void tracked.finally(() => this.teardowns.delete(tracked));
   }
 
   /** Replaces the supervisor's record of this process's live ConPTY roots. */
@@ -177,6 +257,7 @@ export class PtyManager extends EventEmitter {
       cwd: opts.cwd,
       env: plan.env,
     });
+    const spawnedAtMs = windows ? Date.now() : 0;
     const filter = new EnvOscFilter();
     const live: Live = {
       proc,
@@ -193,12 +274,24 @@ export class PtyManager extends EventEmitter {
             exited: false,
             size,
             startedAtMs,
-            spawnedAtMs: Date.now(),
+            spawnedAtMs,
+            job: Promise.resolve(null),
+            assigned: undefined,
             closing: false,
+            killing: false,
             members: [],
+            membersAtMs: undefined,
+            deadline: new ExitDeadline(),
           }
         : null,
     };
+    if (live.conpty) {
+      const state = live.conpty;
+      state.job = this.assignJob(proc.pid, startedAtMs, spawnedAtMs).then((job) => {
+        state.assigned = job;
+        return job;
+      });
+    }
     this.live.set(key, live);
     this.recordRoots();
     proc.onData((raw) => {
@@ -212,6 +305,7 @@ export class PtyManager extends EventEmitter {
     proc.onExit(({ exitCode }) => {
       if (live.conpty) {
         live.conpty.exited = true;
+        live.conpty.deadline.within(CONPTY_TEARDOWN_MS);
         // Windows has no hang-up: the PTY stays live, and its exit
         // unreported, until what its root left running is stopped, so a
         // session's kill and the daemon's shutdown wait for that too.
@@ -219,6 +313,23 @@ export class PtyManager extends EventEmitter {
         return;
       }
       this.exited(live, exitCode);
+    });
+  }
+
+  /** The PTY's job, waiting for its assignment no later than the deadline. */
+  private jobOf(state: ConptyState): Promise<ConptyJob | null> {
+    return state.assigned !== undefined
+      ? Promise.resolve(state.assigned)
+      : state.deadline.race(state.job, null);
+  }
+
+  /** The root's kill-on-close job (conpty-jobs.ts); null when it has none. */
+  private assignJob(pid: number, startedAtMs: number, spawnedAtMs: number) {
+    if (!this.jobs) return Promise.resolve(null);
+    const bounds = conptyRootBounds({ startedAtMs, spawnedAtMs });
+    return this.jobs.assign(pid, {
+      fromMs: bounds.startedAtMs - CLOCK_SLACK_MS,
+      toMs: bounds.createdBeforeMs + CLOCK_SLACK_MS,
     });
   }
 
@@ -246,12 +357,15 @@ export class PtyManager extends EventEmitter {
 
   /**
    * Stops what a ConPTY root left running and its console host
-   * (conpty-teardown.ts), within CONPTY_TEARDOWN_MS. Never rejects. When the
-   * process table cannot be read nothing is stopped: the root's pid may name
+   * (conpty-teardown.ts), by the PTY's deadline: should the deadline come
+   * first, the job is ended if it was not yet and the exit reported, while
+   * the process table's pass goes on (`settled`). Never rejects. When the
+   * table cannot be read that pass stops nothing: the root's pid may name
    * another process by now, so `taskkill /T` on it is no fallback.
    */
-  private reapConpty(live: Live, exitCode: number | undefined): Promise<void> {
+  private async reapConpty(live: Live, exitCode: number | undefined): Promise<void> {
     const state = live.conpty!;
+    const job = await this.jobOf(state);
     const reaped = reapConptyTree(
       {
         pid: live.proc.pid,
@@ -260,15 +374,20 @@ export class PtyManager extends EventEmitter {
         exited: exitCode !== undefined,
       },
       conptyTeardownDeps,
-      state.members,
-    ).catch(() => undefined);
-    return new Promise((resolve) => {
-      const timer = setTimeout(resolve, CONPTY_TEARDOWN_MS);
-      void reaped.finally(() => {
-        clearTimeout(timer);
-        resolve();
-      });
-    });
+      {
+        known: state.members,
+        knownAtMs: state.membersAtMs,
+        job,
+        graceEndsBy: () => state.deadline.ms - JOB_END_MARGIN_MS,
+      },
+    ).then(
+      () => true,
+      () => true,
+    );
+    this.track(reaped);
+    if (!(await state.deadline.race(reaped, false)) && job) {
+      await within(job.end(), JOB_END_BOUND_MS);
+    }
   }
 
   /**
@@ -468,12 +587,15 @@ export class PtyManager extends EventEmitter {
 
   /**
    * POSIX delivers `signal` (node-pty's default is SIGHUP). ConPTY has no
-   * signals, and node-pty throws for any: SIGKILL stops the process tree the
-   * process table shows and then closes the pseudoconsole; every other
-   * signal reads that tree, then just closes the pseudoconsole, which sends
+   * signals, and node-pty throws for any. Every signal but SIGKILL reads the
+   * process table's tree, then closes the pseudoconsole, which sends
    * CTRL_CLOSE_EVENT to its processes and then terminates them, the
-   * counterpart of a hang-up. Either way the exit is reported only once
-   * whatever is left of that tree is stopped too.
+   * counterpart of a hang-up; a root that outlives that has until shortly
+   * before STOP_BOUND_MS. SIGKILL closes the pseudoconsole and ends the
+   * PTY's job at once (without a job, it stops the table's tree first), and
+   * brings the deadline forward, also for a stop already under way. Either
+   * way the exit is reported once whatever is left is stopped too, or at the
+   * deadline.
    */
   private stop(rec: Live, signal: string | undefined): void {
     const state = rec.conpty;
@@ -481,17 +603,16 @@ export class PtyManager extends EventEmitter {
       rec.proc.kill(signal);
       return;
     }
+    const kill = signal === 'SIGKILL';
+    state.deadline.within(kill ? KILL_BOUND_MS : STOP_BOUND_MS);
     // Once the root has exited its pid may name another process; the
-    // teardown of what it left is already running.
+    // teardown of what it left is already running, by the deadline.
     if (state.exited) return;
-    if (signal === 'SIGKILL') {
-      void killProcessTree(rec.proc.pid, {
-        platform: 'win32',
-        processes: conptyTeardownDeps.processes,
-        root: conptyRootBounds(state),
-      })
-        .catch(() => undefined)
-        .then(() => this.closeConsole(rec, state));
+    if (kill) {
+      if (!state.killing) {
+        state.killing = true;
+        void this.killConpty(rec, state);
+      }
       return;
     }
     if (state.closed || state.closing) return;
@@ -501,17 +622,32 @@ export class PtyManager extends EventEmitter {
       conptyTeardownDeps,
     ).then((members) => {
       state.members = members;
+      state.membersAtMs = Date.now();
     });
     // A slow table must not hold the console open: the root is what counts.
-    void new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, SNAPSHOT_BOUND_MS);
-      void snapshot
-        .catch(() => undefined)
-        .finally(() => {
-          clearTimeout(timer);
-          resolve();
-        });
-    }).then(() => this.closeConsole(rec, state));
+    void within(snapshot, SNAPSHOT_BOUND_MS).then(() => this.closeConsole(rec, state));
+  }
+
+  /** SIGKILL on a ConPTY whose root runs (see stop). */
+  private async killConpty(rec: Live, state: ConptyState): Promise<void> {
+    const job = await this.jobOf(state);
+    if (job) {
+      this.closeConsole(rec, state);
+      await job.end();
+      return;
+    }
+    const killed = killProcessTree(rec.proc.pid, {
+      platform: 'win32',
+      processes: conptyTeardownDeps.processes,
+      root: conptyRootBounds(state),
+    });
+    this.track(killed);
+    // A slow table must not hold the console open past the deadline.
+    await state.deadline.race(
+      killed.catch(() => undefined),
+      undefined,
+    );
+    this.closeConsole(rec, state);
   }
 
   private closeConsole(rec: Live, state: ConptyState): void {

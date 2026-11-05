@@ -37,6 +37,7 @@ import { ensureHome, resolvePaths } from './paths.js';
 import { PortScanner } from './ports/scanner.js';
 import { attachProxyUpgrade } from './proxy/upgrade.js';
 import { ProxySocketTracker } from './proxy/sockets.js';
+import type { ConptyJobs } from './pty/conpty-jobs.js';
 import { PtyManager } from './pty/pty-manager.js';
 import { clearPtyRoots, ptyRootsFile } from './pty/pty-roots.js';
 import { TerminalTheme } from './pty/terminal-theme.js';
@@ -76,6 +77,12 @@ export interface DaemonOptions {
   onShutdown?: () => void;
   /** Injected for tests; selects the Windows shutdown order. */
   platform?: NodeJS.Platform;
+  /**
+   * Windows: the ConPTY job host (pty/conpty-jobs.ts), this process's shared
+   * one by default; null runs without one (tests of what the process table
+   * and the supervisor stop on their own).
+   */
+  conptyJobs?: ConptyJobs | null;
 }
 
 export interface RunningDaemon {
@@ -170,12 +177,17 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
       paths.logsDir,
       (degraded) => storage.setLogsDegraded(degraded, 'screens'),
       // The supervisor's lead to what a crashed daemon's PTYs left running.
-      platform === 'win32' ? ptyRootsFile(paths.home) : undefined,
+      platform === 'win32'
+        ? { rootsFile: ptyRootsFile(paths.home), jobs: opts.conptyJobs }
+        : undefined,
     );
     const shellHooks = installShellHooks(paths);
     failedStartup.push(async () => {
       ptys.killAll();
-      if (platform === 'win32') await settleConptys(ptys);
+      if (platform === 'win32') {
+        await settleConptys(ptys);
+        await ptys.settled(SETTLE_MS);
+      }
       logs.closeAll();
     });
     const scanner = new PortScanner({ ptys });
@@ -370,6 +382,8 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
       server.close();
       if ('closeAllConnections' in server) server.closeAllConnections();
     });
+    // Windows: every PTY from here on is put in its job before it can start anything.
+    if (platform === 'win32') await ptys.prepare();
     const port = await listenWithFallback(server, opts.port ?? config.port, '127.0.0.1', platform);
     // Record where we actually bound so clients (and a returning `puddle launch`)
     // can find us even when the preferred port was taken.
@@ -442,7 +456,8 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
         if (Date.now() > deadline) {
           if (platform === 'win32') {
             // Windows has no hang-up: a PTY counts as live until what its
-            // root left running is stopped, so this waits for that too.
+            // root left running is stopped (or its deadline), so this waits
+            // for that too.
             await stopRemainingConptys(ptys);
             break;
           }
@@ -452,6 +467,9 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
         }
         await new Promise((r) => setTimeout(r, 25));
       }
+      // Nothing a PTY started may outlive the daemon: wait for the process
+      // table's passes that outlasted their PTYs' deadlines.
+      if (platform === 'win32') await ptys.settled(SETTLE_MS);
       await ptys.closeTerminalStates();
       logs.closeAll();
       if (platform === 'win32') clearPtyRoots(ptyRootsFile(paths.home));
@@ -500,11 +518,18 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
 }
 
 /**
+ * Bound on a Windows shutdown waiting for the process table's passes that
+ * outlasted their PTYs' deadlines (a query times out after 8 s). Whatever
+ * is still in a PTY's job ends with the daemon anyway.
+ */
+const SETTLE_MS = 10_000;
+
+/**
  * Windows shutdown, once the PTYs' consoles have had their time to close:
- * SIGKILL stops each remaining PTY's whole process tree (PtyManager), then
- * this waits until every PTY has reported its exit, which it does only once
- * what its root left running is stopped too, bounded by PtyManager's own
- * teardown bound.
+ * SIGKILL ends each remaining PTY's job, or stops its process tree
+ * (PtyManager), then this waits until every PTY has reported its exit,
+ * which it does once what its root left running is stopped too, or at its
+ * deadline.
  */
 export async function stopRemainingConptys(
   ptys: Pick<PtyManager, 'killAll' | 'liveCount'>,

@@ -15,9 +15,9 @@ import { reapWindowsDaemon } from '../../src/supervision/reap-daemon.js';
 import { onTeardown } from '../helpers/process-guard.js';
 import {
   marked,
+  orphansOf,
   stopMarked,
   survivors,
-  TREE_SIZE,
   waitUntil,
   writeTreeAgent,
   type TreeAgent,
@@ -28,9 +28,11 @@ const built = existsSync(fileURLToPath(new URL('../../dist/daemon.js', import.me
 
 /**
  * A real daemon process (the built code; `pnpm build` first) running an
- * agent whose tree escapes the console (test/helpers/process-trees.ts):
- * its shutdown leaves nothing, and when it is terminated instead, what the
- * resident supervisor stops before a restart is all that was left
+ * agent whose tree escapes the console, two of its members through
+ * intermediates that exited at once (test/helpers/process-trees.ts): its
+ * shutdown leaves nothing, and neither does its termination, which ends its
+ * ConPTY jobs with it. Without the job host, what the resident supervisor
+ * stops before a restart is all that the process table still leads to
  * (docs/windows.md, decisions 6 and 8).
  */
 describe.runIf(process.platform === 'win32' && built)('a Windows daemon’s PTY trees', () => {
@@ -39,16 +41,17 @@ describe.runIf(process.platform === 'win32' && built)('a Windows daemon’s PTY 
     for (const tree of trees.splice(0)) await stopMarked(tree.marker);
   });
 
-  async function start() {
+  async function start(options: { jobs?: false } = {}) {
     const home = mkdtempSync(join(tmpdir(), 'puddle-tree-home-'));
-    const tree = writeTreeAgent();
+    const tree = writeTreeAgent({ orphans: true });
     trees.push(tree);
     const env: NodeJS.ProcessEnv = { ...process.env, PUDDLE_HOME: home };
     for (const key of Object.keys(env)) {
       if (/^CLAUDE(CODE|_CODE_)/i.test(key)) delete env[key];
     }
     const startedAtMs = Date.now();
-    const child: ChildProcess = spawn(process.execPath, [entry, tree.script, tree.marker], {
+    const args = [entry, ...tree.args, ...(options.jobs === false ? ['--no-jobs'] : [])];
+    const child: ChildProcess = spawn(process.execPath, args, {
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
@@ -68,10 +71,11 @@ describe.runIf(process.platform === 'win32' && built)('a Windows daemon’s PTY 
     await waitUntil(
       async () =>
         (members = (await marked(tree.marker)).filter((p) => p.pid !== ready.pid)).length ===
-        TREE_SIZE,
+        tree.size,
       30_000,
       'the agent’s tree',
     );
+    expect(await orphansOf(members)).toHaveLength(2);
     return { home, child, exited, startedAtMs, pid: ready.pid, members };
   }
 
@@ -84,9 +88,23 @@ describe.runIf(process.platform === 'win32' && built)('a Windows daemon’s PTY 
     expect(existsSync(ptyRootsFile(d.home))).toBe(false);
   });
 
-  it('a terminated daemon leaves what its agent started, and the supervisor’s reaping stops it', async () => {
+  it('a terminated daemon takes every PTY’s tree with it, orphans included', async () => {
     const d = await start();
     d.child.kill(); // TerminateProcess, as a crash
+    await d.exited;
+    // Its job host died with it, and Windows ended every process in its jobs.
+    expect(await survivors(d.members, 3000)).toEqual([]);
+    // The supervisor's reap then finds nothing of the tree, and forgets the roots.
+    await reapWindowsDaemon({ pid: d.pid, startedAtMs: d.startedAtMs }, Date.now(), {
+      processes: listWindowsProcesses,
+      rootsFile: ptyRootsFile(d.home),
+    });
+    expect(existsSync(ptyRootsFile(d.home))).toBe(false);
+  });
+
+  it('without the job host, the supervisor’s reap stops all that the process table leads to', async () => {
+    const d = await start({ jobs: false });
+    d.child.kill();
     await d.exited;
     const exitedAtMs = Date.now();
     // The pseudoconsoles end their roots with the daemon, but not what escaped them.
@@ -100,8 +118,11 @@ describe.runIf(process.platform === 'win32' && built)('a Windows daemon’s PTY 
         rootsFile: ptyRootsFile(d.home),
       },
     );
-    expect(stopped).toBeGreaterThanOrEqual(left.length);
-    expect(await survivors(d.members)).toEqual([]);
+    expect(stopped).toBeGreaterThanOrEqual(left.length - 2);
+    // Only the orphans remain: their intermediates have exited, so nothing
+    // in the table leads to them; only a job holds them.
+    const after = (await survivors(d.members)).map((p) => p.commandLine?.split(':').pop()?.trim());
+    expect(after.sort()).toEqual(['orphan-detached', 'orphan-start-process']);
     expect(existsSync(ptyRootsFile(d.home))).toBe(false);
   });
 });

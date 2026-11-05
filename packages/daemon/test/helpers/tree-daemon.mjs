@@ -1,12 +1,14 @@
 // A real daemon (the built startDaemon) in a process of its own, for the
 // Windows teardown tests (supervision/windows-daemon-teardown.test.ts):
 //
-//   node tree-daemon.mjs <agent script> <marker>      (PUDDLE_HOME: a temporary home)
+//   node tree-daemon.mjs <agent script> <marker> [orphans] [--no-jobs]
+//                                                     (PUDDLE_HOME: a temporary home)
 //
 // It seeds the home with a project, starts an agent session running the
-// tree agent (test/helpers/process-trees.ts), prints one JSON line
-// ({ pid, root }) and serves until it is asked over host control to shut
-// down, or is terminated.
+// tree agent (test/helpers/process-trees.ts; `orphans` passed on to it),
+// prints one JSON line ({ pid, session }) and serves until it is asked over
+// host control to shut down, or is terminated. `--no-jobs` runs it without
+// the ConPTY job host (src/pty/conpty-jobs.ts).
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -20,9 +22,10 @@ const { AccountStore } = await import(dist('db/stores/accounts.js'));
 const { RepoStore } = await import(dist('db/stores/repos.js'));
 const { ProjectStore } = await import(dist('db/stores/projects.js'));
 
-const [script, marker] = process.argv.slice(2);
+const [script, marker, ...flags] = process.argv.slice(2);
 const home = process.env.PUDDLE_HOME;
 if (!home || !script || !marker) throw new Error('usage: tree-daemon.mjs <script> <marker>');
+const agentArgs = [script, marker, ...flags.filter((flag) => flag === 'orphans')];
 
 const paths = resolvePaths(home);
 ensureHome(paths);
@@ -76,15 +79,16 @@ const daemon = await startDaemon({
         migratableSessions: false,
       },
       env: () => ({}),
-      launchArgs: () => [script, marker],
-      resumeArgs: () => [script, marker],
-      loginArgs: () => [script, marker],
+      launchArgs: () => agentArgs,
+      resumeArgs: () => agentArgs,
+      loginArgs: () => agentArgs,
       resolveSessionRef: async (options) => `tree-${options.sessionId}`,
       hasConversation: () => true,
       statusPatterns: { waitingInput: [/READY/] },
     },
   ],
   onShutdown: () => process.exit(0),
+  ...(flags.includes('--no-jobs') ? { conptyJobs: null } : {}),
 });
 const session = await daemon.service.create({ project_id: project.id, account_id: account.id });
 process.stdout.write(JSON.stringify({ pid: process.pid, session: session.id }) + '\n');
