@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { FAKE_WINDOWS_SSH_SCRIPT } from '../helpers/fake-ssh.js';
 import {
   b64json,
   bootstrapScript,
@@ -555,6 +556,41 @@ Write-PuddleLine (Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash`;
       stderr: expect.stringContaining('the connection ended before the whole file arrived'),
     });
   }, 60_000);
+
+  it('is held by the fake Windows host to what a real one lets PowerShell read', async () => {
+    const profile = mkdtempSync(join(tmpdir(), 'puddle-fake-host-'));
+    const viaFake = (input: Buffer) =>
+      new Promise<{ code: number | null; stderr: string }>((resolve) => {
+        const child = spawn(
+          process.execPath,
+          [FAKE_WINDOWS_SSH_SCRIPT, 'alice@winhost', '--', windowsRemoteCommand()],
+          {
+            stdio: ['pipe', 'ignore', 'pipe'],
+            windowsHide: true,
+            env: { ...process.env, FAKE_WINDOWS_SSH_HOME: profile },
+          },
+        );
+        let stderr = '';
+        child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
+        child.stdin.on('error', () => {});
+        child.on('close', (code) => resolve({ code, stderr }));
+        child.stdin.end(input);
+      });
+    const body = Buffer.alloc(400_000, 0x5a);
+    // As the helper used to be staged: a PowerShell loop over the connection's own stream.
+    const loop = String.raw`$in = [Console]::OpenStandardInput(); $b = New-Object byte[] 65536; $left = ${body.length}
+while ($left -gt 0) { $r = $in.Read($b, 0, [Math]::Min(65536, $left)); if ($r -le 0) { break }; $left -= $r }`;
+    const stalled = await viaFake(Buffer.concat([frame(windowsScript(loop)), body]));
+    expect(stalled.code).toBe(255);
+    expect(stalled.stderr).toContain('PowerShell itself read more than 64 KB');
+    // tar.exe reads it instead.
+    const receive = String.raw`$dir = Join-Path (Get-PuddleTemp) 'received'
+[void][IO.Directory]::CreateDirectory($dir)
+$null = Receive-PuddleFile $dir ${body.length}`;
+    const native = await viaFake(Buffer.concat([frame(windowsScript(receive)), tarred(body)]));
+    expect(parseTrailer(native.stderr)).toEqual({ code: 0, stderr: '' });
+    expect(native.code).toBe(0);
+  }, 120_000);
 
   it('refuses a frame that is cut short', async () => {
     const result = await viaShell('direct', frame('$x = 1').subarray(0, 12));
