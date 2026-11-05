@@ -35,7 +35,7 @@ loops and other agent workflows through the shell or stdio MCP. See the
 
 This installs the CLI under `~/.local/share/puddle/cli` and its launcher at
 `~/.local/bin/puddle`. Add `~/.local/bin` to your `PATH` if the installer asks.
-The standalone releases support Linux x64/arm64, macOS arm64 and Windows x64. The script and
+The standalone releases support Linux x64/arm64, macOS arm64 and Windows x64/arm64. The script and
 checksum-verified archives are also attached to this repository's GitHub Releases.
 An optional `--version` selects a release; `--prefix` and `--bin-dir` select the
 installation and launcher directories:
@@ -45,7 +45,7 @@ curl -fsSL https://app.example.com/install.sh | sh -s -- --version X.Y.Z
 ```
 
 On Windows, use the PowerShell installer instead. It installs under
-`%LOCALAPPDATA%puddlecli` and adds `%LOCALAPPDATA%puddlein` to your user `PATH`
+`%LOCALAPPDATA%\puddle\cli` and adds `%LOCALAPPDATA%\puddle\bin` to your user `PATH`
 unless you pass `-NoPathUpdate`:
 
 ```powershell
@@ -106,15 +106,15 @@ puddle remove daemon                      # uninstall; your data stays unless yo
 
 **Desktop app (optional):**
 
-The same cockpit also ships as a standalone desktop app — identical UI and engine, plus a File → "Connect to SSH Host…" menu for remote hosts. Install it with `puddle install desktop` (macOS arm64, Linux x64 or Windows x64). Once installed, it runs independently of the CLI.
+The same cockpit also ships as a standalone desktop app — identical UI and engine, plus a File → "Connect to SSH Host…" menu for remote hosts. Install it with `puddle install desktop` (macOS arm64, Linux x64 or Windows x64/arm64). Once installed, it runs independently of the CLI.
 
 An installed Puddle CLI manages the desktop app directly: quit Puddle, then `puddle install desktop`, `puddle upgrade desktop`, or `puddle remove desktop`. On macOS a fresh install goes to `/Applications` when writable, otherwise `~/Applications`; on Linux `install desktop` asks where to put the AppImage (default `~/puddle`) and opens the folder — later updates happen from inside the app. On Windows it runs the per-user installer silently, and later updates also happen from inside the app.
 
 **Host requirements**: Linux with glibc 2.28+ (Ubuntu 20.04+, Debian 11+, RHEL/Rocky 8+;
 Alpine is not supported) or macOS, with `git` and `curl`, plus whichever agent CLIs you want on
-`PATH`. Windows 10 1809+ and Windows 11 (x64) run the daemon natively for `puddle launch` on that
-machine, with Git for Windows 2.26+ on `PATH`; SSH to a Windows host is not supported (see
-[Windows support](docs/windows.md)). Standalone CLI installs include Node and require no npm; npm installs require Node 22+. The client side works from any OS with a browser and `ssh` (Windows works, with repeated
+`PATH`. Windows 10 1809+ and Windows 11 (x64/arm64) run the daemon natively, locally or as an SSH
+target through their OpenSSH server, with Git for Windows 2.26+ on `PATH`; Puddle drives them
+through PowerShell only and starts the daemon at logon (see [Windows support](docs/windows.md)). Standalone CLI installs include Node and require no npm; npm installs require Node 22+. The client side works from any OS with a browser and `ssh` (Windows works, with repeated
 auth prompts unless you use a key).
 
 ## How it works

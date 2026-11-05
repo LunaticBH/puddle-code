@@ -222,7 +222,7 @@ An existing registration can be re-enabled directly. To change it, disable remot
 access and choose **Change registration**: the existing origin fields become
 editable in place. Cancel restores the saved values; completing sign-in replaces
 the registration and revokes previous browser approvals and invitations.
-The connector needs persistent systemd/launchd supervision; the settings view
+The connector needs persistent systemd, launchd or (Windows) Task Scheduler supervision; the settings view
 explains when the host needs configuration or an upgrade.
 
 Choose **Pair a browser** on desktop. In the intended Puddle browser or Home Screen
@@ -288,7 +288,7 @@ The existing `--service` / `--app-origin` registration flow remains available to
 automation using a five-minute code from the authenticated service API; web
 Settings no longer creates these codes. Supply the code through the hidden prompt
 or stdin, never command-line arguments, shell history or background logs.
-Systemd/launchd supervises the connector independently of
+Systemd/launchd (on Windows, the home's Task Scheduler supervisor) supervises the connector independently of
 the CLI and laptop. `remote enable` without origins re-enables an existing
 registration. Registering again clears previous approvals and invitations. An
 upgrade restarts the previously configured connector; daemon removal disables

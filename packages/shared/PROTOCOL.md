@@ -15,8 +15,14 @@ source) and `unsafe_repository` (400, refused by git `safe.directory`), and
 `shutdown` request, answered by `shutting_down` before the daemon stops;
 Windows supervision uses it in place of signals, and older daemons answer
 `invalid_control`. On Windows the private control `open` and `shutdown` requests may carry an optional `challenge` (64 hex), and the `authority`, `shutting_down` and `error` answers to it carry `proof`, an HMAC-SHA256 under the home's private IPC key; Windows clients believe only a proven answer, and POSIX exchanges are unchanged. An interactive agent session on a Windows host may answer `prompt_too_long` (400) when its first prompt cannot fit the Windows command line. The cockpit launcher pipe accepts `shutdown` (answered
-`stopping`), and the cockpit remote-access status may report availability
-`unsupported` (Windows hosts). Remote protocol and operation allowlists remain
+`stopping`), and the cockpit remote-access status may report supervisor
+`task_scheduler` (a Windows host whose supervisor runs from a per-user scheduled
+task). On Windows the home's supervisor serves a private control pipe
+(`supervisor` scope) taking one `{t: status|reconcile|restart_connector|shutdown,
+challenge}` per connection, answered `{t: supervisor, proof, pid, daemon,
+connector, stopping}`; the connector's pipes accept an optional first
+`{t: challenge}`, answered `{t: proven, proof}`. A Windows daemon that finds its
+home's control pipe served exits with status 75. Remote protocol and operation allowlists remain
 unchanged.
 
 Protocol 25.6 adds `logRetentionDays` to host configuration and its patch, defaulting
