@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import {
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -241,10 +242,31 @@ describe('Windows Authenticode signing of release trees', () => {
     expect(SIGN_SCRIPT).toContain('Invoke-TrustedSigning');
   });
 
+  /** System32's Windows PowerShell, as the signing script runs; inputs arrive in the environment. */
+  function windowsPowerShell(script: string, env: Record<string, string>): string {
+    const result = spawnSync(
+      join(
+        process.env.SystemRoot ?? 'C:\\Windows',
+        'System32/WindowsPowerShell/v1.0/powershell.exe',
+      ),
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-EncodedCommand',
+        Buffer.from(script, 'utf16le').toString('base64'),
+      ],
+      { env: { ...process.env, ...env }, encoding: 'utf8', windowsHide: true },
+    );
+    if (result.status !== 0) throw new Error(`PowerShell failed: ${result.stderr}`);
+    return result.stdout.trim();
+  }
+
   it.runIf(process.platform === 'win32')(
     'signs only files without a valid signature and fails when a signature does not verify',
     async () => {
-      const root = tree('signing', {
+      const root = tree('signing tree', {
         'bin/unsigned.dll': pe(0x8664),
         'cli/install-cli.ps1': 'Write-Output 1\r\n',
         'cli/index.js': 'export {};',
@@ -257,43 +279,115 @@ describe('Windows Authenticode signing of release trees', () => {
       const scratch = join(temp, 'scratch');
       mkdirSync(tools, { recursive: true });
       mkdirSync(scratch, { recursive: true });
-      // A signtool that signs nothing: verification must then refuse the tree.
-      const signtool = join(tools, 'signtool.cmd');
-      writeFileSync(signtool, '@echo %*>>"%~dp0arguments.txt"\r\n@exit /b 0\r\n');
+      // A self-signed code-signing PFX made in memory, never in a certificate
+      // store, under a password that Windows PowerShell 5.1's native argument
+      // passing corrupts: a quote, a space and a trailing backslash.
+      const password = 's3cr3t" pass word\\';
+      const [pfx, thumbprint] = windowsPowerShell(
+        [
+          "$ErrorActionPreference = 'Stop'",
+          '$rsa = New-Object Security.Cryptography.RSACng 2048',
+          "$request = New-Object Security.Cryptography.X509Certificates.CertificateRequest('CN=Puddle test signer', $rsa, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)",
+          '$usage = New-Object Security.Cryptography.OidCollection',
+          "[void]$usage.Add((New-Object Security.Cryptography.Oid '1.3.6.1.5.5.7.3.3'))",
+          '$request.CertificateExtensions.Add((New-Object Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension($usage, $false)))',
+          '$certificate = $request.CreateSelfSigned([DateTimeOffset]::UtcNow.AddDays(-1), [DateTimeOffset]::UtcNow.AddDays(1))',
+          "[Convert]::ToBase64String($certificate.Export('Pkcs12', $env:TEST_PFX_PASSWORD))",
+          '$certificate.Thumbprint',
+        ].join('\n'),
+        { TEST_PFX_PASSWORD: password },
+      ).split(/\r?\n/) as [string, string];
+      // node.exe stands in for signtool, so its arguments are recorded as a
+      // Windows programme parses its command line. It keeps a copy of the PFX
+      // it was given and signs nothing: verification must then refuse the tree.
+      const log = join(tools, 'signtool.jsonl');
+      const fake = join(tools, 'fake-signtool.cjs');
+      writeFileSync(
+        fake,
+        [
+          "const { appendFileSync, copyFileSync } = require('node:fs');",
+          "const args = [require('node:path').basename(process.argv[1]), ...process.argv.slice(2)];",
+          "appendFileSync(process.env.FAKE_SIGNTOOL_LOG, JSON.stringify(args) + '\\n');",
+          "copyFileSync(args[args.indexOf('/f') + 1], process.env.FAKE_SIGNTOOL_LOG + '.pfx');",
+          'process.exit(0);',
+        ].join('\n'),
+      );
       const logged: string[] = [];
-      await expect(
+      const sign = (secret: Record<string, string>) =>
         signWindowsTree(root, (line) => logged.push(line), {
           scripts: true,
           env: {
             ...process.env,
             PUDDLE_WINDOWS_SIGNING: 'certificate',
-            WIN_CSC_LINK: Buffer.from('not really a PFX').toString('base64'),
-            WIN_CSC_KEY_PASSWORD: 'dry-run',
-            SIGNTOOL_PATH: signtool,
+            WIN_CSC_LINK: pfx,
+            WIN_CSC_KEY_PASSWORD: '',
+            ...secret,
+            SIGNTOOL_PATH: process.execPath,
+            NODE_OPTIONS: `--require "${fake.replaceAll('\\', '/')}"`,
+            FAKE_SIGNTOOL_LOG: log,
             TEMP: scratch,
             TMP: scratch,
           },
-        }),
-      ).rejects.toThrow(
+        });
+      const calls = () =>
+        readFileSync(log, 'utf8')
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line) as string[]);
+      await expect(sign({ WIN_CSC_KEY_PASSWORD: password })).rejects.toThrow(
         /^Authenticode signing failed: not validly signed and timestamped: .*unsigned\.dll \(NotSigned\)/,
       );
       expect(logged).toContainEqual(
         expect.stringMatching(/^windows-sign: [23] of 3 files need a signature \(certificate\)$/),
       );
-      const signed = readFileSync(join(tools, 'arguments.txt'), 'utf8');
-      expect(signed).toContain('sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f');
-      expect(signed).toContain('/p dry-run');
-      expect(signed).toContain(join(root, 'bin', 'unsigned.dll'));
-      expect(signed).toContain(join(root, 'cli', 'install-cli.ps1'));
-      expect(signed).not.toContain('index.js');
+      expect(calls()).toHaveLength(1);
+      const [args] = calls() as [string[]];
+      expect(args.slice(0, 8)).toEqual([
+        'sign',
+        '/fd',
+        'SHA256',
+        '/td',
+        'SHA256',
+        '/tr',
+        'http://timestamp.digicert.com',
+        '/f',
+      ]);
+      expect(args[9]).toBe('/p');
+      // A one-time password: the real one reaches no command line, whole or in part.
+      expect(args[10]).toMatch(/^[0-9A-F]{48}$/);
+      expect(args.filter((arg) => arg.includes('s3cr3t'))).toEqual([]);
+      const files = args.slice(11);
+      expect(files).toContain(join(root, 'bin', 'unsigned.dll'));
+      expect(files).toContain(join(root, 'cli', 'install-cli.ps1'));
+      expect(files.filter((file) => file.endsWith('index.js'))).toEqual([]);
       const [node] = await readAuthenticodeSignatures([join(root, 'bin', 'node.exe')]);
-      if (node!.status === 'Valid') expect(signed).not.toContain('node.exe');
+      if (node!.status === 'Valid') expect(files).not.toContain(join(root, 'bin', 'node.exe'));
       expect(
         createHash('sha256')
           .update(readFileSync(join(root, 'bin', 'node.exe')))
           .digest('hex'),
       ).toBe(nodeHash);
+      // signtool's copy holds the same certificate and key under that password.
+      expect(
+        windowsPowerShell(
+          [
+            '$certificates = New-Object Security.Cryptography.X509Certificates.X509Certificate2Collection',
+            "$certificates.Import($env:TEST_PFX, $env:TEST_PFX_PASSWORD, 'EphemeralKeySet')",
+            "$certificates[0].Thumbprint + ' ' + $certificates[0].HasPrivateKey",
+          ].join('\n'),
+          { TEST_PFX: `${log}.pfx`, TEST_PFX_PASSWORD: args[10]! },
+        ),
+      ).toBe(`${thumbprint} True`);
       // The decoded certificate never outlives the run.
+      expect(existsSync(args[8]!)).toBe(false);
+      expect(readdirSync(scratch).filter((name) => name.endsWith('.pfx'))).toEqual([]);
+
+      // A PFX without a password reaches signtool exactly as configured.
+      rmSync(log);
+      await expect(sign({})).rejects.toThrow('not validly signed and timestamped');
+      const [plain] = calls() as [string[]];
+      expect(plain).not.toContain('/p');
+      expect(readFileSync(`${log}.pfx`).toString('base64')).toBe(pfx);
       expect(readdirSync(scratch).filter((name) => name.endsWith('.pfx'))).toEqual([]);
     },
     120_000,
