@@ -699,4 +699,35 @@ describe.runIf(
     }
   }, 300_000);
 
+  it('never starts the supervisor through WMI from an elevated SSH session', async () => {
+    const at = freshHome();
+    const calls: Array<Readonly<Record<string, string>>> = [];
+    const powershell: PowerShellRunner = async (_script, env) => {
+      calls.push(env);
+      const reply =
+        'PUDDLE_QUERY' in env
+          ? { elevated: true, error: '' }
+          : 'PUDDLE_PROCESS_COMMAND' in env
+            ? { code: 0, pid: 4242, error: '' }
+            : 'PUDDLE_TASK_XML' in env
+              ? { registered: true, disabled: false, ran: false, state: 'Ready', error: '' }
+              : { ran: false, state: 'Ready', error: '' };
+      return { code: 0, stdout: JSON.stringify(reply), stderr: '' };
+    };
+    // The task cannot run without a desktop session, and the detached child would end with the session.
+    await expect(
+      installWindowsDaemon({
+        home: at,
+        tarball: zip,
+        detachedStart: false,
+        supervision: { powershell },
+      }),
+    ).rejects.toMatchObject({
+      code: 'session_bound',
+      message: expect.stringContaining('an elevated session never starts it through WMI'),
+      hint: expect.stringContaining('log on to the machine and stay logged on'),
+    });
+    expect(calls.filter((env) => 'PUDDLE_PROCESS_COMMAND' in env)).toEqual([]);
+    expect(await supervisorRequest(at, 'status')).toMatchObject({ kind: 'absent' });
+  }, 180_000);
 });

@@ -186,10 +186,15 @@ describe('starting the supervisor', () => {
     // The task start names the command line it must run; WMI runs the same one.
     expect(calls[0]!.PUDDLE_TASK_COMMAND).toMatch(/\\bin\\current\\bin\\puddle-hidden\.exe$/);
     expect(calls[0]!.PUDDLE_TASK_ARGUMENTS).toMatch(/supervisor\.mjs" --home "/);
-    expect(calls[1]!.PUDDLE_PROCESS_COMMAND).toMatch(
+    expect(calls.map((env) => Object.keys(env)[0])).toEqual([
+      'PUDDLE_TASK_NAME',
+      'PUDDLE_QUERY',
+      'PUDDLE_PROCESS_COMMAND',
+    ]);
+    expect(calls[2]!.PUDDLE_PROCESS_COMMAND).toMatch(
       /^"[^"]*\\bin\\current\\bin\\puddle-hidden\.exe" "[^"]*\\node\.exe" ".*supervisor\.mjs" --home "/,
     );
-    expect(calls[1]!.PUDDLE_PROCESS_COMMAND).toBe(
+    expect(calls[2]!.PUDDLE_PROCESS_COMMAND).toBe(
       `"${calls[0]!.PUDDLE_TASK_COMMAND}" ${calls[0]!.PUDDLE_TASK_ARGUMENTS}`,
     );
     expect(lines.join('\n')).toMatch(/no desktop session/);
@@ -223,6 +228,47 @@ describe('starting the supervisor', () => {
     expect(lines.join('\n')).not.toMatch(/ran, but its supervisor did not come up/);
   });
 
+  it('never starts it through WMI from an elevated process', async () => {
+    const home = freshHome();
+    const lines: string[] = [];
+    const { runner, calls } = powershell((env) =>
+      'PUDDLE_QUERY' in env
+        ? { elevated: true, error: '' }
+        : 'PUDDLE_PROCESS_COMMAND' in env
+          ? { code: 0, pid: 77, error: '' }
+          : { ran: false, state: 'Ready', error: '' },
+    );
+    const { spawnDetached, spawned } = spawner(() => void supervisor(home));
+    const started = await startWindowsSupervisor(home, {
+      task: true,
+      powershell: runner,
+      spawnDetached,
+      waitMs: 3000,
+      logger: { info: (line) => lines.push(line), warn: (line) => lines.push(line) },
+    });
+    // A supervisor WMI started would outlive the session with the administrator's token.
+    expect(calls.filter((env) => 'PUDDLE_PROCESS_COMMAND' in env)).toEqual([]);
+    expect(started).toBe('detached');
+    expect(spawned).toHaveLength(1);
+    expect(lines.join('\n')).toMatch(/runs elevated/);
+
+    // An injected answer replaces the question.
+    const unelevated = freshHome();
+    const asked = powershell((env) => {
+      if ('PUDDLE_PROCESS_COMMAND' in env) void supervisor(unelevated);
+      return { code: 0, pid: 77, error: '' };
+    });
+    expect(
+      await startWindowsSupervisor(unelevated, {
+        task: false,
+        powershell: asked.runner,
+        elevated: async () => false,
+        waitMs: 3000,
+      }),
+    ).toBe('process');
+    expect(asked.calls.map((env) => 'PUDDLE_PROCESS_COMMAND' in env)).toEqual([true]);
+  });
+
   it('supervises a home holding % without its task, through WMI or a detached child', async () => {
     const home = mkdtempSync(join(tmpdir(), 'puddle-100%-'));
     const { runner, calls } = powershell((env) => {
@@ -233,9 +279,12 @@ describe('starting the supervisor', () => {
     expect(
       await startWindowsSupervisor(home, { task: true, powershell: runner, waitMs: 3000 }),
     ).toBe('process');
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.PUDDLE_PROCESS_COMMAND).toContain('puddle-100%-');
-    expect(calls[0]!.PUDDLE_TASK_NAME).toBeUndefined();
+    expect(calls.map((env) => Object.keys(env)[0])).toEqual([
+      'PUDDLE_QUERY',
+      'PUDDLE_PROCESS_COMMAND',
+    ]);
+    expect(calls[1]!.PUDDLE_PROCESS_COMMAND).toContain('puddle-100%-');
+    expect(calls.some((env) => 'PUDDLE_TASK_NAME' in env)).toBe(false);
 
     const detachedHome = mkdtempSync(join(tmpdir(), 'puddle-100%-'));
     const { runner: refused } = powershell(() => ({ code: -1, pid: 0, error: 'Access denied' }));
@@ -253,8 +302,8 @@ describe('starting the supervisor', () => {
 
   it('uses a start made with the registration instead of starting the task again', async () => {
     const home = freshHome();
-    const { runner, calls } = powershell(() => {
-      void supervisor(home);
+    const { runner, calls } = powershell((env) => {
+      if ('PUDDLE_PROCESS_COMMAND' in env) void supervisor(home);
       return { code: 0, pid: 77, error: '' };
     });
     const started = await startWindowsSupervisor(home, {
@@ -264,7 +313,9 @@ describe('starting the supervisor', () => {
       waitMs: 3000,
     });
     expect(started).toBe('process');
-    expect(calls.map((env) => 'PUDDLE_PROCESS_COMMAND' in env)).toEqual([true]);
+    // The elevation question, then WMI: the task is not started again.
+    expect(calls.map((env) => 'PUDDLE_PROCESS_COMMAND' in env)).toEqual([false, true]);
+    expect(calls.some((env) => 'PUDDLE_TASK_NAME' in env)).toBe(false);
   });
 
   it('spawns it detached only when WMI is refused, and fails when nothing brings it up', async () => {

@@ -247,6 +247,25 @@ describe('the Windows supervisor', () => {
     }
   });
 
+  it('leaves the home to a supervisor it cannot reach, without calling it a squatter', async () => {
+    const h = harness();
+    // An elevated supervisor's pipe: served, but this process cannot open it.
+    const held: Server = await listenPrivate(ipcPath(h.home, 'supervisor'), (socket) => {
+      socket.on('error', () => {});
+    });
+    try {
+      const supervisor = new WindowsSupervisor({ ...h.deps, holder: async () => 'unavailable' });
+      expect(await supervisor.run()).toBe(0);
+      expect(h.daemons).toHaveLength(0);
+      const log = h.log.join('\n');
+      expect(log).toMatch(/cannot reach it: it may run elevated/);
+      expect(log).toMatch(/stop it from an elevated session, or restart the machine/);
+      expect(log).not.toMatch(/rename the home’s pipes/);
+    } finally {
+      await new Promise<void>((resolve) => held.close(() => resolve()));
+    }
+  });
+
   it('shuts the daemon and connector down on request, answering first', async () => {
     const h = harness({ connector: true });
     const { done } = h.start();

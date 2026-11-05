@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { describe, expect, it } from 'vitest';
-import { RemoteWindowsHost } from '../../src/lib/host/windows-remote-host.js';
+import { elevatedWarning, RemoteWindowsHost } from '../../src/lib/host/windows-remote-host.js';
 import type { SshTransport, WindowsExecOptions } from '../../src/lib/transport/ssh.js';
 import {
   HELPER_MISSING_EXIT,
@@ -248,6 +248,13 @@ describe('a Windows SSH host’s client', () => {
       return warned;
     };
     expect((await warnings('process', true)).join('\n')).toContain('runs elevated');
+    // Logging on alone never replaces it: the logon task leaves a running daemon in place.
+    expect((await warnings('process', true)).join('\n')).toMatch(
+      /log on to the machine and stay logged on, then run puddle upgrade daemon \S+, which stops it/,
+    );
+    expect(elevatedWarning('h', 'session')).toMatch(
+      /stay logged on, then launch again once this cockpit has closed/,
+    );
     // The logon task runs without elevation, and one already running was not started here.
     expect(await warnings('task', true)).toEqual([]);
     expect(await warnings('running', true)).toEqual([]);

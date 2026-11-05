@@ -16,6 +16,7 @@ import {
   type WindowsTaskOptions,
   type WindowsTaskRegistration,
   type WindowsTaskStart,
+  windowsProcessElevated,
   windowsTaskXml,
 } from './windows-tasks.js';
 
@@ -233,6 +234,8 @@ export interface StartSupervisorOptions extends WindowsTaskOptions {
   spawnDetached?: (file: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
   /** Environment of the detached fallback (WMI and the task use the user's own). */
   env?: NodeJS.ProcessEnv;
+  /** Whether this process runs elevated under UAC; asked of PowerShell by default. */
+  elevated?: () => Promise<boolean>;
 }
 
 export type SupervisorStart = 'running' | 'task' | 'process' | 'detached';
@@ -265,7 +268,13 @@ function notRun(started: WindowsTaskStart): string {
  * then as a detached child. A late start of an earlier way only meets the
  * supervisor pipe already served and exits, so falling through never leaves
  * two supervisors. A home the task cannot start (unschedulableHome) skips
- * it. Throws when no way brings the supervisor up.
+ * it. An elevated caller skips WMI: the supervisor would keep its
+ * administrator's token outside every session, holding pipes that the
+ * user's unelevated processes, the logon task's supervisor among them,
+ * cannot open, so none of them could ever stop or replace it. The detached
+ * child an elevated caller may start ends with its session (an SSH
+ * session's refuses one: the caller keeps the daemon attached instead).
+ * Throws when no way brings the supervisor up.
  */
 export async function startWindowsSupervisor(
   home: string,
@@ -292,14 +301,21 @@ export async function startWindowsSupervisor(
             'no desktop session may be logged on — starting the supervisor directly',
     );
   }
-  try {
-    await createWindowsProcess(supervisorCommandLine(home), homedir(), opts);
-    if (await waitForSupervisor(home, waitMs)) return 'process';
-    info('the supervisor started through WMI did not come up — starting it from this process');
-  } catch (err) {
+  if (await (opts.elevated ?? (() => windowsProcessElevated(opts)))()) {
     info(
-      `WMI could not start the supervisor (${(err as Error).message}) — starting it from this process`,
+      'this process runs elevated, and a supervisor WMI started would keep its token beyond ' +
+        'this session — starting it from this process instead',
     );
+  } else {
+    try {
+      await createWindowsProcess(supervisorCommandLine(home), homedir(), opts);
+      if (await waitForSupervisor(home, waitMs)) return 'process';
+      info('the supervisor started through WMI did not come up — starting it from this process');
+    } catch (err) {
+      info(
+        `WMI could not start the supervisor (${(err as Error).message}) — starting it from this process`,
+      );
+    }
   }
   const { node, script } = supervisorPaths(home);
   const child = (opts.spawnDetached ?? spawn)(

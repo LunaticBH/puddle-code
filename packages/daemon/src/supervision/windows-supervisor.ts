@@ -146,8 +146,19 @@ export class WindowsSupervisor {
       this.server = await this.deps.listen((socket) => this.serve(socket));
     } catch (err) {
       if (!(err instanceof Error) || !err.message.includes('already active')) throw err;
-      if ((await this.deps.holder()) === 'answered') {
+      const holder = await this.deps.holder();
+      if (holder === 'answered') {
         this.deps.log('another supervisor already runs for this home');
+        return 0;
+      }
+      if (holder === 'unavailable') {
+        // No squatter: one that answered without the proof would be. A pipe
+        // this process cannot open is typically an elevated supervisor's.
+        this.deps.log(
+          'another supervisor holds this home’s pipe, but this process cannot reach it: it may ' +
+            'run elevated, started from an administrator’s session; leaving the home to it ' +
+            '(stop it from an elevated session, or restart the machine)',
+        );
         return 0;
       }
       this.deps.log(

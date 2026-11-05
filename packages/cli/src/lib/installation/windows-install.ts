@@ -36,6 +36,7 @@ import {
   unregisterWindowsTask,
   supervisorTaskName,
   windowsHostArch,
+  windowsProcessElevated,
   type StartSupervisorOptions,
   type SupervisorStart,
 } from '@puddle/shared/node/platform';
@@ -339,6 +340,8 @@ async function supervise(
     refused = true;
     return refusedChild();
   };
+  // An elevated session never starts it through WMI (startWindowsSupervisor).
+  let elevated = false;
   const started = await startWindowsSupervisor(home, {
     ...seams,
     ...(detachedStart ? {} : { spawnDetached: refuse }),
@@ -358,9 +361,10 @@ async function supervise(
             },
           }
         : {}),
+    elevated: async () => (elevated = await windowsProcessElevated(seams)),
     logger,
   }).catch((err: unknown) => {
-    throw refused ? sessionBound() : err;
+    throw refused ? sessionBound(elevated) : err;
   });
   onStart?.(started);
   // One that started meanwhile may still run the connector of the release before.
@@ -371,9 +375,19 @@ async function supervise(
 
 /**
  * Neither Task Scheduler nor WMI started the supervisor, and a detached child
- * of this process would end with the SSH session that runs it.
+ * of this process would end with the SSH session that runs it. An elevated
+ * session does not ask WMI at all.
  */
-function sessionBound(): CliError {
+function sessionBound(elevated = false): CliError {
+  if (elevated) {
+    return new CliError(
+      'session_bound',
+      'puddled cannot outlive this SSH session: Task Scheduler could not start it, and an ' +
+        'elevated session never starts it through WMI, where it would keep an administrator’s token',
+      'log on to the machine and stay logged on (its logon task then runs puddled without ' +
+        'elevation), or connect as a standard user',
+    );
+  }
   return new CliError(
     'session_bound',
     'puddled cannot outlive this SSH session: neither Task Scheduler nor WMI could start it',

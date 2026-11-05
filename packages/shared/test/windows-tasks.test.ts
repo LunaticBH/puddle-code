@@ -10,6 +10,7 @@ import {
   startWindowsTask,
   unregisterWindowsTask,
   WINDOWS_TASK_SCRIPTS,
+  windowsProcessElevated,
   windowsTaskState,
   windowsTaskXml,
   type PowerShellRunner,
@@ -170,6 +171,19 @@ describe('Task Scheduler through PowerShell', () => {
     expect(call!.script).toContain('-Xml $env:PUDDLE_TASK_XML -Force');
   });
 
+  it('asks PowerShell whether this process runs elevated, and assumes not when it cannot tell', async () => {
+    const { runner, calls } = fakePowerShell(() => ({ elevated: true, error: '' }));
+    expect(await windowsProcessElevated({ powershell: runner })).toBe(true);
+    expect(calls[0]!.script).toContain(
+      'IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)',
+    );
+    expect(calls[0]!.script).toContain('EnableLUA');
+    const { runner: unknown } = fakePowerShell(() => ({ ran: false }));
+    expect(await windowsProcessElevated({ powershell: unknown })).toBe(false);
+    const blocked: PowerShellRunner = async () => ({ code: 1, stdout: '', stderr: 'blocked' });
+    expect(await windowsProcessElevated({ powershell: blocked })).toBe(false);
+  });
+
   it('reports a refused registration with PowerShell’s reason', async () => {
     const { runner } = fakePowerShell(() => ({
       registered: false,
@@ -300,6 +314,11 @@ describe.runIf(process.platform === 'win32')('on this Windows machine', () => {
     expect(await startWindowsTask(absent)).toEqual({ ran: false, state: 'absent' });
     expect(await unregisterWindowsTask(absent)).toBe(false);
   }, 120_000);
+
+  it('tells whether this process runs elevated, changing nothing', async () => {
+    const result = await runWindowsPowerShell(WINDOWS_TASK_SCRIPTS.elevation, {}, 60_000);
+    expect(JSON.parse(result.stdout.trim())).toEqual({ elevated: expect.any(Boolean), error: '' });
+  }, 70_000);
 
   it('builds XML that Task Scheduler accepts, without registering it', async () => {
     const name = `Puddle validate ${randomBytes(6).toString('hex')}`;

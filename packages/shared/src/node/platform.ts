@@ -53,6 +53,7 @@ export {
   runWindowsPowerShell,
   startWindowsTask,
   unregisterWindowsTask,
+  windowsProcessElevated,
   windowsTaskState,
   windowsTaskXml,
   type PowerShellResult,
