@@ -59,6 +59,10 @@ function fakeSsh(
 }
 
 const opOf = (script: string) => /@\(\$helper, '([a-z-]+)'/.exec(script)?.[1];
+const requestOf = (script: string, op: string) =>
+  JSON.parse(
+    Buffer.from(new RegExp(`'${op}', '([A-Za-z0-9+/=]+)'`).exec(script)![1]!, 'base64').toString(),
+  ) as unknown;
 
 describe('a Windows SSH host’s client', () => {
   it('stages the helper once per transport and restages one that %TEMP% clean-up removed', async () => {
@@ -128,6 +132,16 @@ describe('a Windows SSH host’s client', () => {
         fakeSsh(() => ({ code: 0 }), { current, node: 'x64', arch: 'arm64' }).ssh,
       ).installedVersion(),
     ).toBeNull();
+  });
+
+  it('stops an attached lease’s daemon by its pid only', async () => {
+    const { ssh, sent } = fakeSsh(() => ({
+      code: 0,
+      lines: [{ t: 'result', value: 'stopped' }],
+    }));
+    expect(await new RemoteWindowsHost(ssh).stopDaemon(4242)).toBe('stopped');
+    const stop = sent.find((s) => opOf(s.script) === 'stop-daemon')!;
+    expect(requestOf(stop.script, 'stop-daemon')).toEqual({ pid: 4242 });
   });
 
   it('installs with a copy of the installed runtime, naming the release and its repository', async () => {

@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import type { Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,6 +14,7 @@ import {
   isHomeSupervisor,
   requestDaemonShutdown,
   stopWindowsDaemon,
+  stopWindowsDaemonPid,
   stopWindowsSupervisor,
   windowsRuntime,
 } from '../../src/lib/installation/windows-daemon.js';
@@ -350,4 +351,93 @@ describe('the detached Windows supervisor', () => {
     },
     30_000,
   );
+});
+
+describe('stopping the daemon an SSH-attached lease started', () => {
+  /** A live process standing for the lease's daemon, and the process table naming it as one. */
+  async function leaseDaemon(home: string) {
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], {
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    await new Promise((resolve) => child.once('spawn', resolve));
+    // The command line names the home as the daemon's runtime resolves it.
+    const entry = windowsRuntime(realpathSync.native(home), '1.0.0').entry;
+    const list = async () => [process_(child.pid!, `"node.exe" "${entry}"`)];
+    return { child, pid: child.pid!, list };
+  }
+
+  /** The home's supervisor pipe, which a lease's stop must never ask anything. */
+  async function supervisorPipe(home: string) {
+    const asked: string[] = [];
+    servers.push(
+      await listenPrivate(ipcPath(home, 'supervisor'), (socket) => {
+        socket.on('error', () => {});
+        socket.on('data', (request: Buffer) => asked.push(request.toString()));
+      }),
+    );
+    return asked;
+  }
+
+  it('asks only the pid runtime.json names to shut down, never the home’s supervisor', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'puddle-windows-lease-'));
+    const daemon = await leaseDaemon(home);
+    try {
+      writeFileSync(join(home, 'runtime.json'), JSON.stringify({ pid: daemon.pid, port: 1 }));
+      writeFileSync(join(home, 'puddled.pid'), `${daemon.pid}\n`);
+      const asked = await supervisorPipe(home);
+      // The daemon accepts the shutdown and exits.
+      await control(home, { t: 'shutting_down' }, () => daemon.child.kill());
+      await expect(
+        stopWindowsDaemonPid(home, daemon.pid, { list: daemon.list, graceMs: 10_000 }),
+      ).resolves.toBe('stopped');
+      expect(isPidAlive(daemon.pid, process.platform)).toBe(false);
+      expect(existsSync(join(home, 'puddled.pid'))).toBe(false);
+      expect(asked).toEqual([]);
+    } finally {
+      daemon.child.kill();
+    }
+  });
+
+  it('touches nothing once the home names another daemon, started meanwhile', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'puddle-windows-lease-'));
+    const daemon = await leaseDaemon(home);
+    try {
+      // The logon task or another launcher started the daemon that serves the home now.
+      writeFileSync(join(home, 'runtime.json'), JSON.stringify({ pid: daemon.pid + 1, port: 1 }));
+      writeFileSync(join(home, 'puddled.pid'), `${daemon.pid + 1}\n`);
+      const asked = await supervisorPipe(home);
+      let requests = 0;
+      await control(home, { t: 'shutting_down' }, () => requests++);
+      await expect(stopWindowsDaemonPid(home, daemon.pid, { list: daemon.list })).resolves.toBe(
+        'named',
+      );
+      expect(requests).toBe(0);
+      expect(asked).toEqual([]);
+      expect(existsSync(join(home, 'puddled.pid'))).toBe(true);
+      expect(isPidAlive(daemon.pid, process.platform)).toBe(true);
+    } finally {
+      daemon.child.kill();
+    }
+  });
+
+  it('never stops a pid the home names that is no daemon of the home', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'puddle-windows-lease-'));
+    const daemon = await leaseDaemon(home);
+    try {
+      // A stale record whose pid now belongs to another program.
+      writeFileSync(join(home, 'runtime.json'), JSON.stringify({ pid: daemon.pid, port: 1 }));
+      let requests = 0;
+      await control(home, { t: 'shutting_down' }, () => requests++);
+      await expect(
+        stopWindowsDaemonPid(home, daemon.pid, {
+          list: async () => [process_(daemon.pid, 'node C:\\elsewhere\\puddled.mjs')],
+        }),
+      ).resolves.toBe('gone');
+      expect(requests).toBe(0);
+      expect(isPidAlive(daemon.pid, process.platform)).toBe(true);
+    } finally {
+      daemon.child.kill();
+    }
+  });
 });

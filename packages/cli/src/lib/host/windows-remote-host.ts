@@ -326,8 +326,13 @@ export class RemoteWindowsHost implements WindowsHostOps {
     };
   }
 
-  async stop(logger?: Logger): Promise<void> {
-    await this.run('stop', {}, { ...(logger ? { logger } : {}), timeoutMs: 2 * 60_000 });
+  /**
+   * Stop the daemon `pid` only, while the home still names it (runtime.json
+   * or puddled.pid): an attached lease's own daemon, never the home's
+   * supervisor or a daemon started meanwhile by its task or another launcher.
+   */
+  async stopDaemon(pid: number, logger?: Logger): Promise<unknown> {
+    return this.run('stop-daemon', { pid }, { ...(logger ? { logger } : {}), timeoutMs: 60_000 });
   }
 
   async sweep(): Promise<string[]> {

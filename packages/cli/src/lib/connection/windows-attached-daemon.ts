@@ -14,13 +14,15 @@ const START_TIMEOUT_MS = 60_000;
  * of a host where neither Task Scheduler nor WMI can start a daemon that
  * outlives the session (`session_bound`), since Windows OpenSSH ends every
  * process of a session with it. The host helper runs the installed runtime
- * as its own child; the cockpit stops it with the daemon's `shutdown`
- * request before it closes the channel, and the session's job ends whatever
- * is left. Durable state stays in the home, as under the supervisor.
+ * as its own child; the cockpit stops exactly that pid with the daemon's
+ * `shutdown` request before it closes the channel, as the POSIX lease
+ * signals only the pid it captured, and the session's job ends whatever is
+ * left. Durable state stays in the home, as under the supervisor.
  */
 export class WindowsAttachedDaemon implements DaemonLease {
   private command: RunningSshCommand | null = null;
   private commandExited = true;
+  private pid: number | null = null;
   private port: number | undefined;
 
   constructor(
@@ -42,19 +44,24 @@ export class WindowsAttachedDaemon implements DaemonLease {
 
   async stop(): Promise<void> {
     const command = this.command;
-    if (command === null) return;
+    const pid = this.pid;
+    const running = !this.commandExited;
+    this.clear();
+    // Its daemon has exited already: whatever runs in the home now is not this lease's.
+    if (command === null || !running) return;
     // Graceful first, as SIGTERM is on POSIX: live rows are frozen for boot
-    // reconciliation and runtime.json goes before the channel closes.
-    await remoteWindowsHost(this.ssh)
-      .stop()
-      .catch(() => {});
+    // reconciliation and runtime.json goes before the channel closes. The
+    // host stops only this pid, and only while the home still names it.
+    if (pid !== null) {
+      await remoteWindowsHost(this.ssh)
+        .stopDaemon(pid)
+        .catch(() => {});
+    }
     const exited = await Promise.race([
       command.result.then(() => true),
       sleep(5000).then(() => false),
     ]);
     if (!exited) command.terminate();
-    this.command = null;
-    this.commandExited = true;
   }
 
   private async launchAndWait(
@@ -63,8 +70,12 @@ export class WindowsAttachedDaemon implements DaemonLease {
     const { command, pid } = await remoteWindowsHost(this.ssh).attached(preferredPort);
     this.command = command;
     this.commandExited = false;
+    this.pid = null;
     void command.result.then(() => {
-      if (this.command === command) this.commandExited = true;
+      if (this.command === command) {
+        this.commandExited = true;
+        this.pid = null;
+      }
     });
     const waiting = new AbortController();
     let outcome:
@@ -106,6 +117,7 @@ export class WindowsAttachedDaemon implements DaemonLease {
         'close the other cockpit or wait for its daemon to stop, then launch again',
       );
     }
+    if (this.command === command && !this.commandExited) this.pid = claimed;
     return outcome.started;
   }
 
@@ -123,5 +135,6 @@ export class WindowsAttachedDaemon implements DaemonLease {
   private clear(): void {
     this.command = null;
     this.commandExited = true;
+    this.pid = null;
   }
 }

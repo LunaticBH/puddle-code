@@ -26,7 +26,7 @@ import {
   windowsConnectorInstalled,
   windowsConnectorPaths,
 } from '../installation/windows-connector.js';
-import { stopWindowsDaemon, windowsRuntime } from '../installation/windows-daemon.js';
+import { stopWindowsDaemonPid, windowsRuntime } from '../installation/windows-daemon.js';
 import { installWindowsDaemon, windowsInstalledVersion } from '../installation/windows-install.js';
 import { removeWindowsDaemon, sweepWindowsWorktrees } from '../installation/windows-remove.js';
 import { CliError, type Logger } from '../types.js';
@@ -164,10 +164,15 @@ export async function runWindowsHostOp(
         emit({ t: 'result' });
         return 0;
       }
-      case 'stop':
-        await stopWindowsDaemon(home, { logger });
-        emit({ t: 'result' });
+      case 'stop-daemon': {
+        // The attached lease's own daemon: never the home's supervisor, nor another daemon.
+        const pid = body.pid;
+        if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) {
+          throw new CliError('bad_arguments', 'stop-daemon needs a pid');
+        }
+        emit({ t: 'result', value: await stopWindowsDaemonPid(home, pid, { logger }) });
         return 0;
+      }
       case 'sweep':
         emit({ t: 'result', value: await sweepWindowsWorktrees(home) });
         return 0;

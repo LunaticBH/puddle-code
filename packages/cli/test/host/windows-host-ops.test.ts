@@ -134,6 +134,22 @@ describe('the host helper’s other operations', () => {
     expect(install.lines()[0]).toMatchObject({ t: 'error', code: 'bad_arguments' });
   });
 
+  it('stops only a daemon pid the home names, and nothing for a malformed one', async () => {
+    const at = home();
+    const stop = io();
+    await runWindowsHostOp('stop-daemon', { pid: 4242 }, { home: at, ...stop });
+    expect(stop.lines()).toEqual([{ t: 'result', value: 'named' }]);
+    for (const pid of [undefined, 0, -1, 1.5, '4242']) {
+      const bad = io();
+      await expect(runWindowsHostOp('stop-daemon', { pid }, { home: at, ...bad })).resolves.toBe(1);
+      expect(bad.lines()[0]).toMatchObject({ t: 'error', code: 'bad_arguments' });
+    }
+    // The home's whole stop is no client's to ask for.
+    const whole = io();
+    await runWindowsHostOp('stop', {}, { home: at, ...whole });
+    expect(whole.lines()[0]).toMatchObject({ t: 'error', code: 'bad_arguments' });
+  });
+
   it('runs only the connector modes a client may ask for', async () => {
     const connector = io();
     await runWindowsHostOp(
