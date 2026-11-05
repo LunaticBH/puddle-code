@@ -51,6 +51,7 @@ describe('the ConPTY roots record', () => {
   });
 
   it('bounds a root’s creation to just after its spawn', () => {
-    expect(conptyRootBounds(roots[0]!)).toEqual({ startedAtMs: 1000, createdBeforeMs: 11_010 });
+    // node-pty creates it inside pty.spawn: a second covers any clock rounding.
+    expect(conptyRootBounds(roots[0]!)).toEqual({ startedAtMs: 1000, createdBeforeMs: 2010 });
   });
 });

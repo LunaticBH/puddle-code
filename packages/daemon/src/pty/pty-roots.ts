@@ -32,11 +32,11 @@ export function ptyRootsFile(home: string): string {
 }
 
 /**
- * node-pty creates the root once the pseudoconsole's pipes connect, shortly
- * after `pty.spawn` returns; a holder of its pid created more than this
- * later is another process.
+ * node-pty creates the root inside `pty.spawn` (CreateProcessW runs before it
+ * returns); a holder of its pid created more than this later, clock rounding
+ * allowed for, is another process.
  */
-const ROOT_START_MS = 10_000;
+const ROOT_START_MS = 1000;
 
 /** What the process table may take for this PTY's root while it may still run. */
 export function conptyRootBounds(root: Pick<PtyRootRecord, 'startedAtMs' | 'spawnedAtMs'>): {

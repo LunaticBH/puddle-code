@@ -59,6 +59,23 @@ describe('reapWindowsDaemon', () => {
     expect(existsSync(rootsFile)).toBe(false);
   });
 
+  it('leaves a process naming a root’s pid created after the root must have exited', async () => {
+    const rootsFile = ptyRootsFile(mkdtempSync(join(tmpdir(), 'puddle-reap-')));
+    writePtyRoots(rootsFile, 100, [{ pid: 10, startedAtMs: 2000, spawnedAtMs: 2010 }]);
+    const w = world([
+      entry(11, 10, 2100), // the root's orphan
+      // Long after the daemon (and with it the root's console) went, a
+      // short-lived process took pid 10, started this, and exited too.
+      entry(16, 10, 20_000),
+    ]);
+    await reapWindowsDaemon(daemon, 5000, {
+      processes: w.processes,
+      rootsFile,
+      terminate: w.terminate,
+    });
+    expect(w.terminated).toEqual([11]);
+  });
+
   it('leaves another daemon’s record alone', async () => {
     const rootsFile = ptyRootsFile(mkdtempSync(join(tmpdir(), 'puddle-reap-')));
     writePtyRoots(rootsFile, 200, [{ pid: 10, startedAtMs: 2000, spawnedAtMs: 2010 }]);
