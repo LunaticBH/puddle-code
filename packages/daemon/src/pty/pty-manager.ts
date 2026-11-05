@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import pty from 'node-pty';
 import type { LogStore } from '../logs/log-store.js';
-import { guardConsoleListKill, onRootExit } from './conpty-console-list.js';
+import { guardConsoleListKill, hangUpConsole, onRootExit } from './conpty-console-list.js';
 import {
   noteConptySpawn,
   sharedConptyJobs,
@@ -461,9 +461,11 @@ export class PtyManager extends EventEmitter {
    * a stop closed first has its grace: Windows asks what is attached to it
    * to exit, and the host goes once they have. One a stop left open for a
    * GUI programme attached to it has none: nothing but its close could ask
-   * the rest to exit. Without the helper, only the root can be told apart,
-   * and only while node-pty has not seen it exit; what else its console
-   * held ends when the daemon does, its consoles closing with it.
+   * the rest to exit. Without the helper, when it does not answer, or when
+   * it never told the console host apart, a console nobody closed is hung
+   * up (hangUpConsole), which ends what is attached as a close does; only
+   * the root can be told apart then, and only while node-pty has not seen
+   * it exit, and the console host stays until the daemon exits.
    */
   private async conptyTeardown(live: Live): Promise<void> {
     const state = live.conpty!;
@@ -475,15 +477,21 @@ export class PtyManager extends EventEmitter {
       }
       // A root that outstayed its grace goes first, whatever the helper does.
       this.endRoot(live);
+      let answered = false;
       if (held) {
-        await endConsole(live.proc.pid, held, {
+        ({ answered } = await endConsole(live.proc.pid, held, {
           root: true,
           host: true,
           // Its own list only while it is open (no stop closes it once the
           // teardown has begun): a close would end the helper attached to it.
           attach: !state.closed,
-        });
+        }));
       }
+      // Nothing named what is attached (no helper, no answer, or no host told
+      // apart, its root gone): hang the console up, unless that would end a
+      // GUI programme attached to it.
+      const told = held !== null && held.host !== null && answered;
+      if (!told && !state.closed && !state.spareGui) hangUpConsole(live.proc);
     } finally {
       state.released = true;
       // (A hold that came after the teardown gave up waiting for it, too.)

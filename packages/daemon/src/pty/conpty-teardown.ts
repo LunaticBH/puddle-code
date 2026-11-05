@@ -102,30 +102,32 @@ export interface EndConsoleOptions {
 /**
  * Ends what `console` holds attached to the PTY's console, reading it again
  * for processes started in between, at most twice more; then its console
- * host. Resolves with how many processes it ended; never rejects.
+ * host. Resolves with how many processes it ended, and whether the helper
+ * answered every scan (when it did not, what is attached is not known to
+ * have ended); never rejects.
  */
 export async function endConsole(
   root: number,
   console: ConptyConsole,
   options: EndConsoleOptions,
-): Promise<number> {
+): Promise<{ ended: number; answered: boolean }> {
   const held: HeldRoot = { pid: root, console };
   let ended = 0;
   // Without a known host only the console's own list names its processes.
   const attach = options.attach && console.host === null;
   for (let round = 0; round < 3; round++) {
     const scan = await console.scan({ attach: round === 0 ? options.attach : attach });
-    if (!scan) return ended;
+    if (!scan) return { ended, answered: false };
     const targets = consoleTargets(scan, held, { root: options.root });
     if (targets.length === 0) {
       if (options.host && scan.hostAlive) ended += await console.terminate(['host']);
-      return ended;
+      return { ended, answered: true };
     }
     ended += await console.terminate(targets);
   }
   // Something keeps starting processes in it: its host goes regardless.
   if (options.host) ended += await console.terminate(['host']);
-  return ended;
+  return { ended, answered: true };
 }
 
 /**

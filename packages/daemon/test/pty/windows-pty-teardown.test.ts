@@ -201,16 +201,19 @@ describe.skipIf(process.platform !== 'win32')(
       });
     }
 
-    it('without the helper, a root’s own exit is reported at once, leaving its console as it is', async () => {
+    it('without the helper, a root’s own exit hangs its console up, ending what is attached', async () => {
       const { ptys, output } = await manager({ jobs: null });
       const { attached, left } = await spawnTree(ptys, output, { orphans: true });
+      // Nothing tells its console host apart: it stays until the daemon exits.
+      const processes = attached.filter((p) => p.name.toLowerCase() !== 'conhost.exe');
+      strays.push(...attached.filter((p) => !processes.includes(p)));
       const exit = exitObserved(ptys, [], left);
       end(ptys, 's', 'exit');
       const { ms, outlived } = await exit;
       expect(ms).toBeLessThan(5000);
+      // CTRL_CLOSE_EVENT, as a close sends: the processes' handlers have 5 s.
+      expect(await survivors(processes, 6000)).toEqual([]);
       expect(outlived).toHaveLength(left.length);
-      // Nothing tells what is still attached apart: it ends with the daemon's consoles.
-      strays.push(...attached);
     });
 
     /**
@@ -416,7 +419,7 @@ describe.skipIf(process.platform !== 'win32')(
         ptys.spawn('w', 'agent', process.execPath, writer(dir), { cwd: dir });
         const after = Date.now();
         await waitUntil(() => output().includes('READY'), 20_000, 'READY');
-        // Without the helper its console host stays, with the writer, until the daemon goes.
+        // Without the helper its console host stays until the daemon goes.
         if (jobs === null) strays.push(...(await conptyHosts(before, after)));
         let writers: WindowsProcess[] = [];
         await waitUntil(
@@ -425,13 +428,13 @@ describe.skipIf(process.platform !== 'win32')(
           20_000,
           'the writer',
         );
-        const exit = exitObserved(ptys, jobs === null ? [] : writers, []);
+        const exit = exitObserved(ptys, [], []);
         // (A line: the console is not in raw mode.)
         ptys.write('w', 'agent', 'x\r');
-        const { ms, stayed } = await exit;
+        const { ms } = await exit;
         expect(ms).toBeLessThan(jobs === null ? 6500 : 3000);
-        expect(stayed).toEqual([]);
-        if (jobs === null) strays.push(...writers);
+        // Without the helper, the hang-up's CTRL_CLOSE_EVENT ends the writer.
+        expect(await survivors(writers, 6000)).toEqual([]);
       });
     }
 

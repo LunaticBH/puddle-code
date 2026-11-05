@@ -138,7 +138,10 @@ function holding(scans: (ConsoleScan | null)[], host: ConptyConsole['host'] = he
 describe('endConsole', () => {
   it('ends what is attached, reads the console again, then ends its host', async () => {
     const c = holding([scan([member(11, 200), member(12, 300)], false), scan([], false)]);
-    expect(await endConsole(ROOT, c.hold, { root: true, host: true, attach: true })).toBe(3);
+    expect(await endConsole(ROOT, c.hold, { root: true, host: true, attach: true })).toEqual({
+      ended: 3,
+      answered: true,
+    });
     expect(c.terminated).toEqual([['11@200', '12@300'], ['host']]);
     // The console's own list once; then each process's console host.
     expect(c.asked).toEqual(['scan+list', 'scan']);
@@ -157,7 +160,10 @@ describe('endConsole', () => {
 
   it('ends no host that has gone, and leaves the host when asked to', async () => {
     const gone = holding([scan([], false, false)]);
-    expect(await endConsole(ROOT, gone.hold, { root: true, host: true, attach: false })).toBe(0);
+    expect(await endConsole(ROOT, gone.hold, { root: true, host: true, attach: false })).toEqual({
+      ended: 0,
+      answered: true,
+    });
     expect(gone.terminated).toEqual([]);
     const kept = holding([scan([member(11, 200)]), scan([])]);
     await endConsole(ROOT, kept.hold, { root: false, host: false, attach: false });
@@ -179,9 +185,12 @@ describe('endConsole', () => {
     expect(terminated).toEqual([['200@200'], ['201@201'], ['202@202'], ['host']]);
   });
 
-  it('ends nothing when the helper does not answer', async () => {
+  it('ends nothing when the helper does not answer, and says so', async () => {
     const c = holding([null]);
-    expect(await endConsole(ROOT, c.hold, { root: true, host: true, attach: true })).toBe(0);
+    expect(await endConsole(ROOT, c.hold, { root: true, host: true, attach: true })).toEqual({
+      ended: 0,
+      answered: false,
+    });
     expect(c.terminated).toEqual([]);
   });
 

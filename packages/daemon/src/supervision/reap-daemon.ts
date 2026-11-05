@@ -81,7 +81,8 @@ export async function reapWindowsDaemon(
       if (!held) continue;
       try {
         // Never attached to: it is closing, and its close would end the helper.
-        count += await endConsole(root.pid, held, { root: true, host: true, attach: false });
+        count += (await endConsole(root.pid, held, { root: true, host: true, attach: false }))
+          .ended;
       } finally {
         held.release();
       }

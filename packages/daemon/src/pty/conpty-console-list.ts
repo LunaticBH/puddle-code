@@ -46,3 +46,21 @@ export function onRootExit(proc: unknown, onExit: (exitCode: number) => void): b
 interface RootExitAgent {
   _$onProcessExit(exitCode: number): void;
 }
+
+/**
+ * Hangs the console up once its root has exited, when nothing else can:
+ * node-pty forgets its pseudoconsole when the root exits, so it can no
+ * longer close it, but ending the console's input (the pipe it writes the
+ * terminal's keys to) makes the console host send every process still
+ * attached CTRL_CLOSE_EVENT, as its close does, ending them once their
+ * handlers return. The host itself stays until this process exits. What is
+ * written to the PTY afterwards goes nowhere. Returns whether it could
+ * (node-pty 1.1's internals, guarded).
+ */
+export function hangUpConsole(proc: unknown): boolean {
+  const input = (proc as { _agent?: { _inSocket?: unknown } } | null)?._agent?._inSocket as
+    { destroy?: () => void; destroyed?: boolean } | undefined;
+  if (!input || typeof input.destroy !== 'function') return false;
+  if (!input.destroyed) input.destroy();
+  return true;
+}
