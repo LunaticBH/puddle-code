@@ -154,12 +154,6 @@ jobs:
           }
           Add-Content -LiteralPath $env:GITHUB_ENV -Value "PUDDLE_WINDOWS_SIGNING=$mode"
           Write-Output "Authenticode signing: $mode"
-      - uses: azure/login@v2
-        if: env.PUDDLE_WINDOWS_SIGNING == 'azure'
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
@@ -176,11 +170,39 @@ jobs:
       - run: node scripts/install-ci.mjs
         env:
           ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      # Each step that signs logs in to Azure just before it and caches the
+      # codesigning token at once: azure/login exchanges a GitHub ID token that
+      # expires within minutes and Azure CLI cannot renew, while a step builds
+      # for minutes before its first signature. Invoke-TrustedSigning then
+      # reads the cached token, valid for about an hour, through
+      # AzureCliCredential.
+      - uses: azure/login@v2
+        if: env.PUDDLE_WINDOWS_SIGNING == 'azure'
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: cache the Trusted Signing token
+        if: env.PUDDLE_WINDOWS_SIGNING == 'azure'
+        run: |
+          az account get-access-token --resource https://codesigning.azure.net --output none
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: build the daemon zip
         env:
           WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
           WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
         run: node scripts/build-tarball.mjs --version ($env:GITHUB_REF_NAME -replace '^v', '') --arch ${{ matrix.arch }}
+      - uses: azure/login@v2
+        if: env.PUDDLE_WINDOWS_SIGNING == 'azure'
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: cache the Trusted Signing token
+        if: env.PUDDLE_WINDOWS_SIGNING == 'azure'
+        run: |
+          az account get-access-token --resource https://codesigning.azure.net --output none
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: build standalone CLI archive
         env:
           PUDDLE_REPO_SLUG: ${{ github.repository }}
@@ -372,12 +394,6 @@ jobs:
           }
           Add-Content -LiteralPath $env:GITHUB_ENV -Value "PUDDLE_WINDOWS_SIGNING=$mode"
           Write-Output "Authenticode signing: $mode"
-      - uses: azure/login@v2
-        if: env.PUDDLE_WINDOWS_SIGNING == 'azure'
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
@@ -397,6 +413,19 @@ jobs:
       - run: pnpm build
         env:
           PUDDLE_REPO_SLUG: ${{ github.repository }}
+      # As in tarball-windows: log in just before signing and cache the
+      # codesigning token while the GitHub ID token is still valid.
+      - uses: azure/login@v2
+        if: env.PUDDLE_WINDOWS_SIGNING == 'azure'
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: cache the Trusted Signing token
+        if: env.PUDDLE_WINDOWS_SIGNING == 'azure'
+        run: |
+          az account get-access-token --resource https://codesigning.azure.net --output none
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: package
         working-directory: packages/desktop
         env:

@@ -8,7 +8,10 @@
 //   azure        Azure Trusted Signing through Invoke-TrustedSigning, using
 //                the Azure CLI login of azure/login (OIDC) and
 //                AZURE_SIGNING_ENDPOINT, AZURE_SIGNING_ACCOUNT and
-//                AZURE_SIGNING_PROFILE
+//                AZURE_SIGNING_PROFILE. Its AzureCliCredential cannot renew
+//                the federated GitHub token, so the release workflow logs in
+//                and caches the codesigning token just before each step that
+//                signs.
 //   none/unset   nothing is signed: the archive is exactly what an unsigned
 //                build always was
 //
@@ -25,9 +28,9 @@ import { join } from 'node:path';
 
 /**
  * Windows PowerShell 5.1 script; the root and the secrets arrive through the
- * environment, never PowerShell's command line (signtool takes the PFX
- * password as electron-builder passes it, with /p). No backtick or
- * dollar-brace may appear in it: this is a JavaScript template literal.
+ * environment, never a command line: signtool receives a re-encrypted copy
+ * of the PFX and its one-time password. No backtick or dollar-brace may
+ * appear in it: this is a JavaScript template literal.
  */
 export const SIGN_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
@@ -61,21 +64,35 @@ if ($unsigned.Count -gt 0 -and $env:PUDDLE_WINDOWS_SIGNING -eq 'certificate') {
     if (-not $signtool) { throw 'signtool.exe not found: install the Windows SDK or set SIGNTOOL_PATH' }
   }
   $pfx = Join-Path ([IO.Path]::GetTempPath()) ('puddle-sign-' + [Guid]::NewGuid().ToString('N') + '.pfx')
-  $bytes = if ($env:WIN_CSC_LINK.Length -lt 1024 -and (Test-Path -LiteralPath $env:WIN_CSC_LINK -PathType Leaf)) {
+  [byte[]]$bytes = if ($env:WIN_CSC_LINK.Length -lt 1024 -and (Test-Path -LiteralPath $env:WIN_CSC_LINK -PathType Leaf)) {
     [IO.File]::ReadAllBytes($env:WIN_CSC_LINK)
   } else {
     [Convert]::FromBase64String($env:WIN_CSC_LINK)
   }
-  [IO.File]::WriteAllBytes($pfx, $bytes)
+  $options = @('sign', '/fd', 'SHA256', '/td', 'SHA256', '/tr', $env:PUDDLE_TIMESTAMP_URL, '/f', $pfx)
+  $certificates = New-Object Security.Cryptography.X509Certificates.X509Certificate2Collection
   try {
-    $options = @('sign', '/fd', 'SHA256', '/td', 'SHA256', '/tr', $env:PUDDLE_TIMESTAMP_URL, '/f', $pfx)
-    if ($env:WIN_CSC_KEY_PASSWORD) { $options += @('/p', $env:WIN_CSC_KEY_PASSWORD) }
+    if ($env:WIN_CSC_KEY_PASSWORD) {
+      # The password never reaches a command line: Windows PowerShell 5.1
+      # passes native arguments without escaping a quote or a trailing
+      # backslash. .NET opens the PFX with it, and signtool receives a copy
+      # under a one-time hexadecimal password, deleted with the copy.
+      $certificates.Import($bytes, $env:WIN_CSC_KEY_PASSWORD, [Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable)
+      $random = New-Object byte[] 24
+      [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($random)
+      $password = [BitConverter]::ToString($random).Replace('-', '')
+      $bytes = $certificates.Export([Security.Cryptography.X509Certificates.X509ContentType]::Pkcs12, $password)
+      $options += @('/p', $password)
+    }
+    [IO.File]::WriteAllBytes($pfx, $bytes)
     foreach ($batch in $batches) {
       & $signtool @options @batch 2>&1 | ForEach-Object { [string]$_ }
       if ($LASTEXITCODE -ne 0) { throw "signtool exited with $LASTEXITCODE" }
     }
   } finally {
     Remove-Item -LiteralPath $pfx -Force -ErrorAction SilentlyContinue
+    # Deletes the temporary key containers the import created.
+    foreach ($certificate in $certificates) { $certificate.Reset() }
   }
 } elseif ($unsigned.Count -gt 0) {
   # As electron-builder installs it for the desktop installer.
