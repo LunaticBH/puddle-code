@@ -8,7 +8,11 @@ import {
   notebookIntelligenceResponseSchema,
   notebookWidgetMessageSchema,
 } from '@puddle/shared';
-import { killProcessTree } from '@puddle/shared/node/platform';
+import {
+  childProcessTree,
+  killProcessTree,
+  type ChildProcessTree,
+} from '@puddle/shared/node/platform';
 import { NOTEBOOK_BRIDGE } from './bridge.js';
 import { pythonEnvironment } from './python-env.js';
 
@@ -45,6 +49,11 @@ export class KernelBridge {
   readonly child: ChildProcessWithoutNullStreams;
   closed = false;
   private pid: number | null = null;
+  /** When the bridge was started, and when it named its kernel (this process's clock). */
+  private readonly startedAtMs: number;
+  private kernelNamedAtMs = 0;
+  /** What identifies the bridge's process tree on Windows. */
+  private readonly tree: ChildProcessTree;
   private sequence = 0;
   private buffer = '';
   private readonly decoder = new StringDecoder('utf8');
@@ -66,11 +75,13 @@ export class KernelBridge {
     exactPython = false,
   ) {
     const env = pythonEnvironment(python);
+    this.startedAtMs = Date.now();
     this.child = spawn(
       python,
       ['-u', '-c', NOTEBOOK_BRIDGE, ...(exactPython ? ['--puddle-python'] : [])],
       { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, ...(env ? { env } : {}) },
     );
+    this.tree = childProcessTree(this.child, this.startedAtMs);
     const child = this.child;
     this.ready = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -95,7 +106,10 @@ export class KernelBridge {
               clearTimeout(timer);
               resolve(message.kernels ?? []);
             }
-            if (message.event === 'spawned' && message.pid) this.pid = message.pid;
+            if (message.event === 'spawned' && message.pid) {
+              this.pid = message.pid;
+              this.kernelNamedAtMs = Date.now();
+            }
             if (message.event === 'stopped' || message.event === 'dead') this.pid = null;
             onMessage?.(message);
             if (message.id !== undefined) {
@@ -164,7 +178,7 @@ export class KernelBridge {
         this.killKernel();
         if (process.platform === 'win32' && this.child.pid !== undefined) {
           // The bridge's tree, which includes any kernel it still owns.
-          void killProcessTree(this.child.pid);
+          void this.tree.kill();
         } else this.child.kill('SIGKILL');
       }, 3000);
       this.child.once('exit', () => {
@@ -179,8 +193,18 @@ export class KernelBridge {
   private killKernel(): void {
     if (!this.pid) return;
     if (process.platform === 'win32') {
-      // No process groups: stop the kernel and anything it started as a tree.
-      void killProcessTree(this.pid);
+      // No process groups: stop the kernel and what it started as the
+      // process table shows its tree (never a GUI programme, nor what one
+      // started, but console processes it started detached as well). The
+      // kernel is the bridge's child, created before the bridge named it:
+      // a later holder of its pid is another process.
+      void killProcessTree(this.pid, {
+        root: {
+          startedAtMs: this.startedAtMs,
+          createdBeforeMs: this.kernelNamedAtMs,
+          ...(this.child.pid !== undefined ? { parentPid: this.child.pid } : {}),
+        },
+      });
       this.pid = null;
       return;
     }

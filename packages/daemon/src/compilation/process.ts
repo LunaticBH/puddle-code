@@ -6,9 +6,10 @@ import {
 } from 'node:child_process';
 import { win32 } from 'node:path';
 import {
-  killProcessTree,
+  childProcessTree,
   resolveSpawn,
   restoreCurrentDirectorySearch,
+  type ChildProcessTree,
 } from '@puddle/shared/node/platform';
 import { withEnvironment } from './environment.js';
 
@@ -47,15 +48,16 @@ export class CompilationCommandError extends Error {
 
 type CompilationSpawnOptions = SpawnOptionsWithStdioTuple<StdioNull, StdioPipe, StdioPipe>;
 
-const liveCommands = new Set<ReturnType<typeof spawn>>();
+/** Each running command, with what identifies its process tree on Windows. */
+const liveCommands = new Map<ReturnType<typeof spawn>, ChildProcessTree>();
 
 /** Terminate compiler process groups when their owning daemon shuts down. */
 export function disposeCompilationCommands(): void {
   const commands = [...liveCommands];
-  for (const child of commands) terminateGroup(child, 'SIGTERM');
+  for (const [child, tree] of commands) terminateGroup(child, tree, 'SIGTERM');
   setTimeout(() => {
-    for (const child of commands) {
-      if (liveCommands.has(child)) terminateGroup(child, 'SIGKILL');
+    for (const [child, tree] of commands) {
+      if (liveCommands.has(child)) terminateGroup(child, tree, 'SIGKILL');
     }
   }, 1_000).unref();
 }
@@ -66,7 +68,7 @@ export function disposeCompilationCommands(): void {
  * process groups to signal: the command stays attached so that, with
  * `windowsHide`, it and every console grandchild share one hidden console
  * (a detached command's grandchildren would each open a visible window), and
- * cancellation stops the tree with taskkill. npm-style `.cmd` shims and other
+ * cancellation stops its tree (terminateGroup). npm-style `.cmd` shims and other
  * batch files are resolved first, since Node will not start them directly,
  * and a relative path such as `.\tools\build.exe` names a file in the
  * command's working directory, as on POSIX. Throws `UnsafeCmdArgumentError`
@@ -137,8 +139,10 @@ export const runCompilationCommand: CompilationCommandRunner = (command) =>
       );
       return;
     }
+    const startedAtMs = Date.now();
     const child = spawn(plan.file, plan.args, plan.options);
-    liveCommands.add(child);
+    const tree = childProcessTree(child, startedAtMs);
+    liveCommands.set(child, tree);
     let stdout = Buffer.alloc(0);
     let stderr = Buffer.alloc(0);
     let settled = false;
@@ -146,11 +150,11 @@ export const runCompilationCommand: CompilationCommandRunner = (command) =>
     let forced = false;
 
     const terminate = (): void => {
-      terminateGroup(child, 'SIGTERM');
+      terminateGroup(child, tree, 'SIGTERM');
       setTimeout(() => {
         if (exited || child.pid === undefined) return;
         forced = true;
-        terminateGroup(child, 'SIGKILL');
+        terminateGroup(child, tree, 'SIGKILL');
       }, 1_000).unref();
     };
 
@@ -218,15 +222,25 @@ export const runCompilationCommand: CompilationCommandRunner = (command) =>
     });
   });
 
+/**
+ * POSIX signals the command's process group. Windows has no groups to
+ * signal: it always forces the tree the process table shows, by
+ * creation-time-consistent links, and the command itself by its own handle
+ * (killProcessTree), but never a GUI programme the command started, nor
+ * what that started (docs/windows.md, decision 8). Unlike the group, the
+ * tree includes console processes the command started detached or in a
+ * console of their own (a server started with `start`, say): they end with
+ * it.
+ */
 function terminateGroup(
   child: ReturnType<typeof spawn>,
+  tree: ChildProcessTree,
   signal: NodeJS.Signals,
   platform: NodeJS.Platform = process.platform,
 ): void {
   if (child.pid === undefined) return;
   if (platform === 'win32') {
-    // Always forced: without /F, taskkill only asks GUI windows to close.
-    void killProcessTree(child.pid, { platform });
+    void tree.kill({ platform });
     return;
   }
   try {

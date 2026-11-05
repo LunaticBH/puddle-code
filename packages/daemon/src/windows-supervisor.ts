@@ -15,12 +15,12 @@ import { dirname, join, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ipcPath, ipcProof, listenPrivate } from '@puddle/shared/node';
 import {
+  childProcessTree,
   connectorPipeState,
   connectorSupervisedMarker,
   controlPipeState,
   daemonEnvironment,
   disableCurrentDirectorySearch,
-  killProcessTree,
   listWindowsProcesses,
   LOG_ROTATE_BYTES,
   openRotated,
@@ -102,6 +102,7 @@ function spawnChild(kind: 'puddled' | 'connector'): SupervisedChild {
     // bin\versions, as launchers identify a daemon) is this process's child.
     const startedAtMs = Date.now();
     const child = spawn(node, [script], { cwd: homedir(), windowsHide: true, stdio, env });
+    const tree = childProcessTree(child, startedAtMs);
     const pid = child.pid;
     if (pid === undefined) throw new Error(`${kind} could not be started`);
     const exited = new Promise<number | null>((resolve) => {
@@ -118,13 +119,17 @@ function spawnChild(kind: 'puddled' | 'connector'): SupervisedChild {
       },
       // The daemon alone: its consoles close with it, and the reap that
       // follows its exit ends what they left by the PTY rule (never a GUI
-      // programme or what left a console), which `taskkill /T` would not.
+      // programme or what left a console), which a tree kill would not.
+      // The connector with what it started, as stopping its POSIX unit ends
+      // the unit's control group: its own helpers, never a session's. By
+      // the process table's creation-time-consistent tree, the connector
+      // by its own handle, never a GUI programme or what one started.
       kill:
         kind === 'puddled'
           ? async () => {
               child.kill();
             }
-          : () => killProcessTree(pid, { platform: 'win32' }),
+          : () => tree.kill({ platform: 'win32' }),
     };
   } finally {
     closeSync(out);
