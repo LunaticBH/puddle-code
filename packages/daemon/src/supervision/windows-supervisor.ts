@@ -20,13 +20,18 @@ import {
  * supervisor stops the connector and exits 0 too, never lingering beside a
  * daemon it does not run (a launch would take it for the one starting its
  * daemon). Once that daemon exits, the next launch starts the task again.
- * The supervisor's own private pipe makes it single-instance per home and
- * takes `status`, `reconcile`, `restart_connector` and `shutdown`.
+ * Whenever its daemon exits, the supervisor stops whatever that daemon left
+ * running before it restarts one or exits itself, as systemd stops a unit's
+ * control group. The supervisor's own private pipe makes it single-instance
+ * per home and takes `status`, `reconcile`, `restart_connector` and
+ * `shutdown`.
  */
 
 /** A supervised process: the daemon or the connector. */
 export interface SupervisedChild {
   readonly pid: number;
+  /** The clock just before it was started. */
+  readonly startedAtMs?: number;
   /** The exit status; null for a process ended by a signal or that could not run. */
   readonly exited: Promise<number | null>;
   /** Ask the process to stop (the connector closes when its IPC channel does). */
@@ -49,6 +54,13 @@ export interface SupervisorDeps {
   /** Who holds the daemon's control pipe. */
   hostPipe(): Promise<ControlPipeState>;
   requestDaemonShutdown(): Promise<ShutdownOutcome>;
+  /**
+   * Stop whatever an exited daemon left running, resolving with how many
+   * processes that was. Windows ends no process's descendants with it: a
+   * daemon that crashed or was terminated leaves its agents, shells and
+   * their children (systemd stops a unit's whole control group instead).
+   */
+  reapDaemon?(daemon: SupervisedChild, exitedAtMs: number): Promise<number>;
   /** Who holds the connector manager's lock pipe. */
   connectorManager(): Promise<'absent' | 'proven' | 'foreign' | 'unknown'>;
   writePid(pid: number | null): void;
@@ -121,6 +133,8 @@ export class WindowsSupervisor {
     child: undefined as SupervisedChild | undefined,
     timer: undefined as ReturnType<typeof setTimeout> | undefined,
     restarts: undefined as unknown as Restarts,
+    /** Stopping what the last daemon left running; settles, never rejects. */
+    reaped: Promise.resolve(),
   };
   private readonly connector = {
     child: undefined as SupervisedChild | undefined,
@@ -185,9 +199,9 @@ export class WindowsSupervisor {
     clearTimeout(this.daemon.timer);
     clearTimeout(this.connector.timer);
     const daemon = this.daemon.child;
-    return Promise.all([daemon ? this.stopDaemon(daemon) : undefined, this.stopConnector()]).then(
-      () => this.finish(code),
-    );
+    return Promise.all([daemon ? this.stopDaemon(daemon) : undefined, this.stopConnector()])
+      .then(() => this.daemon.reaped)
+      .then(() => this.finish(code));
   }
 
   private finish(code: number): void {
@@ -255,6 +269,8 @@ export class WindowsSupervisor {
   private daemonExited(child: SupervisedChild, code: number | null): void {
     if (this.daemon.child !== child) return;
     this.daemon.child = undefined;
+    // Before anything else: a restart or the supervisor's own exit waits for it.
+    this.daemon.reaped = this.reapDaemon(child);
     if (this.stopping) return;
     if (code === 0) {
       this.deps.writePid(null);
@@ -276,14 +292,37 @@ export class WindowsSupervisor {
     this.deps.log(`restarting puddled in ${delay / 1000} s (last status ${String(code)})`);
     this.daemon.timer = setTimeout(() => {
       this.daemon.timer = undefined;
-      // Never start one beside a daemon another launcher started meanwhile.
-      void this.deps.hostPipe().then((state) => {
-        if (state === 'daemon' || state === 'unknown') {
-          return this.retireDaemon('another puddled took over this home');
-        }
-        this.startDaemon();
-      });
+      // Never start one beside a daemon another launcher started meanwhile,
+      // nor beside what the last one left running.
+      void this.daemon.reaped
+        .then(() => this.deps.hostPipe())
+        .then((state) => {
+          if (state === 'daemon' || state === 'unknown') {
+            return this.retireDaemon('another puddled took over this home');
+          }
+          this.startDaemon();
+        });
     }, delay);
+  }
+
+  /** Stops what `child` left running (SupervisorDeps.reapDaemon); never rejects. */
+  private reapDaemon(child: SupervisedChild): Promise<void> {
+    const reap = this.deps.reapDaemon;
+    if (!reap) return Promise.resolve();
+    const exitedAtMs = this.deps.now();
+    return reap(child, exitedAtMs).then(
+      (count) => {
+        if (count > 0) {
+          this.deps.log(
+            `stopped ${count} process${count === 1 ? '' : 'es'} puddled (pid ${child.pid}) left running`,
+          );
+        }
+      },
+      (err: unknown) =>
+        this.deps.log(
+          `could not stop what puddled (pid ${child.pid}) left running: ${(err as Error).message}`,
+        ),
+    );
   }
 
   /** Never start a daemon beside the one that serves the home: leave the home to it. */

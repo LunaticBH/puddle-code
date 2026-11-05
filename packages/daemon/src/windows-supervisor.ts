@@ -21,12 +21,15 @@ import {
   daemonEnvironment,
   disableCurrentDirectorySearch,
   killProcessTree,
+  listWindowsProcesses,
   LOG_ROTATE_BYTES,
   openRotated,
   requestDaemonShutdown,
   setEnv,
   supervisorRequest,
 } from '@puddle/shared/node/platform';
+import { ptyRootsFile } from './pty/pty-roots.js';
+import { reapWindowsDaemon } from './supervision/reap-daemon.js';
 import { WindowsSupervisor, type SupervisedChild } from './supervision/windows-supervisor.js';
 
 /**
@@ -97,6 +100,7 @@ function spawnChild(kind: 'puddled' | 'connector'): SupervisedChild {
       kind === 'connector' ? ['ignore', out, err, 'ipc'] : ['ignore', out, err];
     // Not detached: the versioned node.exe (whose command line names
     // bin\versions, as launchers identify a daemon) is this process's child.
+    const startedAtMs = Date.now();
     const child = spawn(node, [script], { cwd: homedir(), windowsHide: true, stdio, env });
     const pid = child.pid;
     if (pid === undefined) throw new Error(`${kind} could not be started`);
@@ -106,6 +110,7 @@ function spawnChild(kind: 'puddled' | 'connector'): SupervisedChild {
     });
     return {
       pid,
+      startedAtMs,
       exited,
       // The connector stops cleanly when its IPC channel closes; the daemon is asked over its pipe.
       stop: () => {
@@ -132,6 +137,11 @@ const supervisor = new WindowsSupervisor({
     existsSync(join(home, 'bin', 'current', 'daemon', 'connector.mjs')),
   hostPipe: () => controlPipeState(home),
   requestDaemonShutdown: () => requestDaemonShutdown(home),
+  reapDaemon: (daemon, exitedAtMs) =>
+    reapWindowsDaemon(daemon, exitedAtMs, {
+      processes: listWindowsProcesses,
+      rootsFile: ptyRootsFile(home),
+    }),
   connectorManager: () => connectorPipeState(home, 'remote'),
   writePid: (pid) => {
     try {

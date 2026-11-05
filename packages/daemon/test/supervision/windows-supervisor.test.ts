@@ -205,6 +205,66 @@ describe('the Windows supervisor', () => {
     expect(h.log.join('\n')).toMatch(/failed 10 times in ten minutes — giving up/);
   });
 
+  it('stops what a crashed daemon left running before it starts the next one', async () => {
+    const h = harness();
+    const events: string[] = [];
+    let finishReap!: () => void;
+    const gate = new Promise<void>((resolve) => (finishReap = resolve));
+    h.deps.reapDaemon = vi.fn(async (daemon: SupervisedChild, exitedAtMs: number) => {
+      events.push(`reap ${daemon.pid} at ${typeof exitedAtMs}`);
+      await gate;
+      events.push('reaped');
+      return 2;
+    });
+    const spawn = h.deps.spawnDaemon;
+    h.deps.spawnDaemon = () => {
+      events.push('start');
+      return spawn();
+    };
+    h.start();
+    await until(() => h.daemons.length === 1);
+    h.daemons[0]!.exit(null); // terminated
+    await until(() => events.includes('reap 100 at number'));
+    // The backoff (10 ms) passes; the restart still waits for the reaping.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(h.daemons).toHaveLength(1);
+    finishReap();
+    await until(() => h.daemons.length === 2);
+    expect(events).toEqual(['start', 'reap 100 at number', 'reaped', 'start']);
+    expect(h.log).toContain('stopped 2 processes puddled (pid 100) left running');
+  });
+
+  it('exits only once what its stopped daemon left is stopped too', async () => {
+    const h = harness();
+    let finishReap!: () => void;
+    const reap = vi.fn(() => new Promise<number>((resolve) => (finishReap = () => resolve(0))));
+    h.deps.reapDaemon = reap;
+    const { supervisor, done } = h.start();
+    await until(() => h.daemons.length === 1);
+    let exited = false;
+    void done.then(() => (exited = true));
+    void supervisor.shutdown('test over');
+    await until(() => reap.mock.calls.length === 1);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(exited).toBe(false);
+    finishReap();
+    expect(await done).toBe(0);
+    // Nothing was left: nothing is logged.
+    expect(h.log.join('\n')).not.toMatch(/left running/);
+  });
+
+  it('restarts the daemon even when what it left cannot be stopped', async () => {
+    const h = harness();
+    h.deps.reapDaemon = vi.fn(async () => {
+      throw new Error('no process table');
+    });
+    h.start();
+    await until(() => h.daemons.length === 1);
+    h.daemons[0]!.exit(1);
+    await until(() => h.daemons.length === 2);
+    expect(h.log).toContain('could not stop what puddled (pid 100) left running: no process table');
+  });
+
   it('never starts a daemon beside one that took the home over while it waited', async () => {
     const h = harness();
     const { done } = h.start();
