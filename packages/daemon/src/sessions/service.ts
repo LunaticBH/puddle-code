@@ -1847,9 +1847,10 @@ export class SessionService extends EventEmitter {
     // Once hooks have spoken, the regex detector no longer drives status —
     // its output-based flips misread idle TUI redraws as activity.
     if (source === 'detector' && live.signalled) return;
-    // Windows reports a stopped PTY's exit only once its whole tree is stopped
-    // (pty/conpty-teardown.ts), and its console repaints as it closes: once a
-    // stop was asked for, that output says nothing about the agent.
+    // Windows reports a stopped PTY's exit only once what is attached to its
+    // console has ended (pty/conpty-teardown.ts), and its console repaints as
+    // it closes: once a stop was asked for, that output says nothing about
+    // the agent.
     if (
       source === 'detector' &&
       process.platform === 'win32' &&

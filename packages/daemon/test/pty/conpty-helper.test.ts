@@ -2,13 +2,16 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import pty from 'node-pty';
 import { afterEach, describe, expect, it } from 'vitest';
 import { listWindowsProcesses, type WindowsProcess } from '@puddle/shared/node/platform';
 import { guardConsoleListKill } from '../../src/pty/conpty-console-list.js';
 import {
+  ATTACH_MARGIN_MS,
   ConptyHelper,
+  conptyHelperLaunch,
   HELPER_ARGS,
   isConptyHelper,
   noteConptySpawn,
@@ -109,6 +112,25 @@ describe('ConptyHelper', () => {
     const { helper } = fakeHelper('serve');
     const held = await helper.track(5, window);
     expect(await held!.terminate(['root; Remove-Item', '1@2 3', '../x'])).toBe(0);
+    // An attach-by that is no number is none: the request's own bound counts.
+    const scan = await held!.scan({ attach: true, attachByMs: Number.NaN });
+    expect(scan!.members.filter((m) => m.listed).map((m) => m.pid)).toEqual([10, 11]);
+  });
+
+  it('never has the helper attach to a console once whoever asked may have given up on it', async () => {
+    const { helper } = fakeHelper('serve');
+    const held = await helper.track(5, window);
+    const listed = async (options: { attach: boolean; attachByMs?: number }) =>
+      (await held!.scan(options))!.members.filter((m) => m.listed).map((m) => m.pid);
+    expect(await listed({ attach: true, attachByMs: Date.now() + 60_000 })).toEqual([10, 11]);
+    // Past it, the console may be closing: the helper attached to it would end with it.
+    // (Well past: two processes' clocks may differ by a few milliseconds.)
+    expect(await listed({ attach: true, attachByMs: Date.now() - 10_000 })).toEqual([]);
+    expect(await listed({ attach: false })).toEqual([]);
+    // Nor later than the margin before the helper's own bound on the answer.
+    const { helper: brief } = fakeHelper('serve', { answerMs: ATTACH_MARGIN_MS - 200 });
+    const quick = await brief.track(5, window);
+    expect((await quick!.scan({ attach: true }))!.members.some((m) => m.listed)).toBe(false);
   });
 
   it('tells a root that had exited, or whose pid another process took, from one it holds', async () => {
@@ -178,6 +200,17 @@ describe('ConptyHelper', () => {
     expect(await helper.adopt({ pid: 7001, createdAtMs: 5, parentPid: 4000 })).toBeNull();
     const host = await helper.adopt({ pid: 7000, createdAtMs: 5, parentPid: 4000 });
     expect(host?.host).toEqual({ pid: 7000, createdAtMs: 5 });
+    expect(host?.rootCreatedAtMs).toBeNull();
+    // With the PTY's root, while it is still the one recorded.
+    const root = { pid: 10, createdAtMs: 4 };
+    const held = await helper.adopt({ pid: 7000, createdAtMs: 5, parentPid: 4000, root });
+    expect(held).toMatchObject({ rootCreatedAtMs: 4, host: { pid: 7000, createdAtMs: 5 } });
+    expect(await held!.alive()).toEqual({ root: true, host: true });
+    const other = { pid: 1010, createdAtMs: 4 };
+    expect(
+      (await helper.adopt({ pid: 7000, createdAtMs: 5, parentPid: 4000, root: other }))
+        ?.rootCreatedAtMs,
+    ).toBeNull();
     const classified = await helper.classify([
       { pid: 20, createdAtMs: 1 },
       { pid: 1020, createdAtMs: 2 },
@@ -298,6 +331,25 @@ describe.skipIf(process.platform !== 'win32')('the ConPTY helper on Windows', ()
     held!.release();
   });
 
+  it('never attaches to a console once a scan’s attach-by has passed', async () => {
+    const helper = new ConptyHelper();
+    helpers.push(helper);
+    const { proc, held, ping } = await cmdConsole(helper);
+    const pid = helper.pid;
+    const own = [proc.pid, ping.pid].sort();
+    // Taken up late, as by a helper short of CPU: the console may be closing.
+    const late = await held!.scan({ attach: true, attachByMs: Date.now() - 10_000 });
+    expect(late!.members.some((m) => m.listed)).toBe(false);
+    // Each process's console host still names what is attached.
+    const attached = late!.members.filter((m) => m.consoleHost === held!.host!.pid);
+    expect(attached.map((m) => m.pid).sort()).toEqual(own);
+    const timely = await held!.scan({ attach: true, attachByMs: Date.now() + 1000 });
+    const listed = timely!.members.filter((m) => m.listed);
+    expect(listed.map((m) => m.pid).sort()).toEqual(own);
+    expect(helper.pid).toBe(pid);
+    held!.release();
+  });
+
   it('ends what stays attached once the root has gone, never a GUI programme, then the host', async () => {
     const helper = new ConptyHelper();
     helpers.push(helper);
@@ -410,5 +462,115 @@ describe.skipIf(process.platform !== 'win32')('the ConPTY helper on Windows', ()
       await helper.adopt({ pid: child.pid!, createdAtMs: now, parentPid: process.pid }),
     ).toBeNull();
     child.kill();
+  });
+
+  it('adopts a recorded console host with its root only while the root is the process recorded', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'puddle-helper-'));
+    markers.push(dir);
+    const fromMs = Date.now();
+    const proc = pty.spawn('cmd.exe', ['/d', '/k', `rem ${dir}:root`], {
+      cols: 100,
+      rows: 30,
+      cwd: dir,
+    });
+    const toMs = Date.now();
+    guardConsoleListKill(proc);
+    consoles.push(proc);
+    const [host] = await conptyHosts(fromMs, toMs);
+    const root = (await listWindowsProcesses({ fresh: true })).find((p) => p.pid === proc.pid)!;
+    const recorded = { pid: host!.pid, createdAtMs: host!.createdAtMs!, parentPid: process.pid };
+    // One helper each: a host one holds is never another's.
+    const [first, second] = [new ConptyHelper(), new ConptyHelper()];
+    helpers.push(first, second);
+    // Created at another time: another process's pid.
+    const later = await first.adopt({
+      ...recorded,
+      root: { pid: proc.pid, createdAtMs: root.createdAtMs! + 1000 },
+    });
+    expect(later?.host?.pid).toBe(host!.pid);
+    expect(later?.rootCreatedAtMs).toBeNull();
+    const held = await second.adopt({
+      ...recorded,
+      root: { pid: proc.pid, createdAtMs: root.createdAtMs! },
+    });
+    expect(Math.abs(held!.rootCreatedAtMs! - root.createdAtMs!)).toBeLessThanOrEqual(1);
+    expect(await held!.alive()).toEqual({ root: true, host: true });
+    // Held, it is ended as the root; then its host, which node-pty no longer closes.
+    expect(await held!.terminate(['root'])).toBe(1);
+    expect((await held!.alive())?.root).toBe(false);
+    expect(await held!.terminate(['host'])).toBe(1);
+    later!.release();
+    held!.release();
+  });
+
+  /** The real helper, spoken to as the headless driver speaks to it (terminal-source.ts). */
+  async function driverHelper() {
+    const launch = conptyHelperLaunch();
+    const proc = spawn(launch.file, [...launch.args], {
+      env: { ...process.env, ...launch.env },
+      stdio: ['pipe', 'pipe', 'ignore'],
+      windowsHide: true,
+    });
+    onTeardown(() => {
+      if (proc.exitCode === null) proc.kill();
+    });
+    const waiting = new Map<string, (answer: string) => void>();
+    let ready!: () => void;
+    const up = new Promise<void>((resolve) => (ready = resolve));
+    createInterface({ input: proc.stdout }).on('line', (line) => {
+      if (line === 'ready') ready();
+      const space = line.indexOf(' ');
+      if (space > 0) waiting.get(line.slice(0, space))?.(line.slice(space + 1));
+    });
+    await up;
+    let sequence = 0;
+    return {
+      ask: (request: string) =>
+        new Promise<string>((resolve) => {
+          const id = String(++sequence);
+          waiting.set(id, resolve);
+          proc.stdin.write(`${id} ${request}\n`);
+        }),
+      stop: () => proc.kill(),
+    };
+  }
+
+  it('owns a CLI in a console of its own only as created by the parent named, in the window given', async () => {
+    const helper = await driverHelper();
+    const fromMs = Date.now();
+    // As the driver starts its CLI: hidden, no stdio inherited, so in a console of its own.
+    const cli = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e9)'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    const toMs = Date.now();
+    onTeardown(() => {
+      if (cli.exitCode === null) cli.kill();
+    });
+    await new Promise((resolve) => cli.once('spawn', resolve));
+    let host: WindowsProcess | undefined;
+    await waitUntil(
+      async () =>
+        (host = (await listWindowsProcesses({ fresh: true })).find(
+          (p) => p.ppid === cli.pid && p.name.toLowerCase() === 'conhost.exe',
+        )) !== undefined,
+      10_000,
+      'its console host',
+    );
+    const window = `${fromMs - 100} ${toMs + 100}`;
+    const owned = (await helper.ask(`own a ${cli.pid} ${window} ${process.pid}`)).split(' ');
+    expect(owned[0]).toBe('ok');
+    expect(Number(owned[2])).toBe(host!.pid);
+    expect(Math.abs(Number(owned[3]) - host!.createdAtMs!)).toBeLessThanOrEqual(1);
+    // Not created in the window given, or not by the parent named: another process's pid.
+    expect(
+      await helper.ask(`own b ${cli.pid} ${toMs + 60_000} ${toMs + 70_000} ${process.pid}`),
+    ).toBe('other 0 0 0');
+    expect(await helper.ask(`own c ${cli.pid} ${window} ${process.ppid}`)).toBe('other 0 0 0');
+    // What it holds is the CLI's: ended as the root, whatever its image.
+    expect(await helper.ask('terminate a root')).toBe('ok 1');
+    await waitUntil(() => cli.exitCode !== null || cli.signalCode !== null, 10_000, 'its exit');
+    expect(await helper.ask('release a')).toBe('ok');
+    helper.stop();
   });
 });

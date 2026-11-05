@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, win32 } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { resolveSpawn, setEnv, type Environment } from '@puddle/shared/node/platform';
+import { conptyHelperLaunch } from '../../pty/conpty-jobs.js';
 import type { AgentControl, LifecycleLaunchResource } from '../adapter.js';
 import { record, type HeadlessContext, type HeadlessDriver, type JsonRecord } from './codec.js';
 import { HEADLESS_TERMINAL_SOURCE } from './terminal-source.js';
@@ -62,6 +63,9 @@ export class HeadlessControl implements AgentControl {
         try {
           const event = record(JSON.parse(line));
           if (event['type'] === 'ready' && !this.connected) {
+            // Windows: how the driver starts the ConPTY helper that ends what
+            // is attached to its CLI's console (terminal-source.ts), before any run.
+            if (this.platform === 'win32') this.send({ type: 'helper', ...conptyHelperLaunch() });
             this.connected = true;
             this.context.reportStatus?.('waiting_input');
           } else if (event['type'] === 'interrupt')

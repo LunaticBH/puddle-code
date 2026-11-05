@@ -73,24 +73,33 @@ const ownConsole = (pid: number, owner: number, createdAtMs: number) =>
     commandLine: '\\??\\C:\\WINDOWS\\system32\\conhost.exe 0xffffffff -ForceV1',
   });
 
-/** A table and a helper over the same processes, recording what it ends. */
+/** A table and a helper over the same processes, recording what it ends, and what exits by itself. */
 function world(initial: Process[]) {
   let processes = [...initial];
   const terminated: number[] = [];
+  const events: string[] = [];
   const end = (pid: number) => {
     terminated.push(pid);
+    events.push(`ended ${pid}`);
     processes = processes.filter((p) => p.pid !== pid);
   };
   const find = (pid: number, createdAtMs: number) =>
     processes.find((p) => p.pid === pid && p.createdAtMs === createdAtMs);
   const key = (p: Process) => `${p.pid}@${p.createdAtMs}`;
   const spared = (p: Process) => p.gui || p.guiStarted;
-  const hold = (members: () => Process[], host: Process | null): ConptyConsole => ({
-    rootCreatedAtMs: null,
+  const hold = (
+    members: () => Process[],
+    host: Process | null,
+    root: Process | null = null,
+  ): ConptyConsole => ({
+    rootCreatedAtMs: root?.createdAtMs ?? null,
     host: host ? { pid: host.pid, createdAtMs: host.createdAtMs! } : null,
-    alive: async () => ({ root: false, host: host !== null && processes.includes(host) }),
+    alive: async () => ({
+      root: root !== null && processes.includes(root),
+      host: host !== null && processes.includes(host),
+    }),
     scan: async () => ({
-      rootAlive: false,
+      rootAlive: root !== null && processes.includes(root),
       hostAlive: host !== null && processes.includes(host),
       members: members().map((p) => ({
         pid: p.pid,
@@ -106,7 +115,11 @@ function world(initial: Process[]) {
       let count = 0;
       for (const each of keys) {
         const target =
-          each === 'host' ? host : (members().find((p) => key(p) === each && !spared(p)) ?? null);
+          each === 'host'
+            ? host
+            : each === 'root'
+              ? root
+              : (members().find((p) => key(p) === each && !spared(p)) ?? null);
         if (target && processes.includes(target)) {
           end(target.pid);
           count++;
@@ -118,13 +131,15 @@ function world(initial: Process[]) {
   });
   const inspector: ConsoleInspector = {
     ready: async () => true,
-    adopt: async ({ pid, createdAtMs, parentPid }) => {
+    adopt: async ({ pid, createdAtMs, parentPid, root }) => {
       const host = find(pid, createdAtMs);
       if (!host || host.ppid !== parentPid || host.name !== 'conhost.exe') return null;
+      const held = root ? find(root.pid, root.createdAtMs) : undefined;
       // As the helper's scan: what names the host and was created after it.
       return hold(
         () => processes.filter((p) => p.consoleHost === pid && p.createdAtMs! >= createdAtMs),
         host,
+        held && held.ppid === parentPid ? held : null,
       );
     },
     classify: async (list) => {
@@ -143,10 +158,18 @@ function world(initial: Process[]) {
   };
   return {
     terminated,
+    events,
     inspector,
     processes: async () =>
       processes.map(({ gui: _gui, guiStarted: _started, consoleHost: _host, ...p }) => p),
     alive: (pid: number) => processes.some((p) => p.pid === pid),
+    /** `pid` exits by itself `afterMs` from now (as a root handling its console's close). */
+    exitsAfter: (pid: number, afterMs: number) =>
+      setTimeout(() => {
+        if (!processes.some((p) => p.pid === pid)) return;
+        events.push(`exited ${pid}`);
+        processes = processes.filter((p) => p.pid !== pid);
+      }, afterMs),
   };
 }
 
@@ -306,6 +329,78 @@ describe('reapWindowsDaemon', () => {
     expect(w.terminated).toEqual([10, 30]);
   });
 
+  /** A recorded PTY whose root (a headless driver, say) still handles its console's close. */
+  const closing = () =>
+    world([
+      conhost(30, 100, 2005),
+      entry(10, 100, 2008, { consoleHost: 30 }), // the PTY root
+      entry(11, 10, 2100, { consoleHost: 30 }), // and its console child
+    ]);
+  const recorded = { ...root, createdAtMs: 2008 };
+
+  it('lets a recorded root handle its console’s close, ending what else is attached at once', async () => {
+    const w = closing();
+    w.exitsAfter(10, 300);
+    const exitedAtMs = Date.now();
+    const count = await reapWindowsDaemon(daemon, exitedAtMs, {
+      processes: w.processes,
+      rootsFile: home([recorded]),
+      consoles: w.inspector,
+    });
+    // The root ended its CLI's console meanwhile, then exited; the host goes last.
+    expect(w.events).toEqual(['ended 11', 'exited 10', 'ended 30']);
+    expect(count).toBe(2);
+    expect(Date.now() - exitedAtMs).toBeLessThan(4000);
+  });
+
+  it('ends a recorded root once Windows would have ended it', async () => {
+    const w = closing();
+    const exitedAtMs = Date.now();
+    expect(
+      await reapWindowsDaemon(daemon, exitedAtMs, {
+        processes: w.processes,
+        rootsFile: home([recorded]),
+        consoles: w.inspector,
+        consoleCloseMs: 300,
+      }),
+    ).toBe(3);
+    expect(w.events).toEqual(['ended 11', 'ended 10', 'ended 30']);
+    expect(Date.now() - exitedAtMs).toBeGreaterThanOrEqual(250);
+  });
+
+  it('spares no root it cannot hold as the one recorded', async () => {
+    // Recorded as exited (its pid may be another process's now), or created at another time.
+    for (const record of [
+      { ...recorded, exitedAtMs: 4000 },
+      { ...recorded, createdAtMs: 2009 },
+    ]) {
+      const w = closing();
+      await reapWindowsDaemon(daemon, Date.now(), {
+        processes: w.processes,
+        rootsFile: home([record]),
+        consoles: w.inspector,
+        consoleCloseMs: 60_000,
+      });
+      expect(w.events).toEqual(['ended 10', 'ended 11', 'ended 30']);
+    }
+  });
+
+  it('below a root whose host is not known, ends the root last, once it exits or Windows would end it', async () => {
+    for (const exits of [true, false]) {
+      const w = closing();
+      if (exits) w.exitsAfter(10, 300);
+      const exitedAtMs = Date.now();
+      await reapWindowsDaemon(daemon, exitedAtMs, {
+        processes: w.processes,
+        rootsFile: home([untold]),
+        consoles: w.inspector,
+        consoleCloseMs: 1500,
+      });
+      expect(w.events).toEqual(exits ? ['ended 11', 'exited 10'] : ['ended 11', 'ended 10']);
+      if (!exits) expect(Date.now() - exitedAtMs).toBeGreaterThanOrEqual(1400);
+    }
+  });
+
   it('ends nothing without a helper to tell a console programme from a GUI one', async () => {
     const rootsFile = home([root]);
     const w = world([conhost(30, 100, 2005), entry(11, 10, 2100, { consoleHost: 30 })]);
@@ -400,6 +495,8 @@ describe.skipIf(process.platform !== 'win32')('reapWindowsDaemon on Windows', ()
         processes: listWindowsProcesses,
         rootsFile,
         consoles: helper,
+        // Its console is open: the root is not handling a close, and is ended once this passes.
+        consoleCloseMs: 1000,
       });
       // The root and its attached child; never the server.
       expect(count).toBe(2);

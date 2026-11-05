@@ -31,8 +31,10 @@ import { system32Path } from '@puddle/shared/node/platform';
  * process got there, and nothing it holds ends with it.
  *
  * Node has no API for any of this, so the helper is one hidden Windows
- * PowerShell 5.1 process per daemon (and one per supervisor) running a small
- * C# class (`Add-Type`, compiled by the .NET Framework that ships with
+ * PowerShell 5.1 process per daemon (and one per supervisor, and one per
+ * headless driver that has started its CLI, for the CLI's own console:
+ * `own`, agents/headless/terminal-source.ts) running a small C# class
+ * (`Add-Type`, compiled by the .NET Framework that ships with
  * Windows; its source travels in an environment variable) that answers
  * requests on stdin, where numbers are all that cross. It starts in about
  * half a second; a request takes a few milliseconds. Where
@@ -86,12 +88,15 @@ export interface ConptyConsole {
    * What is attached to the console now, each process held open from now on.
    * With `attach`, the helper also reads the console's own list, attaching
    * to it for a moment: never while the console is being closed, whose
-   * close would end the helper with its members. While the host is not told
-   * apart, it reads the root's console only when this PTY's spawn could have
+   * close would end the helper with its members. Nor once `attachByMs`
+   * (Unix ms) has passed, or later than ATTACH_MARGIN_MS before the
+   * helper's own bound on the answer: whoever asked may have given up on
+   * it by then and closed the console. While the host is not told apart,
+   * it reads the root's console only when this PTY's spawn could have
    * created it (never the parent's, which a GUI root may attach to), and
    * names only what was created after that host. Null when it did not answer.
    */
-  scan(options: { attach: boolean }): Promise<ConsoleScan | null>;
+  scan(options: { attach: boolean; attachByMs?: number }): Promise<ConsoleScan | null>;
   /**
    * Ends held processes: members by key, `root`, `host` (never a GUI member,
    * nor one a GUI programme started). Resolves with how many.
@@ -141,12 +146,15 @@ export interface ConsoleInspector {
   /**
    * Holds the console host a crashed daemon `parentPid` recorded, if it
    * still is that process (`createdAtMs`, a headless conhost.exe child of
-   * that daemon); null when it has exited, or on no answer.
+   * that daemon); null when it has exited, or on no answer. With it the
+   * PTY's `root`, while it still is the process recorded (the console's
+   * `rootCreatedAtMs` says whether it is held).
    */
   adopt(host: {
     pid: number;
     createdAtMs: number;
     parentPid: number;
+    root?: { pid: number; createdAtMs: number };
   }): Promise<ConptyConsole | null>;
   /**
    * Holds each process still running as created then and says what it is,
@@ -297,11 +305,12 @@ public static class PuddleConsoles
         if (f.Length == 7 && f[1] == "track") return Track(f[2], int.Parse(f[3]), long.Parse(f[4]), long.Parse(f[5]), int.Parse(f[6]));
         if (f.Length == 6 && f[1] == "claim") return Claim(f[2], f[3] == "1", int.Parse(f[4]), long.Parse(f[5]));
         if (f.Length == 3 && f[1] == "alive") return Alive(f[2]);
-        if (f.Length == 4 && f[1] == "scan") return Scan(f[2], f[3] == "1");
+        if (f.Length == 5 && f[1] == "scan") return Scan(f[2], f[3] == "1", long.Parse(f[4]));
         if (f.Length >= 3 && f[1] == "terminate") return Terminate(f[2], f, 3);
         if (f.Length == 3 && f[1] == "release") return Release(f[2]);
-        if (f.Length == 6 && f[1] == "adopt") return Adopt(f[2], int.Parse(f[3]), long.Parse(f[4]), int.Parse(f[5]));
+        if (f.Length == 8 && f[1] == "adopt") return Adopt(f[2], int.Parse(f[3]), long.Parse(f[4]), int.Parse(f[5]), int.Parse(f[6]), long.Parse(f[7]));
         if (f.Length >= 3 && f[1] == "classify") return Classify(f[2], f, 3);
+        if (f.Length == 7 && f[1] == "own") return Own(f[2], int.Parse(f[3]), long.Parse(f[4]), long.Parse(f[5]), int.Parse(f[6]));
         return "error usage";
     }
 
@@ -310,6 +319,13 @@ public static class PuddleConsoles
         long created, exited, kernel, user;
         if (!GetProcessTimes(handle, out created, out exited, out kernel, out user)) return -1;
         return (created - UNIX_EPOCH) / 10000;
+    }
+
+    // Now, Unix ms, by the system clock (which the daemon's Date.now()
+    // follows within milliseconds).
+    static long NowMs()
+    {
+        return (DateTime.UtcNow.ToFileTimeUtc() - UNIX_EPOCH) / 10000;
     }
 
     static bool Running(IntPtr handle)
@@ -607,9 +623,9 @@ public static class PuddleConsoles
 
     // What is attached to the PTY's console now, each process held open: by
     // each process's console host, by the console's own list (when 'attach',
-    // through the root, else a member), and what an earlier scan held that
-    // still runs.
-    static string Scan(string id, bool attach)
+    // through the root, else a member, until 'attachBy'), and what an
+    // earlier scan held that still runs.
+    static string Scan(string id, bool attach, long attachBy)
     {
         Pty pty = Find(id);
         if (pty == null) return "none";
@@ -658,7 +674,7 @@ public static class PuddleConsoles
                         }
                     }
                 }
-                if (through != 0) Listed(pty, through, console, listed, table);
+                if (through != 0) Listed(pty, through, console, attachBy, listed, table);
             }
             finally { Close(found); }
         }
@@ -699,16 +715,22 @@ public static class PuddleConsoles
     // 'host' (held open meanwhile, so that its pid stays its own): each pid
     // listed again once held open is the process listed the first time.
     // Only a process attached to 'host' counts, created after it and after
-    // the PTY's spawn began; never the PTY's parent.
-    static void Listed(Pty pty, int through, Pin host, HashSet<string> listed, Dictionary<int, Entry> table)
+    // the PTY's spawn began; never the PTY's parent. Never once 'attachBy'
+    // (Unix ms) has passed: the daemon may have stopped waiting for this
+    // answer and closed the console by then, and its close would end this
+    // process with what is attached to it (its handler does not outlast
+    // CTRL_CLOSE_EVENT), and every hold with this process.
+    static void Listed(Pty pty, int through, Pin host, long attachBy, HashSet<string> listed, Dictionary<int, Entry> table)
     {
         var opened = new List<Pin>();
         lock (attaching)
         {
-            if (!AttachConsole(through)) return;
+            // (Read once this scan's turn has come: other scans may have held it up.)
+            if (NowMs() > attachBy || !AttachConsole(through)) return;
             try
             {
-                if (ConsoleHost(GetCurrentProcess()) != host.Pid) return;
+                // An attach that took until past it reads nothing, and lets go at once.
+                if (NowMs() > attachBy || ConsoleHost(GetCurrentProcess()) != host.Pid) return;
                 foreach (int pid in List())
                 {
                     if (pid == pty.Parent) continue;
@@ -872,16 +894,97 @@ public static class PuddleConsoles
         return "ok";
     }
 
-    // A console host a crashed daemon recorded, held while it is still that process.
-    static string Adopt(string id, int pid, long createdMs, int parent)
+    // A console host a crashed daemon recorded, held while it is still that
+    // process, and the PTY's root (rootPid 0: none recorded) while it is
+    // still the one recorded, a process that daemon created then. Replies
+    // with the host's creation and the root's (0: not held).
+    static string Adopt(string id, int pid, long createdMs, int parent, int rootPid, long rootCreated)
     {
         var pty = new Pty();
         pty.From = createdMs - 1;
         pty.To = createdMs + 1;
         pty.Parent = parent;
-        pty.Host = OpenHost(pid, pty, parent, Table());
+        var table = Table();
+        pty.Host = OpenHost(pid, pty, parent, table);
+        if (pty.Host != null && rootPid > 0)
+        {
+            Pin root = Open(rootPid);
+            Entry entry;
+            if (root != null && Math.Abs(root.Created - rootCreated) <= 1 &&
+                table.TryGetValue(rootPid, out entry) && (int)entry.Parent == parent && !IsHeadlessHost(root, entry))
+            {
+                root.Parent = parent;
+                pty.Root = root;
+            }
+            else Close(root);
+        }
         Put(id, pty);
-        return pty.Host != null ? "ok " + pty.Host.Created : "gone";
+        return pty.Host != null ? "ok " + pty.Host.Created + " " + (pty.Root != null ? pty.Root.Created : 0) : "gone";
+    }
+
+    // Holds 'pid', provided 'parent' created it between fromMs and toMs, as
+    // the root, and the console of its own it was started in (as a hidden
+    // child is, with CREATE_NO_WINDOW) as the host: the conhost.exe it
+    // names, which it created itself. For the headless driver's CLI
+    // (agents/headless/terminal-source.ts): that console stands for its
+    // POSIX process group. Replies with the root's and the host's creation.
+    static string Own(string id, int pid, long fromMs, long toMs, int parent)
+    {
+        var pty = new Pty();
+        pty.From = fromMs;
+        pty.To = toMs;
+        pty.Parent = parent;
+        string state = "gone";
+        Pin root = Open(pid);
+        if (root != null)
+        {
+            Entry entry;
+            if (root.Created < fromMs || root.Created > toMs || !Table().TryGetValue(pid, out entry) ||
+                (int)entry.Parent != parent)
+            {
+                state = "other";
+                Close(root);
+                root = null;
+            }
+            else
+            {
+                root.Parent = parent;
+                state = "ok";
+            }
+        }
+        pty.Root = root;
+        if (root != null)
+        {
+            // Its console is created as it initialises: wait for it, unless it exits first.
+            long named = 0;
+            for (int waited = 0; waited <= 2000; waited += 5)
+            {
+                long host = ConsoleHost(root.Handle);
+                if (host > 0) named = host;
+                if (host != 0 || !Running(root.Handle)) break;
+                Thread.Sleep(5);
+            }
+            Entry entry;
+            if (named > 0 && named <= int.MaxValue && Table().TryGetValue((int)named, out entry) &&
+                (int)entry.Parent == pid &&
+                string.Equals(entry.Exe, "conhost.exe", StringComparison.OrdinalIgnoreCase))
+            {
+                // Held, the root's pid is its own: a conhost.exe naming it as
+                // its parent, created after it, is the one it created. Held
+                // in turn, the host is still the one the root names.
+                Pin host = Open((int)named);
+                if (host != null && host.Created >= root.Created &&
+                    ConsoleHost(root.Handle) == host.Pid && !Assigned(host, pty))
+                {
+                    host.Parent = pid;
+                    pty.Host = host;
+                }
+                else Close(host);
+            }
+        }
+        Put(id, pty);
+        return state + " " + (root != null ? root.Created : 0) + " " +
+            (pty.Host != null ? pty.Host.Pid + " " + pty.Host.Created : "0 0");
     }
 
     // Holds each pid@created still running as created then, and says what it is.
@@ -935,6 +1038,25 @@ export const HELPER_ARGS: readonly string[] = [
   Buffer.from(HELPER_SCRIPT, 'utf16le').toString('base64'),
 ];
 
+/** How a helper starts: Windows PowerShell 5.1, its arguments, and what its environment adds. */
+export interface ConptyHelperLaunch {
+  file: string;
+  args: readonly string[];
+  env: Record<string, string>;
+}
+
+/**
+ * The helper's launch, for a process that starts one of its own: the
+ * headless driver does, for its CLI's console (agents/headless/terminal-source.ts).
+ */
+export function conptyHelperLaunch(): ConptyHelperLaunch {
+  return {
+    file: system32Path(win32.join('WindowsPowerShell', 'v1.0', 'powershell.exe')),
+    args: HELPER_ARGS,
+    env: { [SOURCE_VARIABLE]: HELPER_SOURCE },
+  };
+}
+
 /** Whether `commandLine` is a ConPTY helper's (the test suites' process guard leaves it be). */
 export function isConptyHelper(commandLine: string): boolean {
   return commandLine.includes(HELPER_ARGS[HELPER_ARGS.length - 1]!);
@@ -955,6 +1077,16 @@ export interface ConptyHelperOptions {
 
 /** How long after a helper that could not start (no PowerShell, `Add-Type` refused) none is tried. */
 const RETRY_MS = 5 * 60_000;
+
+/**
+ * How long before whoever asked for a scan stops waiting for it the helper
+ * stops attaching to the console (`scan`'s `attachByMs`): once it has
+ * stopped waiting, it may close the console, whose close would end a
+ * helper attached to it, and with the helper every hold it has. Attached,
+ * the helper reads the console's list and lets go within a few
+ * milliseconds; the margin is for a helper short of CPU meanwhile.
+ */
+export const ATTACH_MARGIN_MS = 500;
 
 function count(answer: string | null): number {
   const value = answer?.startsWith('ok ') ? Number(answer.slice(3)) : 0;
@@ -1084,10 +1216,7 @@ export class ConptyHelper implements ConptyJobs, ConsoleInspector {
   private readonly waiting = new Map<string, (reply: string | null) => void>();
 
   constructor(options: ConptyHelperOptions = {}) {
-    this.worker = options.worker ?? {
-      file: system32Path(win32.join('WindowsPowerShell', 'v1.0', 'powershell.exe')),
-      args: HELPER_ARGS,
-    };
+    this.worker = options.worker ?? conptyHelperLaunch();
     this.startMs = options.startMs ?? 15_000;
     this.answerMs = options.answerMs ?? 5_000;
     this.onLost = options.onLost;
@@ -1163,16 +1292,26 @@ export class ConptyHelper implements ConptyJobs, ConsoleInspector {
     pid: number;
     createdAtMs: number;
     parentPid: number;
+    root?: { pid: number; createdAtMs: number };
   }): Promise<ConptyConsole | null> {
+    const positive = (value: number) => Number.isSafeInteger(value) && value > 0;
     const values = [host.pid, host.createdAtMs, host.parentPid];
-    if (!values.every((value) => Number.isSafeInteger(value) && value > 0)) return null;
+    if (!values.every(positive)) return null;
+    const root =
+      host.root && positive(host.root.pid) && positive(host.root.createdAtMs) ? host.root : null;
     const id = `a${++this.sequence}`;
-    const reply = await this.ask(`adopt ${id} ${values.join(' ')}`);
+    const reply = await this.ask(
+      `adopt ${id} ${values.join(' ')} ${root?.pid ?? 0} ${root?.createdAtMs ?? 0}`,
+    );
     if (!reply?.startsWith('ok ')) {
       if (reply === 'gone') void this.ask(`release ${id}`);
       return null;
     }
-    return this.console(id, null, { pid: host.pid, createdAtMs: Number(reply.slice(3)) });
+    const [, hostCreated, rootCreated] = reply.split(' ').map(Number);
+    return this.console(id, root && positive(rootCreated!) ? rootCreated! : null, {
+      pid: host.pid,
+      createdAtMs: hostCreated!,
+    });
   }
 
   async classify(
@@ -1220,9 +1359,17 @@ export class ConptyHelper implements ConptyJobs, ConsoleInspector {
         const [ok, root, hostAlive] = (reply ?? '').split(' ');
         return ok === 'ok' ? { root: root === '1', host: hostAlive === '1' } : null;
       },
-      scan: async ({ attach }) => {
+      scan: async ({ attach, attachByMs }) => {
         if (!current()) return null;
-        const reply = await this.ask(`scan ${id} ${attach ? 1 : 0}`);
+        // No later than the caller's deadline, nor than this request's own
+        // bound (ask's, which starts no earlier than now) allows: a number,
+        // 0 for no attach at all.
+        const asked =
+          attachByMs !== undefined && Number.isFinite(attachByMs) ? attachByMs : Infinity;
+        const by = attach
+          ? Math.floor(Math.min(asked, Date.now() + this.answerMs - ATTACH_MARGIN_MS))
+          : 0;
+        const reply = await this.ask(`scan ${id} ${attach ? 1 : 0} ${by}`);
         if (!reply?.startsWith('ok ')) return null;
         const [, root, hostAlive, ...items] = reply.split(' ');
         const members: ConsoleMember[] = [];

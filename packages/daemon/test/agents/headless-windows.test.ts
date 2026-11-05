@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { connect, createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Duplex } from 'node:stream';
 import { afterEach, describe, expect, it } from 'vitest';
+import { listWindowsProcesses, type WindowsProcess } from '@puddle/shared/node/platform';
 import type { LifecycleLaunchContext } from '../../src/agents/adapter.js';
 import {
   admitWithToken,
@@ -13,7 +14,22 @@ import {
   prepareHeadless,
 } from '../../src/agents/headless/control.js';
 import { codexDriver } from '../../src/agents/codex/headless.js';
+import { LogStore } from '../../src/logs/log-store.js';
+import { isConptyHelper } from '../../src/pty/conpty-jobs.js';
+import { PtyManager } from '../../src/pty/pty-manager.js';
 import { waitFor } from '../helpers/daemon-fixtures.js';
+import { stopPtysAfterFile } from '../helpers/process-guard.js';
+import {
+  attachedGuiProgram,
+  guiProgram,
+  marked,
+  role,
+  stillRunning,
+  stopMarked,
+  survivors,
+  waitUntil,
+  withRoles,
+} from '../helpers/process-trees.js';
 
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => {
@@ -154,8 +170,168 @@ describe.runIf(process.platform === 'win32')('Windows headless endpoint', () => 
     await once(intruder, 'close');
     expect(resource.control!.ready).toBe(false);
     const driver = connect(path!);
+    let received = '';
+    driver.on('data', (chunk: Buffer) => (received += chunk.toString()));
     driver.write(`${JSON.stringify({ type: 'ready', token })}\n`);
     await waitFor(() => resource.control!.ready);
+    // Before any run: how the driver starts the ConPTY helper for its CLI's console.
+    await waitFor(() => received.includes('\n'));
+    const helper = JSON.parse(received.slice(0, received.indexOf('\n'))) as Record<string, unknown>;
+    expect(helper).toMatchObject({
+      type: 'helper',
+      file: expect.stringMatching(/powershell\.exe$/i),
+    });
+    expect(Object.keys(helper['env'] as object)).toEqual(['PUDDLE_CONPTY_HELPER_SOURCE']);
     driver.destroy();
+  });
+});
+
+/**
+ * `node agent.mjs <marker> <gui.exe> <gui-attach.exe>`: a headless CLI that
+ * starts processes attached to its console (a grandchild through a `cmd /c`
+ * that waits for it, and an orphan through `cmd /c start /b`, which exits at
+ * once: no job holds either, and nothing in the process table leads to the
+ * orphan) and processes that left it, or are spared on it (a detached child,
+ * a GUI programme through a `cmd /c` that waits for it, one in a console of
+ * its own through PowerShell's Start-Process, and a GUI programme that
+ * attaches to the console and starts a console child there, through a
+ * `cmd /c` that waits for it), then waits, writing nothing. Only the CLI and
+ * those processes name the marker on their command lines.
+ */
+const CLI = String.raw`
+import { spawn } from 'node:child_process';
+import { join } from 'node:path';
+const [marker, gui, attachGui] = process.argv.slice(2);
+const node = process.execPath;
+const keep = 'setInterval(()=>{},1e9)';
+const env = { ...process.env, M: marker, PUDDLE_TREE_MARKER: marker };
+const cmd = (line) =>
+  spawn(join(process.env.SystemRoot, 'System32', 'cmd.exe'), ['/d /c ' + line], {
+    stdio: 'ignore', windowsVerbatimArguments: true, env,
+  });
+// (cmd strips the outer quotes of a line that starts with one.)
+cmd('""' + node + '" -e "' + keep + '" "%M%:attached""');
+cmd('start "" /b "' + node + '" -e "' + keep + '" "%M%:orphan-attached"');
+spawn(node, ['-e', keep, marker + ':detached'], { stdio: 'ignore', detached: true, windowsHide: true }).unref();
+cmd('""' + gui + '" 120 "%M%:gui""');
+cmd('""' + attachGui + '" 120 "' + node + '" -e "' + keep + '" "%M%:gui-child""');
+const ps = join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+// Windows PowerShell's -ArgumentList joins its arguments unquoted: no spaces.
+const start = "Start-Process -WindowStyle Hidden '" + node + "' -ArgumentList '-e','" + keep + "',($env:PUDDLE_TREE_MARKER + ':start-process')";
+spawn(ps, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', start], { stdio: 'ignore', windowsHide: true, env });
+setInterval(() => {}, 1e9);
+`;
+
+/** What ends with the CLI's console: the CLI and what is attached to it. */
+const ATTACHED = ['agent', 'attached', 'orphan-attached'];
+/**
+ * What left it, or is a GUI programme's on it, and outlives the session
+ * (docs/windows.md, decision 8): `gui-child` names the attaching GUI
+ * programme and its console child both.
+ */
+const LEFT = ['detached', 'gui', 'start-process', 'gui-child', 'gui-child'];
+
+/**
+ * The headless CLI runs in a console of its own, which stands for its POSIX
+ * process group: however its turn or its session ends, the driver ends the
+ * CLI and what is attached to that console, and never a GUI programme, a
+ * detached process or one in a console of its own, which a POSIX hang-up
+ * spares too. Each test stops the survivors it makes.
+ */
+describe.runIf(process.platform === 'win32')('a Windows headless CLI’s end', () => {
+  const markers: string[] = [];
+  afterEach(async () => {
+    for (const marker of markers.splice(0)) await stopMarked(marker);
+  });
+
+  /** The driver in a real PTY, running a turn of the CLI above; resolves once its whole tree runs. */
+  async function headlessTree() {
+    const marker = mkdtempSync(join(tmpdir(), 'puddle-tree-'));
+    markers.push(marker);
+    const script = join(marker, 'agent.mjs');
+    writeFileSync(script, CLI);
+    const programs = [await guiProgram(), await attachedGuiProgram()];
+    const resource = await prepareHeadless(context, {
+      ...codexDriver(context),
+      binary: process.execPath,
+      command: () => ({ args: [script, marker, ...programs], stdin: '' }),
+    });
+    cleanups.push(() => resource.dispose());
+    const ptys = new PtyManager(new LogStore(mkdtempSync(join(tmpdir(), 'puddle-logs-')), 65536));
+    stopPtysAfterFile(ptys);
+    await ptys.prepare();
+    ptys.spawn('h', 'agent', resource.binary!, resource.args, { cwd: marker });
+    const control = resource.control!;
+    await waitFor(() => control.ready);
+    const abort = new AbortController();
+    const turn = control.ask('question', abort.signal);
+    turn.catch(() => {});
+    let members: WindowsProcess[] = [];
+    await waitUntil(
+      async () => (members = await marked(marker)).length === ATTACHED.length + LEFT.length,
+      30_000,
+      'the whole tree',
+    );
+    const exited = new Promise<void>((resolve) => ptys.once('exit', () => resolve()));
+    return {
+      ptys,
+      control,
+      abort,
+      turn,
+      exited,
+      dispose: () => resource.dispose(),
+      attached: withRoles(members, ATTACHED),
+      left: withRoles(members, LEFT),
+    };
+  }
+
+  it('the session’s end ends what is attached to the CLI’s console, and nothing that left it', async () => {
+    const { ptys, exited, attached, left } = await headlessTree();
+    expect(attached.map(role).sort()).toEqual([...ATTACHED].sort());
+    ptys.kill('h', 'agent');
+    await exited;
+    expect(await survivors(attached)).toEqual([]);
+    expect((await stillRunning(left)).map(role).sort()).toEqual([...LEFT].sort());
+  });
+
+  it('a cancelled turn ends what is attached to the CLI’s console before the next, and nothing that left it', async () => {
+    const { control, abort, turn, attached, left } = await headlessTree();
+    abort.abort();
+    await expect(turn).rejects.toThrow('cancelled');
+    expect(await survivors(attached)).toEqual([]);
+    expect((await stillRunning(left)).map(role).sort()).toEqual([...LEFT].sort());
+    expect(control.ready).toBe(true);
+  });
+
+  it('replaces a ConPTY helper that exits mid-turn, which still ends what is attached to the CLI’s console', async () => {
+    const { ptys, control, abort, turn, attached, left } = await headlessTree();
+    const driver = ptys.pidFor('h', 'agent')!;
+    const helpers = async () =>
+      (await listWindowsProcesses({ fresh: true })).filter(
+        (p) => p.ppid === driver && isConptyHelper(p.commandLine ?? ''),
+      );
+    let first: WindowsProcess[] = [];
+    await waitUntil(async () => (first = await helpers()).length === 1, 30_000, 'its helper');
+    // As an agent's `Stop-Process -Name powershell` would.
+    process.kill(first[0]!.pid);
+    await waitUntil(
+      async () => (await helpers()).some((p) => p.createdAtMs !== first[0]!.createdAtMs),
+      30_000,
+      'a helper in its place',
+    );
+    abort.abort();
+    await expect(turn).rejects.toThrow('cancelled');
+    expect(await survivors(attached)).toEqual([]);
+    expect((await stillRunning(left)).map(role).sort()).toEqual([...LEFT].sort());
+    expect(control.ready).toBe(true);
+  });
+
+  it('the daemon’s going ends what is attached to the CLI’s console, and nothing that left it', async () => {
+    const { dispose, exited, attached, left } = await headlessTree();
+    // The driver's socket closes, as when the daemon has gone.
+    await dispose();
+    await exited;
+    expect(await survivors(attached)).toEqual([]);
+    expect((await stillRunning(left)).map(role).sort()).toEqual([...LEFT].sort());
   });
 });

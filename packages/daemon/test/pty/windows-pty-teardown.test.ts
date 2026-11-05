@@ -9,11 +9,17 @@ import {
 } from '@puddle/shared/node/platform';
 import { LogStore } from '../../src/logs/log-store.js';
 import { stripAnsi } from '../../src/pty/ansi.js';
-import { ConptyHelper, type ConptyJobs } from '../../src/pty/conpty-jobs.js';
+import { ATTACH_MARGIN_MS, ConptyHelper, type ConptyJobs } from '../../src/pty/conpty-jobs.js';
 import { PtyManager, type PtyExitEvent } from '../../src/pty/pty-manager.js';
 import { ptyRootsFile, readPtyRoots } from '../../src/pty/pty-roots.js';
 import { stopPtysAfterFile } from '../helpers/process-guard.js';
-import { refusedHelper, silentHelper, slowHelper } from '../helpers/slow-conpty-helper.js';
+import {
+  lateListingHelper,
+  refusedHelper,
+  silentHelper,
+  slowHelper,
+  type AskedScan,
+} from '../helpers/slow-conpty-helper.js';
 import {
   ATTACHED_SERVER,
   attachedGuiProgram,
@@ -354,6 +360,12 @@ describe.skipIf(process.platform !== 'win32')(
         'both hosts recorded',
       );
       expect(roots.map((r) => r.host!.pid).sort()).toEqual(hosts.map((h) => h.pid).sort());
+      // And each root's creation, with which the supervisor holds it again after a crash.
+      const table = await listWindowsProcesses({ fresh: true });
+      for (const r of roots) {
+        const created = table.find((p) => p.pid === r.pid)!.createdAtMs!;
+        expect(Math.abs(r.createdAtMs! - created)).toBeLessThanOrEqual(1);
+      }
       const first = hosts.find(
         (h) => h.pid === roots.find((r) => r.pid === ptys.pidFor('a', 'agent'))!.host!.pid,
       )!;
@@ -464,5 +476,23 @@ describe.skipIf(process.platform !== 'win32')(
         }
       });
     }
+
+    it('a stop’s scan taken up late never attaches the helper to the console it then closes', async () => {
+      const asked: AskedScan[] = [];
+      // Past its attach-by, though still within the stop's 1.5 s bound on it.
+      const { ptys, output } = await manager({ jobs: lateListingHelper(1200, asked) });
+      const { attached, left } = await spawnTree(ptys, output);
+      const exit = exitObserved(ptys, attached, left);
+      ptys.kill('s', 'agent');
+      const { stayed, outlived } = await exit;
+      const [stop] = asked;
+      expect(stop?.attach).toBe(true);
+      expect(stop!.attachByMs! - stop!.atMs).toBeLessThanOrEqual(1500 - ATTACH_MARGIN_MS);
+      // Answered from each process's console host alone: no attach, no list.
+      expect(stop!.scan!.members.length).toBeGreaterThan(0);
+      expect(stop!.scan!.members.some((m) => m.listed)).toBe(false);
+      expect(stayed).toEqual([]);
+      expect(outlived.map(role).sort()).toEqual(left.map(role).sort());
+    });
   },
 );

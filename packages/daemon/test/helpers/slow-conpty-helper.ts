@@ -1,5 +1,10 @@
 import { fileURLToPath } from 'node:url';
-import { ConptyHelper, type ConptyConsole, type ConptyJobs } from '../../src/pty/conpty-jobs.js';
+import {
+  ConptyHelper,
+  type ConptyConsole,
+  type ConptyJobs,
+  type ConsoleScan,
+} from '../../src/pty/conpty-jobs.js';
 
 /**
  * ConPTY helpers (src/pty/conpty-jobs.ts) that answer late or never, for
@@ -26,6 +31,44 @@ export function slowHelper(ms: number): ConptyJobs {
         release: () => held.release(),
       };
       return slow;
+    },
+  };
+}
+
+/** A scan PtyManager asked for: when, how, and what the helper answered. */
+export interface AskedScan {
+  atMs: number;
+  attach: boolean;
+  attachByMs: number | undefined;
+  scan: ConsoleScan | null;
+}
+
+/**
+ * The real helper, each scan that reads the console's own list taken up
+ * `ms` late, as by a helper short of CPU; every scan is noted in `asked`.
+ */
+export function lateListingHelper(ms: number, asked: AskedScan[]): ConptyJobs {
+  const inner = new ConptyHelper();
+  return {
+    ready: () => inner.ready(),
+    track: async (pid, window) => {
+      const held = await inner.track(pid, window);
+      if (!held) return null;
+      const late: ConptyConsole = {
+        rootCreatedAtMs: held.rootCreatedAtMs,
+        host: held.host,
+        alive: () => held.alive(),
+        scan: async (options) => {
+          const atMs = Date.now();
+          if (options.attach) await new Promise((resolve) => setTimeout(resolve, ms));
+          const scan = await held.scan(options);
+          asked.push({ atMs, attach: options.attach, attachByMs: options.attachByMs, scan });
+          return scan;
+        },
+        terminate: (keys) => held.terminate(keys),
+        release: () => held.release(),
+      };
+      return late;
     },
   };
 }
