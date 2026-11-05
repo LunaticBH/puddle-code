@@ -17,6 +17,7 @@ import {
   daemonEnvironment,
   openRotated,
   runWindowsPowerShell,
+  supervisorRequest,
   type PowerShellRunner,
 } from '@puddle/shared/node/platform';
 import { inspectHostLocally } from '../auth/host-inspection.js';
@@ -209,6 +210,7 @@ export async function runWindowsHostOp(
         const timeoutMs = typeof body.timeoutMs === 'number' ? body.timeoutMs : 30_000;
         // Registration values travel on standard input only, never the command line.
         const stdin = await readAll(context.stdin);
+        if (args.includes('--configure') && managedSetup(stdin)) await requireSupervisor(home);
         const run = await runWindowsConnector(home, args as string[], { stdin, timeoutMs });
         emit({ t: 'result', value: run });
         return 0;
@@ -224,6 +226,35 @@ export async function runWindowsHostOp(
     emit(errorMessage(err));
     return 1;
   }
+}
+
+/** Whether a `--configure` request asks for supervision, as the cockpit's enable always does. */
+function managedSetup(stdin: string): boolean {
+  try {
+    return record(record(JSON.parse(stdin)).setup).managed !== false;
+  } catch {
+    // The connector refuses what it cannot parse, starting nothing.
+    return false;
+  }
+}
+
+/**
+ * A supervised connector needs the home's supervisor running outside this
+ * SSH session. Without one, `--configure` would start it, and inside the
+ * session's kill-on-close job its last way, a detached child, would end with
+ * this operation's channel; under an attached lease it would also start a
+ * daemon that competes with the lease's own. So it is refused, as an
+ * installation that cannot outlive the session is.
+ */
+async function requireSupervisor(home: string): Promise<void> {
+  if ((await supervisorRequest(home, 'status')).kind === 'answered') return;
+  throw new CliError(
+    'session_bound',
+    'remote access needs the Puddle supervisor running on this host outside the SSH session, ' +
+      'and neither Task Scheduler nor WMI has started it',
+    'log on to the machine once (its logon task then runs puddled), or allow WMI process ' +
+      'creation there, then launch again',
+  );
 }
 
 /**

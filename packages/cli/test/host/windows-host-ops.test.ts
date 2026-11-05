@@ -150,6 +150,25 @@ describe('the host helper’s other operations', () => {
     expect(whole.lines()[0]).toMatchObject({ t: 'error', code: 'bad_arguments' });
   });
 
+  it('enables supervised remote access only with a supervisor running outside the session', async () => {
+    const at = home();
+    const configure = io();
+    const done = runWindowsHostOp(
+      'connector',
+      { args: ['--configure'] },
+      { home: at, ...configure },
+    );
+    configure.stdin.end(
+      JSON.stringify({ profile: 'default', setup: { code: 'c'.repeat(64), managed: true } }) + '\n',
+    );
+    await expect(done).resolves.toBe(1);
+    expect(configure.lines()).toEqual([
+      expect.objectContaining({ t: 'error', code: 'session_bound' }),
+    ]);
+    // The registration code never reaches the answer.
+    expect(JSON.stringify(configure.lines())).not.toContain('c'.repeat(64));
+  });
+
   it('runs only the connector modes a client may ask for', async () => {
     const connector = io();
     await runWindowsHostOp(
