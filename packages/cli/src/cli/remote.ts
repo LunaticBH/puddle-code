@@ -249,10 +249,15 @@ export async function runRemote(
       );
     if (command.action === 'enable' && command.foreground)
       process.stdout.write('Run puddle remote run under your external supervisor.\n');
-    // The connector runs as the supervisor's child, with its token.
+    // The connector runs as the supervisor's child, with its token. Only a
+    // warning, after the enable succeeded: a host that stops answering here
+    // fails nothing.
     const ssh = remoteWindows(transport);
-    if (command.action === 'enable' && ssh && (await ssh.windowsProbe(true)).elevatedSupervisor)
-      process.stderr.write(`Puddle: ${elevatedWarning(ssh.label, 'wmi')}\n`);
+    if (command.action === 'enable' && ssh) {
+      const probe = await ssh.windowsProbe(true).catch(() => null);
+      if (probe?.elevatedSupervisor)
+        process.stderr.write(`Puddle: ${elevatedWarning(ssh.label, 'wmi')}\n`);
+    }
     return 0;
   } finally {
     transport.dispose();

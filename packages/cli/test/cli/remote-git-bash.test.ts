@@ -18,7 +18,13 @@ interface Spawned {
   args: string[];
 }
 const spawned = vi.hoisted(() => [] as Spawned[]);
-const answers = vi.hoisted(() => ({ version: '', elevatedSupervisor: false }));
+const answers = vi.hoisted(() => ({
+  version: '',
+  elevatedSupervisor: false,
+  /** The connection drops once the enable has succeeded. */
+  dropAfterEnable: false,
+  enabled: false,
+}));
 
 const probe = JSON.stringify({
   puddle: 'windows-host',
@@ -43,15 +49,18 @@ vi.mock('../../src/lib/transport/spawn.js', () => ({
       kill: () => true,
     });
     const command = args.at(-1) ?? '';
-    const reply = command.startsWith('powershell.exe ')
-      ? {
-          code: 1,
-          stdout: `${JSON.stringify({ ...JSON.parse(probe), elevatedSupervisor: answers.elevatedSupervisor })}\r\n`,
-          stderr: 'puddle-exit:0\n',
-        }
-      : command.includes('--version')
-        ? { code: 0, stdout: answers.version, stderr: '' }
-        : { code: 0, stdout: '', stderr: '' };
+    const reply =
+      answers.dropAfterEnable && answers.enabled
+        ? { code: 255, stdout: '', stderr: 'Connection closed by remote host\n' }
+        : command.startsWith('powershell.exe ')
+          ? {
+              code: 1,
+              stdout: `${JSON.stringify({ ...JSON.parse(probe), elevatedSupervisor: answers.elevatedSupervisor })}\r\n`,
+              stderr: 'puddle-exit:0\n',
+            }
+          : command.includes('--version')
+            ? { code: 0, stdout: answers.version, stderr: '' }
+            : { code: 0, stdout: '', stderr: '' };
     const finish = () => {
       child.stdout.end(reply.stdout);
       child.stderr.end(reply.stderr);
@@ -68,15 +77,17 @@ vi.mock('../../src/lib/transport/spawn.js', () => ({
 const host = vi.hoisted(() => ({
   connectorInstalled: vi.fn(async () => ({ installed: true, version: '1.2.3' as string | null })),
   connector: vi.fn(
-    async (args: readonly string[], _opts?: { stdin?: string; timeoutMs?: number }) =>
-      ({
+    async (args: readonly string[], _opts?: { stdin?: string; timeoutMs?: number }) => {
+      if (args[0] === '--configure') answers.enabled = true;
+      return {
         code: 0,
         stdout:
           args[0] === '--version'
             ? 'puddle-connector remote protocol 4; cockpit controls 2; platform win32\n'
             : JSON.stringify({ enabled: true, connected: false }),
         stderr: '',
-      }) as ConnectorRun,
+      } as ConnectorRun;
+    },
   ),
   connectorForeground: vi.fn(async (_write: (text: string) => void) => 0),
 }));
@@ -109,6 +120,8 @@ afterAll(() => {
 beforeEach(() => {
   spawned.length = 0;
   answers.elevatedSupervisor = false;
+  answers.dropAfterEnable = false;
+  answers.enabled = false;
   host.connector.mockClear();
   host.connectorForeground.mockClear();
   vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
@@ -156,6 +169,35 @@ describe('puddle remote on a Windows host whose default shell is Git Bash', () =
       });
       expect(stderr.mock.calls.map(([text]) => String(text)).join('')).toContain(
         'puddled on alice@gitbash runs elevated',
+      );
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('still succeeds when the host stops answering the elevation check after enabling', async () => {
+    answers.version = posixVersion.replace('\n', '; platform win32\n');
+    answers.elevatedSupervisor = true;
+    answers.dropAfterEnable = true;
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      await expect(
+        runRemote({
+          cmd: 'remote',
+          action: 'enable',
+          host: 'alice@gitbash',
+          profile: 'b'.repeat(10),
+          foreground: false,
+        }),
+      ).resolves.toBe(0);
+      expect(stdout.mock.calls.map(([text]) => String(text)).join('')).toContain(
+        'Remote access enabled',
+      );
+      // The check was asked and got no answer: no warning, and no failure.
+      expect(commands().at(-1)).toBe(windowsRemoteCommand());
+      expect(stderr.mock.calls.map(([text]) => String(text)).join('')).not.toContain(
+        'runs elevated',
       );
     } finally {
       stderr.mockRestore();
