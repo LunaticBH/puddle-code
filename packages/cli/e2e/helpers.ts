@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 import { cockpitStatusSchema, type WsServerMessage } from '@puddle/shared';
 import { listWindowsProcesses, stopWindowsProcessTree } from '@puddle/shared/node/platform';
+import { reapExited, tracked } from '../../daemon/test/helpers/child-lifetimes.js';
 import { onTeardown } from '../../daemon/test/helpers/process-guard.js';
 import { findFreePort } from '../src/lib/transport/net.js';
 
@@ -35,20 +36,15 @@ export function env(home: string): NodeJS.ProcessEnv {
   };
 }
 const windows = process.platform === 'win32';
-/** When each child was started: the lower bound that recognises its orphans. */
-const started = new WeakMap<ChildProcess, number>();
-function track<T extends ChildProcess>(start: () => T): T {
-  const at = Date.now();
-  const child = start();
-  started.set(child, at);
-  return child;
-}
+/** Records when each child started and exited: the bounds that recognise its orphans. */
+const track = tracked;
 
 /**
  * Stops a child and waits for its exit. Windows has no SIGTERM from another
  * process (`kill` is TerminateProcess): a fixture daemon is asked over its
  * IPC channel, so it stops its PTYs as on POSIX, and once the child has
- * exited, whatever it left running is stopped too.
+ * exited, whatever it left running is stopped too, once: children of its
+ * pid created after it exited are a later holder's.
  */
 export async function stop(child: ChildProcess, signal: NodeJS.Signals = 'SIGTERM'): Promise<void> {
   const exited = new Promise<void>((resolve) => {
@@ -66,11 +62,13 @@ export async function stop(child: ChildProcess, signal: NodeJS.Signals = 'SIGTER
     }
   }
   await exited;
-  if (windows && child.pid !== undefined && started.has(child)) {
-    await stopWindowsProcessTree(child.pid, {
-      processes: listWindowsProcesses,
-      root: { startedAtMs: started.get(child)!, exitedAtMs: Date.now() },
-    });
+  if (windows) {
+    await reapExited(child, ({ pid, startedAtMs, exitedAtMs }) =>
+      stopWindowsProcessTree(pid, {
+        processes: listWindowsProcesses,
+        root: { startedAtMs, exitedAtMs },
+      }),
+    );
   }
 }
 export async function startFixtureDaemon(home: string) {

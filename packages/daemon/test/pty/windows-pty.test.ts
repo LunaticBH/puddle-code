@@ -241,7 +241,7 @@ describe.skipIf(process.platform !== 'win32')('PtyManager on ConPTY', () => {
     expect(output()).toContain('KEYS=1 VALUE=C:\\override|');
   });
 
-  it('SIGKILL stops the whole process tree, even processes outside the console', async () => {
+  it('SIGKILL ends the root at once, and never a detached child, which left its console', async () => {
     const { ptys, output, exits } = manager();
     const script =
       "const { spawn } = require('node:child_process');" +
@@ -250,11 +250,22 @@ describe.skipIf(process.platform !== 'win32')('PtyManager on ConPTY', () => {
     ptys.spawn('s4', 'agent', process.execPath, ['-e', script], { cwd: tmpdir() });
     await waitFor(() => /CHILD=\d+\|/.test(output()));
     const child = Number(/CHILD=(\d+)\|/.exec(output())![1]);
-    expect(isPidAlive(child)).toBe(true);
-    ptys.kill('s4', 'agent', 'SIGKILL');
-    await waitFor(() => exits.length === 1);
-    await waitFor(() => !isPidAlive(child));
-    expect(ptys.has('s4', 'agent')).toBe(false);
+    try {
+      expect(isPidAlive(child)).toBe(true);
+      const root = ptys.pidFor('s4', 'agent')!;
+      ptys.kill('s4', 'agent', 'SIGKILL');
+      await waitFor(() => exits.length === 1, 2000);
+      expect(isPidAlive(root)).toBe(false);
+      expect(ptys.has('s4', 'agent')).toBe(false);
+      // As `setsid` does on POSIX: a hang-up never reaches it.
+      expect(isPidAlive(child)).toBe(true);
+    } finally {
+      try {
+        process.kill(child);
+      } catch {
+        // Gone already.
+      }
+    }
   });
 
   it('survives resize and kill before the first output, and reports a numeric exit', async () => {

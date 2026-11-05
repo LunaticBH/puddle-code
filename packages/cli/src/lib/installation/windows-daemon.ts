@@ -6,7 +6,6 @@ import {
   controlPipeState,
   daemonEnvironment,
   isPidAlive,
-  killProcessTree,
   listWindowsProcesses,
   openRotated,
   requestDaemonShutdown,
@@ -42,7 +41,7 @@ export {
  * supervisor first, which would otherwise start the daemon again, then use
  * the authenticated `shutdown` request (protocol 25.7) and wait for the pipe
  * to go; only a process whose command line proves it is this home's daemon
- * or supervisor is ever terminated.
+ * or supervisor is ever terminated, and only that process (terminate).
  */
 
 const SHUTDOWN_GRACE_MS = 15_000;
@@ -51,6 +50,22 @@ const STARTING_GRACE_MS = 15_000;
 const TERMINATE_GRACE_MS = 5_000;
 /** How long a supervisor asked to stop may take to stop its daemon and connector. */
 const SUPERVISOR_GRACE_MS = 30_000;
+
+/**
+ * Terminates a daemon or supervisor that did not stop, and nothing else:
+ * Node ends the children it started itself with it (a supervisor's daemon
+ * and connector), and a daemon's pseudoconsoles close with it, which ends
+ * what is attached to them, as a hang-up does (docs/windows.md, decision
+ * 8). `taskkill /T` would also end what the sessions started that left
+ * their consoles, GUI programmes and detached servers among them.
+ */
+function terminate(pid: number): void {
+  try {
+    process.kill(pid);
+  } catch {
+    // It exited meanwhile.
+  }
+}
 
 export interface WindowsRuntime {
   /** `<home>\bin\versions\<V>` */
@@ -181,9 +196,10 @@ export interface StopOptions {
 /**
  * End the home's supervisor, which would otherwise restart the daemon a
  * stop ends: asked over its pipe, it stops its daemon and connector itself.
- * One that does not stop in time, or cannot be asked, is terminated with its
- * children only when its command line identifies it (isHomeSupervisor): the
- * pid its pipe reports is waited for, never terminated on that word alone.
+ * One that does not stop in time, or cannot be asked, is terminated, its
+ * children with it, only when its command line identifies it
+ * (isHomeSupervisor): the pid its pipe reports is waited for, never
+ * terminated on that word alone.
  */
 export async function stopWindowsSupervisor(home: string, opts: StopOptions = {}): Promise<void> {
   const logger = opts.logger ?? silentLogger;
@@ -201,7 +217,7 @@ export async function stopWindowsSupervisor(home: string, opts: StopOptions = {}
   }
   for (const pid of pids) {
     logger.warn(`the Puddle supervisor (pid ${pid}) did not stop — terminating it`);
-    await killProcessTree(pid, { platform: 'win32' });
+    terminate(pid);
   }
   if (await supervisorsGone(home, pids, opts.terminateGraceMs ?? TERMINATE_GRACE_MS)) return;
   // Only an answering supervisor gets here without identified pids.
@@ -258,7 +274,7 @@ export async function stopWindowsDaemon(home: string, opts: StopOptions = {}): P
   }
   for (const pid of pids) {
     logger.warn(`puddled (pid ${pid}) did not stop cleanly — terminating it`);
-    await killProcessTree(pid, { platform: 'win32' });
+    terminate(pid);
   }
   if (await stopped(home, pids, opts.terminateGraceMs ?? TERMINATE_GRACE_MS)) {
     return clearPidFile(home);
@@ -331,7 +347,7 @@ export async function stopWindowsDaemonPid(
     }
   }
   logger.warn(`puddled (pid ${pid}) did not stop cleanly — terminating it`);
-  await killProcessTree(pid, { platform: 'win32' });
+  terminate(pid);
   if (await pidGone(pid, opts.terminateGraceMs ?? TERMINATE_GRACE_MS)) {
     clearPidFileOf(home, pid);
     return 'stopped';

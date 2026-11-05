@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   isPidAlive,
   killProcessTree,
@@ -15,6 +15,19 @@ import {
  * decision 8). Tables are stand-ins, so this runs on any OS; the last block
  * stops real processes on Windows.
  */
+
+/** What killProcessTree runs (taskkill.exe), recorded on its way through. */
+const executed = vi.hoisted(() => [] as string[]);
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    execFile: ((file: string, ...rest: unknown[]) => {
+      executed.push(file);
+      return (actual.execFile as (...args: unknown[]) => unknown)(file, ...rest);
+    }) as typeof actual.execFile,
+  };
+});
 
 const entry = (
   pid: number,
@@ -308,14 +321,22 @@ describe('killProcessTree with a process table', () => {
     expect(read).toBe(false);
   });
 
-  it('falls back to taskkill when the table cannot be read', async () => {
-    // A pid no process holds: taskkill (or its absence off Windows) finds nothing.
+  it('stops nothing when the table cannot be read: never taskkill on a pid that may be reused', async () => {
+    executed.length = 0;
     await expect(
       killProcessTree(2 ** 30, {
         platform: 'win32',
         processes: () => Promise.reject(new Error('no table')),
       }),
     ).resolves.toBeUndefined();
+    expect(executed.filter((file) => /taskkill/i.test(file))).toEqual([]);
+  });
+
+  it('still runs taskkill without a table', async () => {
+    executed.length = 0;
+    // A pid no process holds: taskkill (or its absence off Windows) finds nothing.
+    await killProcessTree(2 ** 30, { platform: 'win32' });
+    expect(executed.filter((file) => /taskkill/i.test(file))).toHaveLength(1);
   });
 });
 

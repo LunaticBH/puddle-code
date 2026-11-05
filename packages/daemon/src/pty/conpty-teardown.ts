@@ -1,149 +1,170 @@
-import {
-  isPidAlive,
-  listWindowsProcesses,
-  stopWindowsProcessTree,
-  windowsProcessTree,
-  type ProcessTreeRoot,
-  type WindowsProcess,
-  type WindowsProcessSource,
-} from '@puddle/shared/node/platform';
-import type { ConptyJob } from './conpty-jobs.js';
-import { conptyRootBounds, type PtyRootRecord } from './pty-roots.js';
+import type { ConptyConsole, ConsoleMember, ConsoleScan } from './conpty-jobs.js';
 
 /**
- * What a ConPTY leaves behind once its root process has exited, and how the
- * daemon stops it (docs/windows.md, decision 8).
+ * What a ConPTY's end ends (docs/windows.md, decision 8): exactly the
+ * processes attached to its console, then its headless console host, as a
+ * hang-up ends the processes of a POSIX terminal's session and nothing else.
  *
- * POSIX closes a PTY with a hang-up that ends its session's processes.
- * Windows has none: closing a pseudoconsole ends only the processes attached
- * to it, and a root's exit ends nothing at all. A descendant that is
- * detached, started in a console of its own (any hidden Node child, or
- * PowerShell's `Start-Process`) or still attached to the pseudoconsole keeps
- * running, and node-pty closes the pseudoconsole only from `kill()`, never
- * once the root has exited, so its headless `conhost.exe` would run as long
- * as the daemon does. So after every ConPTY root's exit the daemon ends the
- * PTY's job (conpty-jobs.ts), which holds everything the root started
- * whichever of its parents have exited; then it stops what the job could
- * not hold by the process table's creation-consistent tree, and the console
- * host, before it reports the exit.
+ * Windows ends a console's processes itself when the console closes
+ * (ClosePseudoConsole sends them CTRL_CLOSE_EVENT, and ends them once their
+ * handlers return), but node-pty closes a pseudoconsole only from `kill()`
+ * while its root runs, so a console whose root exited on its own, and
+ * whatever still runs in it, would last as long as the daemon. A process
+ * that left the console is never ended: a GUI programme and everything it
+ * starts, a detached process, one started in a console of its own (any
+ * hidden Node child, PowerShell's `Start-Process`, `start` of a programme),
+ * as `nohup`, `setsid` and GUI launches survive a hang-up on POSIX. Nor is a
+ * GUI programme that attached to the console itself (Electron does unless
+ * told otherwise), or what it started there: a close would end those too,
+ * so a stop that finds one attached ends the rest itself, without closing
+ * the console (PtyManager). The ConPTY helper (conpty-jobs.ts) names the
+ * console's processes and holds each one open, so a pid it names is never
+ * another process's.
  */
 
-export interface ConptyRoot extends PtyRootRecord {
-  /** node-pty has seen the root exit (it knows the exit code). */
-  exited: boolean;
-}
-
-export interface ConptyTeardownDeps {
-  processes: WindowsProcessSource;
-  terminate(pid: number): void;
-  isAlive(pid: number): boolean;
-  /** The pseudoconsole's owner, whose child its `conhost.exe` is: this process. */
-  hostPid: number;
-  now(): number;
-  sleep(ms: number): Promise<void>;
-  /** How long a root still running when its console closed may take to exit on its own. */
-  graceMs?: number;
-}
-
-/** The ConPTY host is created inside `pty.spawn`: allow for clock rounding only. */
-const HOST_SLACK_MS = 25;
-
-/**
- * The PTY's tree while its root runs, read before Puddle closes its console:
- * a member whose parent exits first is still known to belong to it.
- */
-export async function snapshotConptyTree(
-  root: Pick<ConptyRoot, 'pid' | 'startedAtMs' | 'spawnedAtMs'>,
-  deps: Pick<ConptyTeardownDeps, 'processes'>,
-): Promise<WindowsProcess[]> {
-  return windowsProcessTree(await deps.processes(), { pid: root.pid, ...conptyRootBounds(root) });
-}
-
-export interface ReapConptyOptions {
-  /** An earlier snapshotConptyTree: those of its members still running are stopped too. */
-  known?: readonly WindowsProcess[];
-  /** When `known` was read (see StopWindowsProcessTreeOptions.knownAtMs). */
-  knownAtMs?: number;
-  /** The PTY's job, when it has one: ended before the process table is read. */
-  job?: ConptyJob | null;
-  /**
-   * The latest time a root still running may have to exit on its own: a
-   * stop's deadline, which a SIGKILL brings forward.
-   */
-  graceEndsBy?: () => number;
+/** The root as the helper holds it, and its pid. */
+export interface HeldRoot {
+  pid: number;
+  console: Pick<ConptyConsole, 'rootCreatedAtMs' | 'host'>;
 }
 
 /**
- * Stops everything `root` left running, then its ConPTY host: first the
- * PTY's job, then, by a fresh process table, the root's tree, the members of
- * `known` still running and their descendants. Resolves with the processes
- * it stopped by the table; rejects only when the table cannot be read.
- *
- * node-pty reports the exit of a root it killed when the pseudoconsole's
- * output closes, which may be before the root has finished exiting: such a
- * root first gets `graceMs` (at most until `graceEndsBy`) to exit on its own,
- * as closing its console asks it to, before it is stopped with the rest. Its
- * pid cannot name another process meanwhile: node-pty holds a handle to the
- * root until it has exited.
+ * Whether `member` is attached to the PTY's console: created after its host
+ * (after its root, while the host is not told apart: nothing older is the
+ * session's, the daemon least of all), and either the console's own list
+ * named it or it names the console's host (a process whose host was
+ * terminated keeps naming that pid, which a later host may hold). With
+ * neither the host nor the root told apart, nothing is.
  */
-export async function reapConptyTree(
-  root: ConptyRoot,
-  deps: ConptyTeardownDeps,
-  options: ReapConptyOptions = {},
-): Promise<WindowsProcess[]> {
-  let exitedBy = deps.now();
-  if (!root.exited) {
-    const until = deps.now() + (deps.graceMs ?? 3000);
-    const ends = () => Math.min(until, options.graceEndsBy?.() ?? Infinity);
-    while (deps.isAlive(root.pid) && deps.now() < ends()) await deps.sleep(50);
-  }
-  // Whatever is in the job goes at once, however its parents ended.
-  if (options.job) await options.job.end();
-  if (!root.exited) exitedBy = deps.now();
-  const table = await deps.processes({ fresh: true });
-  const holder = table.find((entry) => entry.pid === root.pid);
-  const bounds = conptyRootBounds(root);
-  let tree: Omit<ProcessTreeRoot, 'pid'>;
-  if (
-    !root.exited &&
-    holder !== undefined &&
-    holder.createdAtMs !== null &&
-    holder.createdAtMs >= bounds.startedAtMs - HOST_SLACK_MS &&
-    holder.createdAtMs <= bounds.createdBeforeMs
-  ) {
-    // Still running (it has no job, or outlived it): stopped with its tree.
-    tree = { createdAtMs: holder.createdAtMs };
-  } else {
-    tree = { startedAtMs: root.startedAtMs, exitedAtMs: exitedBy };
-  }
-  const stopped = await stopWindowsProcessTree(root.pid, {
-    processes: deps.processes,
-    root: tree,
-    known: options.known,
-    knownAtMs: options.knownAtMs,
-    table,
-    terminate: deps.terminate,
-    now: deps.now,
-  });
-  const hosts = table.filter(
-    (entry) =>
-      entry.ppid === deps.hostPid &&
-      entry.name.toLowerCase() === 'conhost.exe' &&
-      /--headless/i.test(entry.commandLine ?? '') &&
-      entry.createdAtMs !== null &&
-      entry.createdAtMs >= root.startedAtMs - HOST_SLACK_MS &&
-      entry.createdAtMs <= root.spawnedAtMs + HOST_SLACK_MS,
+export function attachedTo(member: ConsoleMember, console: HeldRoot['console']): boolean {
+  const { host } = console;
+  const from = host?.createdAtMs ?? console.rootCreatedAtMs;
+  if (from === null || member.createdAtMs < from) return false;
+  return member.listed || (host !== null && member.consoleHost === host.pid);
+}
+
+function isRoot(member: ConsoleMember, held: HeldRoot): boolean {
+  return (
+    member.pid === held.pid &&
+    held.console.rootCreatedAtMs !== null &&
+    member.createdAtMs === held.console.rootCreatedAtMs
   );
-  // Two PTYs started within the slack of each other: neither host is known to be this one.
-  if (hosts.length === 1) {
-    try {
-      deps.terminate(hosts[0]!.pid);
-      stopped.push(hosts[0]!);
-    } catch {
-      // It closed on its own meanwhile.
+}
+
+/**
+ * Which held processes of `scan` a teardown ends: every process attached to
+ * the PTY's console, never a GUI programme nor what one started; the root
+ * only when `root`, and only while it is attached, as `root`, whatever its
+ * image (it is the session's own process).
+ */
+export function consoleTargets(
+  scan: ConsoleScan,
+  held: HeldRoot,
+  options: { root: boolean },
+): string[] {
+  const targets: string[] = [];
+  for (const member of scan.members) {
+    if (!attachedTo(member, held.console)) continue;
+    if (isRoot(member, held)) {
+      if (options.root && scan.rootAlive) targets.unshift('root');
+    } else if (!member.gui && !member.guiStarted) {
+      targets.push(member.key);
     }
   }
-  return stopped;
+  return targets;
+}
+
+/**
+ * Whether a GUI programme other than the root, or something one started, is
+ * attached to the console: closing it would end them (CTRL_CLOSE_EVENT goes
+ * to every process attached).
+ */
+export function guiAttached(scan: ConsoleScan, held: HeldRoot): boolean {
+  return scan.members.some(
+    (member) =>
+      attachedTo(member, held.console) &&
+      !isRoot(member, held) &&
+      (member.gui || member.guiStarted),
+  );
+}
+
+export interface EndConsoleOptions {
+  /** End the root too, if it still runs. */
+  root: boolean;
+  /** Then end the console host, if it still runs. */
+  host: boolean;
+  /**
+   * Read the console's own list as well (attaching to it): only while
+   * nobody closes the console, whose close would end whatever is attached.
+   */
+  attach: boolean;
+}
+
+/**
+ * Ends what `console` holds attached to the PTY's console, reading it again
+ * for processes started in between, at most twice more; then its console
+ * host. Resolves with how many processes it ended, and whether the helper
+ * answered every scan (when it did not, what is attached is not known to
+ * have ended); never rejects.
+ */
+export async function endConsole(
+  root: number,
+  console: ConptyConsole,
+  options: EndConsoleOptions,
+): Promise<{ ended: number; answered: boolean }> {
+  const held: HeldRoot = { pid: root, console };
+  let ended = 0;
+  // Without a known host only the console's own list names its processes.
+  const attach = options.attach && console.host === null;
+  for (let round = 0; round < 3; round++) {
+    const scan = await console.scan({ attach: round === 0 ? options.attach : attach });
+    if (!scan) return { ended, answered: false };
+    const targets = consoleTargets(scan, held, { root: options.root });
+    if (targets.length === 0) {
+      if (options.host && scan.hostAlive) ended += await console.terminate(['host']);
+      return { ended, answered: true };
+    }
+    ended += await console.terminate(targets);
+  }
+  // Something keeps starting processes in it: its host goes regardless.
+  if (options.host) ended += await console.terminate(['host']);
+  return { ended, answered: true };
+}
+
+/** Resolves once the event loop has been through a whole poll phase after this call. */
+function afterPoll(): Promise<void> {
+  return new Promise((resolve) => setImmediate(() => setImmediate(resolve)));
+}
+
+/**
+ * Ends a ConPTY's root by its pid, unless node-pty has seen it exit by the
+ * time the event loop has polled (`exited`). Resolves with whether it tried.
+ *
+ * node-pty's thread closes its handle on the root as it exits, then queues
+ * the exit callback for the event loop's poll phase; from that close the
+ * pid may name another process, unless the ConPTY helper holds the root.
+ * Asked before that callback has run, a kill would reach whatever holds
+ * the pid by then, however long the event loop takes to come round (a
+ * busy one, a long one). Waiting for a poll phase first runs any callback
+ * already queued: what is left is the root exiting within the moment
+ * between that poll and the kill, which, when nothing holds the root (no
+ * helper, as under Constrained Language Mode, or a root it did not tell
+ * apart), is accepted.
+ */
+export async function endRootByPid(
+  pid: number,
+  exited: () => boolean,
+  kill: (pid: number) => void = (target) => process.kill(target),
+): Promise<boolean> {
+  if (exited()) return false;
+  await afterPoll();
+  if (exited()) return false;
+  try {
+    kill(pid);
+  } catch {
+    // It exited meanwhile.
+  }
+  return true;
 }
 
 /**
@@ -191,15 +212,3 @@ export class ExitDeadline {
     });
   }
 }
-
-/** This process's table, clock and TerminateProcess. */
-export const conptyTeardownDeps: ConptyTeardownDeps = {
-  processes: (options) => listWindowsProcesses(options),
-  terminate: (pid) => {
-    process.kill(pid);
-  },
-  isAlive: (pid) => isPidAlive(pid, 'win32'),
-  hostPid: process.pid,
-  now: () => Date.now(),
-  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-};

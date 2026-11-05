@@ -116,7 +116,15 @@ function spawnChild(kind: 'puddled' | 'connector'): SupervisedChild {
       stop: () => {
         if (child.connected) child.disconnect();
       },
-      kill: () => killProcessTree(pid, { platform: 'win32' }),
+      // The daemon alone: its consoles close with it, and the reap that
+      // follows its exit ends what they left by the PTY rule (never a GUI
+      // programme or what left a console), which `taskkill /T` would not.
+      kill:
+        kind === 'puddled'
+          ? async () => {
+              child.kill();
+            }
+          : () => killProcessTree(pid, { platform: 'win32' }),
     };
   } finally {
     closeSync(out);
