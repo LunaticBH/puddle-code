@@ -1,11 +1,15 @@
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
 import { createServer } from 'node:net';
-import { killProcessTree } from '@puddle/shared/node/platform';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
 import type { LifecycleLaunchContext, LifecycleLaunchResource } from '../adapter.js';
 import { agentEnv, spawnAgent } from '../agent-process.js';
 import { CodexControl } from './control.js';
 import { lifecycleVersionAtLeast } from '../lifecycle-version.js';
+import {
+  stopCodexServerWindows,
+  type CodexServerProcess,
+  type CodexStopDeps,
+} from './windows-stop.js';
 
 interface PendingRequest {
   method: 'thread/start' | 'thread/resume' | 'thread/fork';
@@ -36,12 +40,14 @@ export async function prepareCodexLifecycle(
   const scriptedTurns = await lifecycleVersionAtLeast('codex', ['--version'], [0, 159, 0]);
   const appPort = await freePort();
   const appUrl = `ws://127.0.0.1:${appPort}`;
+  const startedAtMs = Date.now();
   // Windows resolves `codex` on PATH only: the worktree cwd could plant codex.exe.
   const appServer = spawnAgent(
     'codex',
     ['app-server', '--listen', appUrl],
     codexAppServerSpawnOptions(context),
   );
+  const server: CodexServerProcess = { child: appServer, startedAtMs, spawnedAtMs: Date.now() };
   let errorTail = '';
   appServer.once('error', (error) => {
     errorTail = `${errorTail}${error.message}`.slice(-2_000);
@@ -52,7 +58,7 @@ export async function prepareCodexLifecycle(
   try {
     await waitForWebSocket(appUrl, appServer, () => errorTail);
   } catch (error) {
-    stopProcess(appServer);
+    void stopProcess(server);
     throw error;
   }
 
@@ -64,13 +70,13 @@ export async function prepareCodexLifecycle(
     });
   } catch (error) {
     proxy.close();
-    stopProcess(appServer);
+    void stopProcess(server);
     throw error;
   }
   const address = proxy.address();
   if (address === null || typeof address === 'string') {
     proxy.close();
-    stopProcess(appServer);
+    void stopProcess(server);
     throw new Error('Codex lifecycle proxy did not bind a TCP port');
   }
   const proxyPort = address.port;
@@ -152,7 +158,7 @@ export async function prepareCodexLifecycle(
       control.disconnect();
       for (const socket of sockets) socket.terminate();
       proxy.close();
-      stopProcess(appServer);
+      return stopProcess(server);
     },
   };
 }
@@ -369,16 +375,21 @@ async function waitForWebSocket(
 }
 
 /**
- * On Windows the direct child of an npm install is node running codex.js,
- * which holds the native app-server as its own child; TerminateProcess on
- * the wrapper alone would leak that server and its port.
+ * Stops the app-server. POSIX sends SIGTERM to the process the daemon
+ * started, which the npm launcher passes on to the native server. On
+ * Windows the direct child of an npm install is node running codex.js,
+ * which holds the native app-server as its own child, and TerminateProcess
+ * on the wrapper alone would leak that server, its port and the commands it
+ * runs; never the whole tree, though: see windows-stop.ts.
  */
 export function stopProcess(
-  child: ChildProcess,
+  server: CodexServerProcess,
   platform: NodeJS.Platform = process.platform,
-): void {
-  if (child.exitCode !== null || child.killed) return;
-  if (platform === 'win32' && child.pid !== undefined)
-    void killProcessTree(child.pid, { platform });
-  else child.kill('SIGTERM');
+  deps: CodexStopDeps = {},
+): Promise<void> {
+  const { child } = server;
+  if (child.exitCode !== null || child.killed) return Promise.resolve();
+  if (platform === 'win32' && child.pid !== undefined) return stopCodexServerWindows(server, deps);
+  child.kill('SIGTERM');
+  return Promise.resolve();
 }
