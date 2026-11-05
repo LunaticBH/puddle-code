@@ -88,12 +88,15 @@ export interface ConptyConsole {
    * What is attached to the console now, each process held open from now on.
    * With `attach`, the helper also reads the console's own list, attaching
    * to it for a moment: never while the console is being closed, whose
-   * close would end the helper with its members. While the host is not told
-   * apart, it reads the root's console only when this PTY's spawn could have
+   * close would end the helper with its members. Nor once `attachByMs`
+   * (Unix ms) has passed, or later than ATTACH_MARGIN_MS before the
+   * helper's own bound on the answer: whoever asked may have given up on
+   * it by then and closed the console. While the host is not told apart,
+   * it reads the root's console only when this PTY's spawn could have
    * created it (never the parent's, which a GUI root may attach to), and
    * names only what was created after that host. Null when it did not answer.
    */
-  scan(options: { attach: boolean }): Promise<ConsoleScan | null>;
+  scan(options: { attach: boolean; attachByMs?: number }): Promise<ConsoleScan | null>;
   /**
    * Ends held processes: members by key, `root`, `host` (never a GUI member,
    * nor one a GUI programme started). Resolves with how many.
@@ -302,7 +305,7 @@ public static class PuddleConsoles
         if (f.Length == 7 && f[1] == "track") return Track(f[2], int.Parse(f[3]), long.Parse(f[4]), long.Parse(f[5]), int.Parse(f[6]));
         if (f.Length == 6 && f[1] == "claim") return Claim(f[2], f[3] == "1", int.Parse(f[4]), long.Parse(f[5]));
         if (f.Length == 3 && f[1] == "alive") return Alive(f[2]);
-        if (f.Length == 4 && f[1] == "scan") return Scan(f[2], f[3] == "1");
+        if (f.Length == 5 && f[1] == "scan") return Scan(f[2], f[3] == "1", long.Parse(f[4]));
         if (f.Length >= 3 && f[1] == "terminate") return Terminate(f[2], f, 3);
         if (f.Length == 3 && f[1] == "release") return Release(f[2]);
         if (f.Length == 8 && f[1] == "adopt") return Adopt(f[2], int.Parse(f[3]), long.Parse(f[4]), int.Parse(f[5]), int.Parse(f[6]), long.Parse(f[7]));
@@ -316,6 +319,13 @@ public static class PuddleConsoles
         long created, exited, kernel, user;
         if (!GetProcessTimes(handle, out created, out exited, out kernel, out user)) return -1;
         return (created - UNIX_EPOCH) / 10000;
+    }
+
+    // Now, Unix ms, by the system clock (which the daemon's Date.now()
+    // follows within milliseconds).
+    static long NowMs()
+    {
+        return (DateTime.UtcNow.ToFileTimeUtc() - UNIX_EPOCH) / 10000;
     }
 
     static bool Running(IntPtr handle)
@@ -613,9 +623,9 @@ public static class PuddleConsoles
 
     // What is attached to the PTY's console now, each process held open: by
     // each process's console host, by the console's own list (when 'attach',
-    // through the root, else a member), and what an earlier scan held that
-    // still runs.
-    static string Scan(string id, bool attach)
+    // through the root, else a member, until 'attachBy'), and what an
+    // earlier scan held that still runs.
+    static string Scan(string id, bool attach, long attachBy)
     {
         Pty pty = Find(id);
         if (pty == null) return "none";
@@ -664,7 +674,7 @@ public static class PuddleConsoles
                         }
                     }
                 }
-                if (through != 0) Listed(pty, through, console, listed, table);
+                if (through != 0) Listed(pty, through, console, attachBy, listed, table);
             }
             finally { Close(found); }
         }
@@ -705,16 +715,22 @@ public static class PuddleConsoles
     // 'host' (held open meanwhile, so that its pid stays its own): each pid
     // listed again once held open is the process listed the first time.
     // Only a process attached to 'host' counts, created after it and after
-    // the PTY's spawn began; never the PTY's parent.
-    static void Listed(Pty pty, int through, Pin host, HashSet<string> listed, Dictionary<int, Entry> table)
+    // the PTY's spawn began; never the PTY's parent. Never once 'attachBy'
+    // (Unix ms) has passed: the daemon may have stopped waiting for this
+    // answer and closed the console by then, and its close would end this
+    // process with what is attached to it (its handler does not outlast
+    // CTRL_CLOSE_EVENT), and every hold with this process.
+    static void Listed(Pty pty, int through, Pin host, long attachBy, HashSet<string> listed, Dictionary<int, Entry> table)
     {
         var opened = new List<Pin>();
         lock (attaching)
         {
-            if (!AttachConsole(through)) return;
+            // (Read once this scan's turn has come: other scans may have held it up.)
+            if (NowMs() > attachBy || !AttachConsole(through)) return;
             try
             {
-                if (ConsoleHost(GetCurrentProcess()) != host.Pid) return;
+                // An attach that took until past it reads nothing, and lets go at once.
+                if (NowMs() > attachBy || ConsoleHost(GetCurrentProcess()) != host.Pid) return;
                 foreach (int pid in List())
                 {
                     if (pid == pty.Parent) continue;
@@ -1062,6 +1078,16 @@ export interface ConptyHelperOptions {
 /** How long after a helper that could not start (no PowerShell, `Add-Type` refused) none is tried. */
 const RETRY_MS = 5 * 60_000;
 
+/**
+ * How long before whoever asked for a scan stops waiting for it the helper
+ * stops attaching to the console (`scan`'s `attachByMs`): once it has
+ * stopped waiting, it may close the console, whose close would end a
+ * helper attached to it, and with the helper every hold it has. Attached,
+ * the helper reads the console's list and lets go within a few
+ * milliseconds; the margin is for a helper short of CPU meanwhile.
+ */
+export const ATTACH_MARGIN_MS = 500;
+
 function count(answer: string | null): number {
   const value = answer?.startsWith('ok ') ? Number(answer.slice(3)) : 0;
   return Number.isSafeInteger(value) && value > 0 ? value : 0;
@@ -1333,9 +1359,17 @@ export class ConptyHelper implements ConptyJobs, ConsoleInspector {
         const [ok, root, hostAlive] = (reply ?? '').split(' ');
         return ok === 'ok' ? { root: root === '1', host: hostAlive === '1' } : null;
       },
-      scan: async ({ attach }) => {
+      scan: async ({ attach, attachByMs }) => {
         if (!current()) return null;
-        const reply = await this.ask(`scan ${id} ${attach ? 1 : 0}`);
+        // No later than the caller's deadline, nor than this request's own
+        // bound (ask's, which starts no earlier than now) allows: a number,
+        // 0 for no attach at all.
+        const asked =
+          attachByMs !== undefined && Number.isFinite(attachByMs) ? attachByMs : Infinity;
+        const by = attach
+          ? Math.floor(Math.min(asked, Date.now() + this.answerMs - ATTACH_MARGIN_MS))
+          : 0;
+        const reply = await this.ask(`scan ${id} ${attach ? 1 : 0} ${by}`);
         if (!reply?.startsWith('ok ')) return null;
         const [, root, hostAlive, ...items] = reply.split(' ');
         const members: ConsoleMember[] = [];

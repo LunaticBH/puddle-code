@@ -146,7 +146,10 @@ const endCli = async (active) => {
     held = await settled((active.held = hold(active)), until);
   }
   for (let round = 0; held && round < 3; round++) {
-    const scan = await ask('scan ' + held.id + ' ' + (round === 0 ? 1 : 0), 1500, held.helper);
+    // The console's own list the first time, attaching to it no later than
+    // 500 ms before this stops waiting (pty/conpty-jobs.ts, ATTACH_MARGIN_MS).
+    const list = round === 0 ? '1 ' + (Date.now() + 1000) : '0 0';
+    const scan = await ask('scan ' + held.id + ' ' + list, 1500, held.helper);
     const fields = (scan || '').split(' ');
     if (fields[0] !== 'ok') break;
     const targets = fields[1] === '1' ? ['root'] : [];

@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { listWindowsProcesses, type WindowsProcess } from '@puddle/shared/node/platform';
 import { guardConsoleListKill } from '../../src/pty/conpty-console-list.js';
 import {
+  ATTACH_MARGIN_MS,
   ConptyHelper,
   conptyHelperLaunch,
   HELPER_ARGS,
@@ -111,6 +112,25 @@ describe('ConptyHelper', () => {
     const { helper } = fakeHelper('serve');
     const held = await helper.track(5, window);
     expect(await held!.terminate(['root; Remove-Item', '1@2 3', '../x'])).toBe(0);
+    // An attach-by that is no number is none: the request's own bound counts.
+    const scan = await held!.scan({ attach: true, attachByMs: Number.NaN });
+    expect(scan!.members.filter((m) => m.listed).map((m) => m.pid)).toEqual([10, 11]);
+  });
+
+  it('never has the helper attach to a console once whoever asked may have given up on it', async () => {
+    const { helper } = fakeHelper('serve');
+    const held = await helper.track(5, window);
+    const listed = async (options: { attach: boolean; attachByMs?: number }) =>
+      (await held!.scan(options))!.members.filter((m) => m.listed).map((m) => m.pid);
+    expect(await listed({ attach: true, attachByMs: Date.now() + 60_000 })).toEqual([10, 11]);
+    // Past it, the console may be closing: the helper attached to it would end with it.
+    // (Well past: two processes' clocks may differ by a few milliseconds.)
+    expect(await listed({ attach: true, attachByMs: Date.now() - 10_000 })).toEqual([]);
+    expect(await listed({ attach: false })).toEqual([]);
+    // Nor later than the margin before the helper's own bound on the answer.
+    const { helper: brief } = fakeHelper('serve', { answerMs: ATTACH_MARGIN_MS - 200 });
+    const quick = await brief.track(5, window);
+    expect((await quick!.scan({ attach: true }))!.members.some((m) => m.listed)).toBe(false);
   });
 
   it('tells a root that had exited, or whose pid another process took, from one it holds', async () => {
@@ -308,6 +328,25 @@ describe.skipIf(process.platform !== 'win32')('the ConPTY helper on Windows', ()
     expect(attached.every((m) => m.listed)).toBe(true);
     // The Start-Process child and the GUI programme left the console.
     for (const gone of left) expect(scan!.members.some((m) => m.pid === gone.pid)).toBe(false);
+    held!.release();
+  });
+
+  it('never attaches to a console once a scan’s attach-by has passed', async () => {
+    const helper = new ConptyHelper();
+    helpers.push(helper);
+    const { proc, held, ping } = await cmdConsole(helper);
+    const pid = helper.pid;
+    const own = [proc.pid, ping.pid].sort();
+    // Taken up late, as by a helper short of CPU: the console may be closing.
+    const late = await held!.scan({ attach: true, attachByMs: Date.now() - 10_000 });
+    expect(late!.members.some((m) => m.listed)).toBe(false);
+    // Each process's console host still names what is attached.
+    const attached = late!.members.filter((m) => m.consoleHost === held!.host!.pid);
+    expect(attached.map((m) => m.pid).sort()).toEqual(own);
+    const timely = await held!.scan({ attach: true, attachByMs: Date.now() + 1000 });
+    const listed = timely!.members.filter((m) => m.listed);
+    expect(listed.map((m) => m.pid).sort()).toEqual(own);
+    expect(helper.pid).toBe(pid);
     held!.release();
   });
 

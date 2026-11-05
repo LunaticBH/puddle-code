@@ -3,6 +3,7 @@ import pty from 'node-pty';
 import type { LogStore } from '../logs/log-store.js';
 import { guardConsoleListKill, hangUpConsole, onRootExit } from './conpty-console-list.js';
 import {
+  ATTACH_MARGIN_MS,
   noteConptySpawn,
   sharedConptyJobs,
   type ConptyConsole,
@@ -468,7 +469,10 @@ export class PtyManager extends EventEmitter {
    * it never told the console host apart, a console nobody closed is hung
    * up (hangUpConsole), which ends what is attached as a close does; only
    * the root can be told apart then, and only while node-pty has not seen
-   * it exit, and the console host stays until the daemon exits.
+   * it exit, and the console host stays until the daemon exits. (Even for a
+   * scan that went unanswered, the helper is no longer attached to the
+   * console by then: it attaches no later than ATTACH_MARGIN_MS before the
+   * scan's bound.)
    */
   private async conptyTeardown(live: Live): Promise<void> {
     const state = live.conpty!;
@@ -804,8 +808,12 @@ export class PtyManager extends EventEmitter {
     const held = await this.heldConsole(state, SNAPSHOT_BOUND_MS);
     if (held && !state.settling && !state.killing) {
       // Held open now, what outstays the close's grace is ended by identity.
+      // The helper attaches to the console no later than ATTACH_MARGIN_MS
+      // before this stops waiting, so that it has let go of it by the close
+      // below, however late it takes the request up.
       state.scanning = true;
-      const scan = await within(held.scan({ attach: true }), SNAPSHOT_BOUND_MS, null);
+      const attachByMs = Date.now() + SNAPSHOT_BOUND_MS - ATTACH_MARGIN_MS;
+      const scan = await within(held.scan({ attach: true, attachByMs }), SNAPSHOT_BOUND_MS, null);
       state.scanning = false;
       if (scan && guiAttached(scan, { pid: rec.proc.pid, console: held })) state.spareGui = true;
     }
