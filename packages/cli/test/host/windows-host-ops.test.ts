@@ -284,6 +284,26 @@ describe('the host helper’s other operations', () => {
     expect(existsSync(join(at, 'supervisor-elevated'))).toBe(false);
   });
 
+  it('starts no second supervisor beside a supervisor pipe that does not prove itself', async () => {
+    const at = home();
+    server = await listenPrivate(ipcPath(at, 'supervisor'), (socket: Socket) => {
+      socket.on('error', () => {});
+      socket.once('data', () => socket.end(JSON.stringify({ t: 'supervisor' }) + '\n'));
+    });
+    let asked = false;
+    const powershell: PowerShellRunner = async () => {
+      asked = true;
+      return { code: 0, stdout: '{}', stderr: '' };
+    };
+    const { done, lines } = enable({ home: at, powershell });
+    await expect(done).resolves.toBe(1);
+    expect(lines().at(-1)).toMatchObject({
+      code: 'session_bound',
+      message: expect.stringContaining('the one serving this home does not answer'),
+    });
+    expect(asked).toBe(false);
+  });
+
   it('refuses remote access beside a daemon attached to an SSH session, starting nothing', async () => {
     const at = home();
     await serve(at, (challenge) => authority(ipcProof(at, 'host', challenge!)));

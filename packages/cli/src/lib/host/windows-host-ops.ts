@@ -321,7 +321,16 @@ async function requireSupervisor(
   logger: Logger,
   elevated: boolean,
 ): Promise<void> {
-  if ((await supervisorRequest(home, 'status')).kind === 'answered') return;
+  const supervisor = (await supervisorRequest(home, 'status')).kind;
+  if (supervisor === 'answered') return;
+  if (supervisor !== 'absent') {
+    // Its pipe is served, by a supervisor too busy to answer or by another program.
+    throw new CliError(
+      'session_bound',
+      'remote access needs the Puddle supervisor, and the one serving this home does not answer',
+      'retry in a moment, or restart it with puddle upgrade daemon',
+    );
+  }
   const pipe = await controlPipeState(home);
   if (pipe === 'daemon' || pipe === 'unknown') {
     throw new CliError(
