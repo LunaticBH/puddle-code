@@ -19,6 +19,7 @@ import {
   runWindowsPowerShell,
   supervisorRequest,
   type PowerShellRunner,
+  type SupervisorStart,
 } from '@puddle/shared/node/platform';
 import { inspectHostLocally } from '../auth/host-inspection.js';
 import { readCurrentVersion } from '../installation/current-link.js';
@@ -151,6 +152,7 @@ export async function runWindowsHostOp(
         const version = optionalString(body, 'version');
         if (version === undefined) throw new CliError('bad_arguments', 'install needs a version');
         const slug = optionalString(body, 'slug');
+        let started: SupervisorStart | undefined;
         await installWindowsDaemon({
           home,
           version,
@@ -162,8 +164,11 @@ export async function runWindowsHostOp(
           // A detached child would end with this SSH session (its job), and
           // until then hold the session's pipes open.
           detachedStart: false,
+          onSupervisorStart: (how) => (started = how),
         });
-        emit({ t: 'result' });
+        // How the supervisor started: the client warns when WMI started it
+        // from an elevated session, whose token the daemon then carries.
+        emit({ t: 'result', value: started === undefined ? {} : { started } });
         return 0;
       }
       case 'stop-daemon': {

@@ -1,5 +1,5 @@
 import type { HostConnection } from '../auth/connection-authority.js';
-import { remoteWindowsHost } from '../host/windows-remote-host.js';
+import { elevatedWarning, remoteWindowsHost } from '../host/windows-remote-host.js';
 import { hostPaths } from '../paths.js';
 import { sleep } from '../transport/net.js';
 import type { RunningSshCommand, SshTransport } from '../transport/ssh.js';
@@ -32,6 +32,9 @@ export class WindowsAttachedDaemon implements DaemonLease {
 
   async start(): Promise<DaemonEndpoint> {
     const started = await this.launchAndWait();
+    if ((await this.ssh.windowsProbe()).elevated) {
+      this.logger.warn(elevatedWarning(this.ssh.label, 'session'));
+    }
     return { ...started, bootstrapped: true, daemonLifetime: 'cockpit', lease: this };
   }
 

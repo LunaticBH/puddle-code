@@ -36,6 +36,7 @@ import {
   supervisorTaskName,
   windowsHostArch,
   type StartSupervisorOptions,
+  type SupervisorStart,
 } from '@puddle/shared/node/platform';
 import { readCurrentVersion } from './current-link.js';
 import { parseSums } from './desktop-update.js';
@@ -104,6 +105,12 @@ export interface WindowsInstallOptions {
    * keep the daemon attached to its own connection instead.
    */
   detachedStart?: boolean;
+  /**
+   * How the supervisor came up, once it did: through its task (which runs
+   * without elevation), WMI or a detached child (both with this process's
+   * token), or already running.
+   */
+  onSupervisorStart?: (how: SupervisorStart) => void;
 }
 
 /** Task Scheduler and WMI through an injected PowerShell, and the detached fallback. */
@@ -244,13 +251,10 @@ export async function installWindowsDaemon(opts: WindowsInstallOptions = {}): Pr
     if (!leave || readCurrentVersion(home, 'win32') === undefined) pointCurrent(home, version);
     writeFileSync(join(home, 'bin', 'puddled.cmd'), windowsLauncher());
     pruneCache(join(home, 'cache'));
-    const kind = await supervise(
-      home,
-      leave,
-      logger,
-      opts.supervision ?? {},
-      opts.detachedStart ?? true,
-    );
+    const kind = await supervise(home, leave, logger, opts.supervision ?? {}, {
+      detachedStart: opts.detachedStart ?? true,
+      ...(opts.onSupervisorStart ? { onStart: opts.onSupervisorStart } : {}),
+    });
     if (leave) {
       logger.info(`puddled ${version} is unpacked; the running daemon was left in place`);
       return;
@@ -294,7 +298,7 @@ async function supervise(
   leave: boolean,
   logger: Logger,
   seams: WindowsSupervisionSeams,
-  detachedStart: boolean,
+  { detachedStart, onStart }: { detachedStart: boolean; onStart?: (how: SupervisorStart) => void },
 ): Promise<'task' | 'detached'> {
   const marker = join(home, 'supervisor');
   const current = readCurrentVersion(home, 'win32');
@@ -349,6 +353,7 @@ async function supervise(
   }).catch((err: unknown) => {
     throw refused ? sessionBound() : err;
   });
+  onStart?.(started);
   // One that started meanwhile may still run the connector of the release before.
   if (started === 'running') await supervisorRequest(home, 'restart_connector');
   await servedOrGone(home, async () => (await supervisorRequest(home, 'status')).kind !== 'absent');

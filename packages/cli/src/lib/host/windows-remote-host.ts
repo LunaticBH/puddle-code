@@ -16,6 +16,7 @@ import {
   runHelperScript,
   stageScript,
   type HelperRuntime,
+  type WindowsProbe,
 } from '../transport/windows-remote.js';
 import { CliError, type Logger, silentLogger } from '../types.js';
 import { pinnedDaemonVersion, repoSlug } from '../version.js';
@@ -73,6 +74,19 @@ export interface HelperRun {
   payload?: string;
   timeoutMs?: number;
   signal?: AbortSignal;
+}
+
+/**
+ * The daemon carries an administrator's elevated SSH token: WMI created its
+ * supervisor from the session, or it runs attached to the session itself.
+ * The logon task runs it without elevation.
+ */
+export function elevatedWarning(label: string, via: 'wmi' | 'session'): string {
+  return (
+    `puddled on ${label} runs elevated: an administrator's SSH session started it ` +
+    `${via === 'wmi' ? 'through WMI' : 'as its own child'}, outside Task Scheduler; ` +
+    'log on to the machine once so its logon task, which runs without elevation, starts it instead'
+  );
 }
 
 const hosts = new WeakMap<SshTransport, RemoteWindowsHost>();
@@ -247,12 +261,20 @@ export class RemoteWindowsHost implements WindowsHostOps {
   async install(opts: WindowsInstallRequest): Promise<void> {
     const logger = opts.logger ?? silentLogger;
     const probe = await this.ssh.windowsProbe(true);
-    if (probe.elevated) {
-      logger.warn(
-        `the SSH session on ${this.ssh.label} is elevated (an administrator account): ` +
-          'a daemon it starts outside Task Scheduler runs elevated too',
-      );
+    const outcome = await this.installAs(probe, opts, logger);
+    // Only a supervisor WMI created carries the session's token: the logon
+    // task runs without elevation, and one already running was not started here.
+    const started = (outcome as { started?: unknown } | undefined)?.started;
+    if (probe.elevated && started === 'process') {
+      logger.warn(elevatedWarning(this.ssh.label, 'wmi'));
     }
+  }
+
+  private async installAs(
+    probe: WindowsProbe,
+    opts: WindowsInstallRequest,
+    logger: Logger,
+  ): Promise<unknown> {
     const tarball = opts.tarball;
     if (tarball !== undefined && /^https?:\/\//.test(tarball)) {
       throw new CliError('bad_arguments', '--tarball must be a local file path');
@@ -279,12 +301,11 @@ export class RemoteWindowsHost implements WindowsHostOps {
     logger.info(`installing puddled ${version} on ${this.ssh.label}`);
     if (tarball !== undefined) return this.bootstrap(version, request, logger, tarball);
     if (probe.node === probe.arch) {
-      await this.run('install', request, {
+      return this.run('install', request, {
         runtime: 'copy',
         logger,
         timeoutMs: INSTALL_TIMEOUT_MS,
       });
-      return;
     }
     return this.bootstrap(version, request, logger);
   }
@@ -294,7 +315,7 @@ export class RemoteWindowsHost implements WindowsHostOps {
     install: Record<string, unknown>,
     logger: Logger,
     tarball?: string,
-  ): Promise<void> {
+  ): Promise<unknown> {
     const helper = await this.helper();
     let archive: Parameters<typeof bootstrapScript>[0]['archive'];
     if (tarball !== undefined) {
@@ -318,7 +339,7 @@ export class RemoteWindowsHost implements WindowsHostOps {
       ...(typeof install.slug === 'string' ? { slug: install.slug } : {}),
     });
     const outcome = await this.collectStream(script, logger, tarball);
-    this.settle('installation', outcome);
+    return this.settle('installation', outcome);
   }
 
   /** collect() with a file streamed after the script. */

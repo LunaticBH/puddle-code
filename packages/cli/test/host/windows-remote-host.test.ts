@@ -183,30 +183,43 @@ describe('a Windows SSH host’s client', () => {
     const saved = process.env.PUDDLE_REPO;
     process.env.PUDDLE_REPO = 'acme/puddle';
     try {
-      const { ssh, sent } = fakeSsh(() => ({ code: 0, lines: [{ t: 'result' }] }), {
+      const { ssh, sent } = fakeSsh(() => ({ code: 0, lines: [{ t: 'result', value: {} }] }), {
         current: 'C:\\h\\bin\\versions\\0.3.13',
         node: 'x64',
-        elevated: true,
       });
-      const warned: string[] = [];
-      await new RemoteWindowsHost(ssh).install({
-        version: '0.3.14',
-        replaceRunning: false,
-        logger: { info() {}, warn: (m) => warned.push(m) },
-      });
+      await new RemoteWindowsHost(ssh).install({ version: '0.3.14', replaceRunning: false });
       const install = sent.find((s) => opOf(s.script) === 'install')!;
       expect(install.script).toContain("if ('copy' -eq 'copy')");
-      const request = /'install', '([A-Za-z0-9+/=]+)'/.exec(install.script)![1]!;
-      expect(JSON.parse(Buffer.from(request, 'base64').toString())).toEqual({
+      expect(requestOf(install.script, 'install')).toEqual({
         version: '0.3.14',
         replaceRunning: false,
         slug: 'acme/puddle',
       });
-      expect(warned.join('\n')).toContain('elevated');
     } finally {
       if (saved === undefined) delete process.env.PUDDLE_REPO;
       else process.env.PUDDLE_REPO = saved;
     }
+  });
+
+  it('warns of an elevated daemon only when WMI started it from an elevated session', async () => {
+    const warnings = async (started: string, elevated: boolean) => {
+      const { ssh } = fakeSsh(() => ({ code: 0, lines: [{ t: 'result', value: { started } }] }), {
+        current: 'C:\\h\\bin\\versions\\0.3.13',
+        node: 'x64',
+        elevated,
+      });
+      const warned: string[] = [];
+      await new RemoteWindowsHost(ssh).install({
+        version: '0.3.14',
+        logger: { info() {}, warn: (m) => warned.push(m) },
+      });
+      return warned;
+    };
+    expect((await warnings('process', true)).join('\n')).toContain('runs elevated');
+    // The logon task runs without elevation, and one already running was not started here.
+    expect(await warnings('task', true)).toEqual([]);
+    expect(await warnings('running', true)).toEqual([]);
+    expect(await warnings('process', false)).toEqual([]);
   });
 
   it('bootstraps a host with no runtime of its architecture by download', async () => {
