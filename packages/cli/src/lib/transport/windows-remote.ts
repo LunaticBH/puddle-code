@@ -342,6 +342,9 @@ export type HelperRuntime =
 /** Status 3: the staged helper has gone (Storage Sense clears %TEMP%), so stage it again. */
 export const HELPER_MISSING_EXIT = 3;
 
+/** Status 4: no runtime is installed, so no node.exe can run the helper. */
+export const NO_RUNTIME_EXIT = 4;
+
 /** Run the staged helper's `op` with a base64 JSON request; its stdin and stdout are the connection's. */
 export function runHelperScript(
   helper: string,
@@ -353,7 +356,7 @@ export function runHelperScript(
   return String.raw`$helper = ${psQuote(helper)}
 if (-not [IO.File]::Exists($helper)) { $global:PuddleExit = ${HELPER_MISSING_EXIT}; return }
 $node = Join-Path (Get-PuddleHome) 'bin\current\bin\node.exe'
-if (-not [IO.File]::Exists($node)) { throw 'no Puddle runtime is installed on this host' }
+if (-not [IO.File]::Exists($node)) { $global:PuddleExit = ${NO_RUNTIME_EXIT}; return }
 $copy = $null
 if (${psQuote(runtime)} -eq 'copy') {
   $copy = Join-Path (Get-PuddleTemp) ('node-' + [Guid]::NewGuid().ToString('N') + '.exe')

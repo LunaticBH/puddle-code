@@ -6,7 +6,11 @@ import { Readable } from 'node:stream';
 import { describe, expect, it } from 'vitest';
 import { RemoteWindowsHost } from '../../src/lib/host/windows-remote-host.js';
 import type { SshTransport, WindowsExecOptions } from '../../src/lib/transport/ssh.js';
-import { HELPER_MISSING_EXIT, type WindowsProbe } from '../../src/lib/transport/windows-remote.js';
+import {
+  HELPER_MISSING_EXIT,
+  NO_RUNTIME_EXIT,
+  type WindowsProbe,
+} from '../../src/lib/transport/windows-remote.js';
 
 /**
  * The client of a Windows SSH host (host/windows-remote-host.ts) against a
@@ -24,19 +28,23 @@ function fakeSsh(
   probe: Partial<WindowsProbe> = {},
 ) {
   const sent: Sent[] = [];
+  const probes = { count: 0 };
   const ssh = {
     label: 'alice@winbox',
     remotePlatform: 'win32',
-    windowsProbe: async () => ({
-      home: 'C:\\Users\\alice\\.puddle',
-      current: null,
-      node: null,
-      arch: 'x64',
-      build: 26200,
-      elevated: false,
-      temp: 'C:\\Users\\alice\\AppData\\Local\\Temp\\',
-      ...probe,
-    }),
+    windowsProbe: async () => {
+      probes.count++;
+      return {
+        home: 'C:\\Users\\alice\\.puddle',
+        current: null,
+        node: null,
+        arch: 'x64',
+        build: 26200,
+        elevated: false,
+        temp: 'C:\\Users\\alice\\AppData\\Local\\Temp\\',
+        ...probe,
+      };
+    },
     async execWindows(script: string, opts: WindowsExecOptions = {}) {
       let payload: unknown = opts.payload;
       if (payload instanceof Readable) {
@@ -55,7 +63,7 @@ function fakeSsh(
       return { code: reply.code, stdout, stderr: '' };
     },
   };
-  return { ssh: ssh as unknown as SshTransport, sent };
+  return { ssh: ssh as unknown as SshTransport, sent, probes };
 }
 
 const opOf = (script: string) => /@\(\$helper, '([a-z-]+)'/.exec(script)?.[1];
@@ -114,9 +122,14 @@ describe('a Windows SSH host’s client', () => {
 
   it('reports a helper that answered nothing with its status', async () => {
     const { ssh } = fakeSsh(() => ({ code: 5, stdout: 'garbage' }));
-    await expect(new RemoteWindowsHost(ssh).run('stop', {})).rejects.toMatchObject({
+    await expect(new RemoteWindowsHost(ssh).run('sweep', {})).rejects.toMatchObject({
       code: 'not_installed',
-      message: 'the stop operation failed on alice@winbox (exit 5)',
+      message: 'the sweep operation failed on alice@winbox (exit 5)',
+    });
+    const empty = fakeSsh(() => ({ code: NO_RUNTIME_EXIT }));
+    await expect(new RemoteWindowsHost(empty.ssh).run('sweep', {})).rejects.toMatchObject({
+      code: 'not_installed',
+      message: 'no Puddle runtime is installed on alice@winbox',
     });
   });
 
@@ -177,6 +190,25 @@ describe('a Windows SSH host’s client', () => {
     expect(await new RemoteWindowsHost(ssh).stopDaemon(4242)).toBe('stopped');
     const stop = sent.find((s) => opOf(s.script) === 'stop-daemon')!;
     expect(requestOf(stop.script, 'stop-daemon')).toEqual({ pid: 4242 });
+  });
+
+  it('answers a remote access status poll with one helper run and no probe', async () => {
+    const { ssh, sent, probes } = fakeSsh(() => ({
+      code: 0,
+      lines: [{ t: 'result', value: { installed: true, version: '0.3.14' } }],
+    }));
+    expect(await new RemoteWindowsHost(ssh).connectorInstalled()).toEqual({
+      installed: true,
+      version: '0.3.14',
+    });
+    expect(probes.count).toBe(0);
+    expect(sent.filter((s) => opOf(s.script) !== undefined)).toHaveLength(1);
+    // A home with no runtime has no connector.
+    const empty = fakeSsh(() => ({ code: NO_RUNTIME_EXIT }));
+    expect(await new RemoteWindowsHost(empty.ssh).connectorInstalled()).toEqual({
+      installed: false,
+      version: null,
+    });
   });
 
   it('installs with a copy of the installed runtime, naming the release and its repository', async () => {

@@ -13,6 +13,7 @@ import type { RunningSshCommand, SshTransport } from '../transport/ssh.js';
 import {
   bootstrapScript,
   HELPER_MISSING_EXIT,
+  NO_RUNTIME_EXIT,
   runHelperScript,
   stageScript,
   type HelperRuntime,
@@ -74,6 +75,13 @@ export interface HelperRun {
   payload?: string;
   timeoutMs?: number;
   signal?: AbortSignal;
+}
+
+/** The home has no runtime, so no node.exe could run the helper. */
+class NoRuntimeError extends CliError {
+  constructor(label: string) {
+    super('not_installed', `no Puddle runtime is installed on ${label}`);
+  }
 }
 
 /**
@@ -153,6 +161,7 @@ export class RemoteWindowsHost implements WindowsHostOps {
       const script = runHelperScript(helper, op, request, opts.runtime ?? 'current');
       const outcome = await this.collect(script, opts);
       if (outcome.code === HELPER_MISSING_EXIT && attempt === 0) continue;
+      if (outcome.code === NO_RUNTIME_EXIT) throw new NoRuntimeError(this.ssh.label);
       return this.settle(op, outcome);
     }
   }
@@ -404,12 +413,19 @@ export class RemoteWindowsHost implements WindowsHostOps {
     );
   }
 
+  /**
+   * One helper run, without the probe: the cockpit's remote access settings
+   * ask on every status poll, and each SSH round trip from a Windows client
+   * authenticates again. A home without a runtime has no connector.
+   */
   async connectorInstalled(): Promise<{ installed: boolean; version: string | null }> {
-    if ((await this.installedVersion()) === null) return { installed: false, version: null };
-    const value = (await this.run('connector-installed', {}, { timeoutMs: 30_000 })) as {
-      installed?: unknown;
-      version?: unknown;
-    };
+    let value: { installed?: unknown; version?: unknown } | undefined;
+    try {
+      value = (await this.run('connector-installed', {}, { timeoutMs: 30_000 })) as typeof value;
+    } catch (err) {
+      if (err instanceof NoRuntimeError) return { installed: false, version: null };
+      throw err;
+    }
     return {
       installed: value?.installed === true,
       version: typeof value?.version === 'string' ? value.version : null,
