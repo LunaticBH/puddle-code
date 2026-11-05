@@ -234,12 +234,16 @@ supported release) and through native system tools (`tar.exe`, `curl.exe`, `task
 - Inbox ConPTY swallows OSC 10/11 colour queries and consumes escape sequences typed into its
   input; node-pty prints `AttachConsole failed` to the daemon's stderr when a PTY is killed.
 - Listeners owned by `http.sys` (pid 4) cannot be attributed to a session.
-- A PTY's job cannot hold processes started through WMI, Task Scheduler, a service or elevation,
-  children that break away from the job, or anything a root starts in the few milliseconds before
-  its assignment; those are stopped only while the process table still links them. Where the job
-  host cannot start (`Add-Type` blocked by Constrained Language Mode, AppLocker or WDAC), teardown
-  relies on the process table alone. Unlike POSIX `nohup`/`setsid`, a background server a session
-  started ends with the session.
+- Where the ConPTY helper cannot run (`Add-Type` blocked by Constrained Language Mode, AppLocker or
+  WDAC), a PTY's teardown relies on its console's close or hang-up, which also ends a GUI programme
+  that attached to the console (Electron does unless told otherwise) and what it started there.
+  What left the console (a detached process, one in a console of its own, a GUI programme that did
+  not attach) still outlives the session, as with the helper.
+- A console programme that a GUI launcher started on a PTY's console is taken for one of the
+  console's own, and ended with the session, when the launcher has exited before the teardown:
+  Windows keeps nothing of an exited process that the helper did not hold.
+- Processes the helper cannot open (another user's, or elevated ones under an unelevated daemon)
+  are not ended by it.
 - The logon task starts the daemon at logon, not at boot, and Task Scheduler ends it at logoff. A
   daemon started over SSH through WMI with key authentication has a network-logon token: no DPAPI,
   Credential Manager or network credentials; one started by the logon task has them.

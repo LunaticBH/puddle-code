@@ -455,9 +455,9 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
       while (ptys.liveCount() > 0) {
         if (Date.now() > deadline) {
           if (platform === 'win32') {
-            // Windows has no hang-up: a PTY counts as live until what its
-            // root left running is stopped (or its deadline), so this waits
-            // for that too.
+            // Windows has no hang-up: a PTY counts as live until what is
+            // attached to its console has ended (or its deadline), so this
+            // waits for that too.
             await stopRemainingConptys(ptys);
             break;
           }
@@ -467,8 +467,8 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
         }
         await new Promise((r) => setTimeout(r, 25));
       }
-      // Nothing a PTY started may outlive the daemon: wait for the process
-      // table's passes that outlasted their PTYs' deadlines.
+      // What is attached to a PTY's console may not outlive the daemon: wait
+      // for the teardowns that outlasted their PTYs' deadlines.
       if (platform === 'win32') await ptys.settled(SETTLE_MS);
       await ptys.closeTerminalStates();
       logs.closeAll();
@@ -518,18 +518,18 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
 }
 
 /**
- * Bound on a Windows shutdown waiting for the process table's passes that
- * outlasted their PTYs' deadlines (a query times out after 8 s). Whatever
- * is still in a PTY's job ends with the daemon anyway.
+ * Bound on a Windows shutdown waiting for the PTY teardowns that outlasted
+ * their PTYs' deadlines, still ending what was attached to their consoles
+ * (PtyManager.settled).
  */
 const SETTLE_MS = 10_000;
 
 /**
  * Windows shutdown, once the PTYs' consoles have had their time to close:
- * SIGKILL ends each remaining PTY's job, or stops its process tree
- * (PtyManager), then this waits until every PTY has reported its exit,
- * which it does once what its root left running is stopped too, or at its
- * deadline.
+ * SIGKILL ends each remaining PTY's root and closes its console, unless a
+ * stop found a GUI programme attached to it (PtyManager), then this waits
+ * until every PTY has reported its exit, which it does once what is
+ * attached to its console has ended too, or at its deadline.
  */
 export async function stopRemainingConptys(
   ptys: Pick<PtyManager, 'killAll' | 'liveCount'>,
