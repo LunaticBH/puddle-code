@@ -289,16 +289,23 @@ export class SshTransport implements Transport {
   }
 
   /**
-   * `sh -c <command>` on a POSIX host. A failure that reads as Windows
-   * answering it (a Git Bash default shell passes `true`, then its node.exe
-   * or `uname` gives the host away) is confirmed with the PowerShell probe;
-   * the result is returned unchanged either way, and the caller re-dispatches
-   * on the transport's platform.
+   * `sh -c <command>` on a POSIX host. For a command that may reveal a
+   * Windows host (`revealsWindows`: a Git Bash default shell passes `true`,
+   * then the helper stage's node.exe or install.sh's `uname` gives it away),
+   * a failure that reads as Windows answering it is confirmed with the
+   * PowerShell probe. ssh's own failure (255) and a killed command (-1) are
+   * no answer from the host. The result is returned unchanged either way,
+   * and the caller re-dispatches on the transport's platform.
    */
   exec(command: string, opts: ExecOptions = {}): Promise<ExecResult> {
     if (this.remotePlatform === 'win32') return Promise.reject(this.posixRefusal());
     return this.execPosix(command, opts).then(async (result) => {
-      if (result.code !== 0 && isWindowsHostFailure(result)) {
+      if (
+        opts.revealsWindows === true &&
+        result.code !== 255 &&
+        result.code !== -1 &&
+        isWindowsHostFailure(result)
+      ) {
         await this.recogniseWindows().catch(() => false);
       }
       return result;

@@ -41,6 +41,7 @@ fs.renameSync(tmp, dest);`;
       const result = await transport.exec(`${hostPaths.current}/bin/node -e ${shellQuote(stage)}`, {
         stdin: code,
         timeoutMs: 15_000,
+        revealsWindows: true,
       });
       // The first command a connection runs: a Git Bash default shell passes
       // `true`, so a Windows host may be recognised only here (callers then
