@@ -183,8 +183,14 @@ describe('starting the supervisor', () => {
       logger: { info: (line) => lines.push(line), warn: (line) => lines.push(line) },
     });
     expect(started).toBe('process');
+    // The task start names the command line it must run; WMI runs the same one.
+    expect(calls[0]!.PUDDLE_TASK_COMMAND).toMatch(/\\bin\\current\\bin\\puddle-hidden\.exe$/);
+    expect(calls[0]!.PUDDLE_TASK_ARGUMENTS).toMatch(/supervisor\.mjs" --home "/);
     expect(calls[1]!.PUDDLE_PROCESS_COMMAND).toMatch(
       /^"[^"]*\\bin\\current\\bin\\puddle-hidden\.exe" "[^"]*\\node\.exe" ".*supervisor\.mjs" --home "/,
+    );
+    expect(calls[1]!.PUDDLE_PROCESS_COMMAND).toBe(
+      `"${calls[0]!.PUDDLE_TASK_COMMAND}" ${calls[0]!.PUDDLE_TASK_ARGUMENTS}`,
     );
     expect(lines.join('\n')).toMatch(/no desktop session/);
   });

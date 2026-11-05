@@ -1,5 +1,8 @@
-import { randomBytes } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { createHash, randomBytes } from 'node:crypto';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { beforeAll, describe, expect, it } from 'vitest';
 import {
   createWindowsProcess,
   registerWindowsTask,
@@ -13,6 +16,7 @@ import {
   type WindowsTaskDefinition,
 } from '../src/node/windows-tasks.js';
 import {
+  canonicalWindowsHome,
   supervisorCommandLine,
   supervisorTaskDefinition,
   supervisorTaskName,
@@ -78,11 +82,20 @@ describe('Windows scheduled task definitions', () => {
     expect(() => windowsTaskXml('t', definition({ priority: 11 }))).toThrow('priority');
   });
 
-  it('names one task per home, whichever spelling names it', () => {
-    const name = supervisorTaskName('C:\\Users\\Ann\\.puddle');
+  it('names one task per home by its private ipc-key, whichever spelling names it', () => {
+    const home = mkdtempSync(join(tmpdir(), 'puddle-task-name-'));
+    const name = supervisorTaskName(home);
     expect(name).toMatch(/^Puddle [0-9a-f]{16}$/);
-    expect(supervisorTaskName('c:\\users\\ann\\.puddle')).toBe(name);
-    expect(supervisorTaskName('C:\\Users\\Bob\\.puddle')).not.toBe(name);
+    expect(supervisorTaskName(home)).toBe(name);
+    if (process.platform === 'win32') expect(supervisorTaskName(home.toUpperCase())).toBe(name);
+    // Never a public hash of the path, which another account could compute and take first.
+    const identity = canonicalWindowsHome(home).toLowerCase();
+    const hashed = createHash('sha256').update(identity).digest('hex').slice(0, 16);
+    expect(name).not.toBe(`Puddle ${hashed}`);
+    expect(supervisorTaskName(mkdtempSync(join(tmpdir(), 'puddle-task-name-')))).not.toBe(name);
+    // The same path under another key is another name.
+    writeFileSync(join(home, 'ipc-key'), 'a'.repeat(64));
+    expect(supervisorTaskName(home)).not.toBe(name);
   });
 
   it('starts the supervisor windowless through the current junction, quoting every path', () => {
@@ -121,21 +134,38 @@ describe('Task Scheduler through PowerShell', () => {
       error: '',
     }));
     const name = 'Puddle 0123456789abcdef';
-    const xml = windowsTaskXml(name, definition());
-    expect(await registerWindowsTask(name, xml, { powershell: runner, start: true })).toEqual({
+    const task = definition();
+    const xml = windowsTaskXml(name, task);
+    const action = { command: task.command, arguments: task.arguments };
+    expect(
+      await registerWindowsTask(name, xml, { powershell: runner, start: true, action }),
+    ).toEqual({
       registered: true,
       disabled: false,
       ran: true,
       state: 'running',
     });
-    const [call] = calls;
+    expect(await startWindowsTask(name, { powershell: runner, action })).toMatchObject({
+      ran: true,
+    });
+    const [call, start] = calls;
     expect(call!.env).toMatchObject({
       PUDDLE_TASK_NAME: name,
       PUDDLE_TASK_XML: xml,
       PUDDLE_TASK_START: '1',
+      PUDDLE_TASK_COMMAND: task.command,
+      PUDDLE_TASK_ARGUMENTS: task.arguments,
     });
-    expect(call!.script).not.toContain(name);
-    expect(call!.script).not.toContain('puddle-hidden');
+    // A start checks what the task runs too.
+    expect(start!.env).toMatchObject({
+      PUDDLE_TASK_COMMAND: task.command,
+      PUDDLE_TASK_ARGUMENTS: task.arguments,
+    });
+    for (const { script } of calls) {
+      expect(script).not.toContain(name);
+      expect(script).not.toContain('puddle-hidden');
+      expect(script).toContain('function Test-OwnTask');
+    }
     expect(call!.script).toContain('Register-ScheduledTask -TaskName $name');
     expect(call!.script).toContain('-Xml $env:PUDDLE_TASK_XML -Force');
   });
@@ -352,6 +382,7 @@ describe.runIf(process.platform === 'win32')(
       PUDDLE_TASK_ARGUMENTS:
         '"C:\\Users\\a b\\.puddle\\bin\\current\\bin\\node.exe" --home "C:\\Users\\a b\\.puddle"',
     };
+    let me = '';
     const task = (overrides: Partial<FakeTask> = {}): FakeTask => ({
       name: 'Puddle 0123456789abcdef',
       state: 'Ready',
@@ -389,7 +420,18 @@ describe.runIf(process.platform === 'win32')(
       };
     }
 
+    beforeAll(async () => {
+      me = (
+        await runWindowsPowerShell(
+          '[Console]::Out.Write([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)',
+          {},
+          60_000,
+        )
+      ).stdout.trim();
+    }, 70_000);
+
     it('starts a task of this user’s, and counts a run Task Scheduler refused as none', async () => {
+      expect(me).toMatch(/^S-1-5-/);
       const ran = await run(WINDOWS_TASK_SCRIPTS.start, { tasks: [task()], runs: true });
       expect(ran.calls).toEqual(['start Puddle 0123456789abcdef']);
       expect(ran.report).toMatchObject({ ran: true, state: 'Running' });
@@ -407,5 +449,70 @@ describe.runIf(process.platform === 'win32')(
       expect(ended.report).toMatchObject({ ran: true, lastResult: 1 });
     }, 240_000);
 
+    it('never starts or adopts a task of the name another account owns or that runs another programme', async () => {
+      const foreign = await run(WINDOWS_TASK_SCRIPTS.start, {
+        tasks: [task({ user: 'SYSTEM' })],
+        runs: true,
+      });
+      expect(foreign.calls).toEqual([]);
+      expect(foreign.report).toMatchObject({
+        ran: false,
+        error: expect.stringMatching(/another account/),
+      });
+      const other = await run(WINDOWS_TASK_SCRIPTS.start, {
+        tasks: [task({ user: me, arguments: '"C:\\elsewhere\\x.exe"' })],
+        runs: true,
+      });
+      expect(other.calls).toEqual([]);
+      expect(other.report).toMatchObject({
+        ran: false,
+        error: expect.stringMatching(/another programme/),
+      });
+
+      // Registration neither replaces another account's task nor reports it, disabled or not.
+      for (const state of ['Ready', 'Disabled'] as const) {
+        const taken = await run(
+          WINDOWS_TASK_SCRIPTS.register,
+          { tasks: [task({ user: 'S-1-5-21-1-2-3-1001', state })] },
+          { PUDDLE_TASK_START: '1' },
+        );
+        expect(taken.calls).toEqual([]);
+        expect(taken.report).toMatchObject({
+          registered: false,
+          disabled: false,
+          error: expect.stringMatching(/another account/),
+        });
+      }
+      // This user's own disabled task stays as it is.
+      const disabled = await run(
+        WINDOWS_TASK_SCRIPTS.register,
+        { tasks: [task({ state: 'Disabled' })] },
+        { PUDDLE_TASK_START: '1' },
+      );
+      expect(disabled.calls).toEqual([]);
+      expect(disabled.report).toMatchObject({ registered: true, disabled: true });
+    }, 240_000);
+
+    it('replaces this user’s earlier tasks for the home, keeping a disabled one’s choice', async () => {
+      const swept = await run(
+        WINDOWS_TASK_SCRIPTS.register,
+        {
+          tasks: [
+            task({ name: 'Puddle 1111111111111111', state: 'Disabled' }),
+            task({ name: 'Puddle 2222222222222222', user: 'SYSTEM' }),
+            task({ name: 'Puddle 3333333333333333', arguments: '"C:\\other\\home"' }),
+            task({ name: 'Puddle 4444444444444444', state: 'Running', user: me }),
+            task({ name: 'Unrelated task' }),
+          ],
+        },
+        { PUDDLE_TASK_START: '1' },
+      );
+      expect(swept.calls).toEqual([
+        'register Puddle 0123456789abcdef',
+        'disable Puddle 0123456789abcdef',
+        'unregister Puddle 1111111111111111',
+      ]);
+      expect(swept.report).toMatchObject({ registered: true, disabled: true, replaced: 1 });
+    }, 240_000);
   },
 );

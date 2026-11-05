@@ -1,16 +1,17 @@
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { existsSync, openSync, realpathSync, renameSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, win32 } from 'node:path';
 import { deleteEnv, getEnv, setEnv } from './environment.js';
 import { disableCurrentDirectorySearch } from './executables.js';
+import { ipcProof } from './security.js';
 import { readCurrentWindowsUserSid } from './windows-acl.js';
 import { supervisorRequest } from './windows-pipes.js';
 import {
   createWindowsProcess,
   registerWindowsTask,
   startWindowsTask,
+  type WindowsTaskAction,
   type WindowsTaskDefinition,
   type WindowsTaskOptions,
   type WindowsTaskRegistration,
@@ -92,10 +93,18 @@ export function canonicalWindowsHome(home: string): string {
   }
 }
 
-/** `Puddle <16 hex>`: one root-folder task per home, whichever spelling names it. */
+/**
+ * `Puddle <16 hex>`: one root-folder task per home, whichever spelling names
+ * it. Task names in the root folder are shared by every account, and any of
+ * them may create one there, so the name is keyed as the home's pipe names
+ * are (docs/windows.md, decision 3): by the home's private `ipc-key`, which
+ * no other account can read, so none can take the name first. `ipcProof`
+ * is that keyed HMAC; no server ever answers for the `scheduled-task` scope,
+ * and a home path is no challenge one would accept.
+ */
 export function supervisorTaskName(home: string): string {
   const identity = canonicalWindowsHome(home).toLowerCase();
-  return `Puddle ${createHash('sha256').update(identity).digest('hex').slice(0, 16)}`;
+  return `Puddle ${ipcProof(home, 'scheduled-task', identity).slice(0, 16)}`;
 }
 
 /**
@@ -166,6 +175,11 @@ export function supervisorCommandLine(home: string): string {
   return `${quoted(supervisorPaths(home).launcher)} ${supervisorArguments(home)}`;
 }
 
+/** What the home's task must run before it is started or counted as the home's. */
+function supervisorAction(home: string): WindowsTaskAction {
+  return { command: supervisorPaths(home).launcher, arguments: supervisorArguments(home) };
+}
+
 /**
  * `<home>\remote\supervised`: present while the supervisor runs the
  * connector, the counterpart of POSIX's installed connector unit. Managed
@@ -197,7 +211,10 @@ export async function registerSupervisorTask(
     return await registerWindowsTask(
       name,
       windowsTaskXml(name, supervisorTaskDefinition(home, sid)),
-      opts,
+      {
+        ...opts,
+        action: supervisorAction(home),
+      },
     );
   } catch (err) {
     return { registered: false, disabled: false, error: (err as Error).message };
@@ -260,7 +277,10 @@ export async function startWindowsSupervisor(
   if (opts.task && unschedulableHome(canonicalWindowsHome(home)) === undefined) {
     let started = opts.started;
     try {
-      started ??= await startWindowsTask(supervisorTaskName(home), opts);
+      started ??= await startWindowsTask(supervisorTaskName(home), {
+        ...opts,
+        action: supervisorAction(home),
+      });
     } catch (err) {
       started = { ran: false, state: 'unknown', error: (err as Error).message };
     }

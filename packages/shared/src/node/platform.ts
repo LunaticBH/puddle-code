@@ -57,6 +57,7 @@ export {
   windowsTaskXml,
   type PowerShellResult,
   type PowerShellRunner,
+  type WindowsTaskAction,
   type WindowsTaskDefinition,
   type WindowsTaskOptions,
   type WindowsTaskRegistration,
