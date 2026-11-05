@@ -1,4 +1,4 @@
-import { open } from 'node:fs/promises';
+import { open, stat } from 'node:fs/promises';
 
 /**
  * The PE subsystem of a Windows image (docs/windows.md, decision 8): what
@@ -57,12 +57,24 @@ const CACHE_LIMIT = 1024;
 const cache = new Map<string, Promise<number | null>>();
 
 /**
- * readPeSubsystem, remembered per path (case-insensitively, as Windows
- * compares paths) for this process's life: a programme's image does not
- * change while it runs. An unreadable image is not remembered.
+ * readPeSubsystem, remembered for this process's life per path
+ * (case-insensitively, as Windows compares paths) and per version of the
+ * file there: its size, file id, and modification and change times (a copy
+ * over it keeps the source's modification time, never the change time). A
+ * programme rebuilt in place, as a developer's build output is, is read
+ * again: the new image may be a GUI one where the old was not. An image
+ * that cannot be read is not remembered.
  */
-export function peSubsystem(file: string): Promise<number | null> {
-  const key = file.toLowerCase();
+export async function peSubsystem(file: string): Promise<number | null> {
+  let version: string;
+  try {
+    const stats = await stat(file, { bigint: true });
+    if (!stats.isFile()) return null;
+    version = [stats.size, stats.ino, stats.mtimeNs, stats.ctimeNs].join(':');
+  } catch {
+    return null;
+  }
+  const key = `${file.toLowerCase()}\0${version}`;
   const known = cache.get(key);
   if (known) return known;
   if (cache.size >= CACHE_LIMIT) cache.clear();

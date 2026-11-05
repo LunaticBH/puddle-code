@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -55,11 +55,20 @@ describe('readPeSubsystem', () => {
 });
 
 describe('peSubsystem', () => {
-  it('remembers an image by its path, ignoring case', async () => {
-    const file = image('cached.exe', 2);
+  it('reads an image rebuilt at the same path again, though its size and mtime are kept', async () => {
+    const file = image('rebuilt.exe', 3);
+    const mtime = 1_700_000_000; // whole seconds, which every file system keeps exactly
+    utimesSync(file, mtime, mtime);
+    const before = statSync(file);
+    expect(await peSubsystem(file)).toBe(3);
+    expect(await peSubsystem(file)).toBe(3);
+    // Past the file system's timestamp granularity, rebuilt as a GUI programme.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    image('rebuilt.exe', 2);
+    utimesSync(file, mtime, mtime);
+    expect(statSync(file).size).toBe(before.size);
+    expect(statSync(file).mtimeMs).toBe(before.mtimeMs);
     expect(await peSubsystem(file)).toBe(2);
-    image('cached.exe', 3); // rewritten: the remembered answer stands
-    expect(await peSubsystem(file.toUpperCase())).toBe(2);
   });
 
   it('forgets an image it could not read', async () => {
