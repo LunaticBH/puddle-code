@@ -217,6 +217,8 @@ export class SessionService extends EventEmitter {
   /** `${sessionId}:${name}` pairs already warned about, so cap notes fire once. */
   private readonly envDropNoted = new Set<string>();
   private readonly sessionRefs: SessionRefs;
+  /** Lifecycle resources an agent's exit disposed whose disposal is still running. */
+  private readonly disposals = new Set<Promise<void>>();
   private shuttingDown = false;
   private readonly titleTimer: ReturnType<typeof setInterval>;
   private readonly terminalAgents: TerminalAgentMonitor;
@@ -280,6 +282,37 @@ export class SessionService extends EventEmitter {
     this.shuttingDown = true;
     clearInterval(this.titleTimer);
     this.terminalAgents.dispose();
+  }
+
+  /**
+   * Resolves once every lifecycle resource disposed so far has finished, or
+   * after `ms`; never rejects. Daemon shutdown waits for it once the PTYs
+   * have exited: on Windows a Codex app-server's stop reads the process
+   * table before it ends what is attached to the server's console, and a
+   * daemon that exited sooner would leave those commands running (libuv's
+   * kill-on-close job ends only the launcher and the native server).
+   */
+  lifecyclesDisposed(ms: number): Promise<void> {
+    if (this.disposals.size === 0) return Promise.resolve();
+    const pending = Promise.all(this.disposals);
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      void pending.then(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+  }
+
+  /** Disposes `resource`, tracked until its disposal has finished (lifecyclesDisposed). */
+  private disposeLifecycle(resource: LifecycleLaunchResource | null): void {
+    if (!resource) return;
+    const disposal: Promise<void> = Promise.resolve(resource.dispose())
+      .catch((error: unknown) =>
+        console.warn(`agent lifecycle bridge did not close: ${(error as Error).message}`),
+      )
+      .finally(() => this.disposals.delete(disposal));
+    this.disposals.add(disposal);
   }
 
   get(id: string): Session {
@@ -1907,7 +1940,7 @@ export class SessionService extends EventEmitter {
     live.detector?.dispose();
     if (live.signalNonce !== null) this.signalNonces.delete(live.signalNonce);
     this.deps.ptys.unregisterSidecars(e.stream);
-    void live.lifecycleResource?.dispose();
+    this.disposeLifecycle(live.lifecycleResource);
     this.runtimes.delete(live.runtimeId);
     if (
       live.conversationId !== null &&
