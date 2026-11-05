@@ -313,10 +313,24 @@ Write-PuddleBytes ([IO.File]::ReadAllBytes($path))`;
  * that follows the script, keeping an identical file already there; prints
  * its path. The user's temporary directory lies in the profile, which only
  * its owner can open.
+ *
+ * Staging runs once per client process, so it also clears what operations
+ * ended midway by the SSH session's job left behind, their `finally` never
+ * having run: copies of node.exe (about 80 MB each), bootstrap directories
+ * and partial stages. They go by creation time (a copy keeps its source's
+ * write time) once a day old, far longer than any operation takes; one
+ * still in use is locked, and links are never followed.
  */
 export function stageScript(name: string, sha256: string, length: number): string {
   if (!/^[\w.-]+$/.test(name) || !/^[0-9a-f]{64}$/.test(sha256)) throw new Error('bad stage');
-  return String.raw`$dest = Join-Path (Get-PuddleTemp) ${psQuote(name)}
+  return String.raw`$dir = Get-PuddleTemp
+$stale = [DateTime]::UtcNow.AddDays(-1)
+foreach ($item in @(Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue)) {
+  if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+  if (-not ($item.Name -like 'node-*.exe' -or $item.Name -like 'boot-*' -or $item.Name -like 'windows-host-*.mjs.*')) { continue }
+  if ($item.CreationTimeUtc -lt $stale) { Remove-Item -LiteralPath $item.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+}
+$dest = Join-Path $dir ${psQuote(name)}
 $want = ${psQuote(sha256.toUpperCase())}
 $tmp = $dest + '.' + [Guid]::NewGuid().ToString('N')
 try {

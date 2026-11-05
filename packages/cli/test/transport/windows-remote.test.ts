@@ -1,4 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -265,6 +268,42 @@ describe.runIf(process.platform === 'win32')('the loader on Windows', () => {
       node: null,
       arch: expect.stringMatching(/^(x64|arm64)$/),
     });
+  }, 60_000);
+
+  it('stages the helper and clears what interrupted operations left in %TEMP%', async () => {
+    const temp = mkdtempSync(join(tmpdir(), 'puddle-stage-'));
+    const dir = join(temp, 'puddle-host');
+    mkdirSync(join(dir, 'boot-old'), { recursive: true });
+    mkdirSync(join(dir, 'boot-new'));
+    for (const name of ['node-old.exe', 'node-new.exe', 'windows-host-1.mjs.part', 'keep.txt']) {
+      writeFileSync(join(dir, name), 'x');
+    }
+    writeFileSync(join(dir, 'boot-old', 'node.exe'), 'x');
+    // A day and more old, by creation time: a copy of node.exe keeps its source's write time.
+    const age = ['node-old.exe', 'boot-old', 'windows-host-1.mjs.part', 'keep.txt']
+      .map(
+        (name) =>
+          `(Get-Item -LiteralPath ${psQuote(join(dir, name))}).CreationTimeUtc = [DateTime]::UtcNow.AddDays(-2)`,
+      )
+      .join('\n');
+    const body = Buffer.from('helper body');
+    const sha256 = createHash('sha256').update(body).digest('hex');
+    const script = windowsScript(
+      `${age}\n${stageScript('windows-host-1.mjs', sha256, body.length)}`,
+    );
+    const result = await viaShell('cmd', Buffer.concat([frame(script), body]), {
+      ...process.env,
+      TEMP: temp,
+      TMP: temp,
+    });
+    expect(parseTrailer(result.stderr)).toEqual({ code: 0, stderr: '' });
+    expect(JSON.parse(result.stdout.toString('utf8'))).toEqual({
+      path: join(dir, 'windows-host-1.mjs'),
+    });
+    expect(readFileSync(join(dir, 'windows-host-1.mjs'), 'utf8')).toBe('helper body');
+    const left = (name: string) => existsSync(join(dir, name));
+    expect(['node-old.exe', 'boot-old', 'windows-host-1.mjs.part'].filter(left)).toEqual([]);
+    expect(['node-new.exe', 'boot-new', 'keep.txt'].every(left)).toBe(true);
   }, 60_000);
 
   it('refuses a frame that is cut short', async () => {
