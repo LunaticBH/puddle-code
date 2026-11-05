@@ -487,8 +487,14 @@ export class RemoteWindowsHost implements WindowsHostOps {
   /**
    * The daemon attached to a channel of its own (the lease of last resort):
    * it runs as long as the returned command, which reports its pid first.
+   * `exited` resolves with the daemon's own status once the channel ends
+   * (null when the helper never reported one).
    */
-  async attached(port?: number): Promise<{ command: RunningSshCommand; pid: Promise<number> }> {
+  async attached(port?: number): Promise<{
+    command: RunningSshCommand;
+    pid: Promise<number>;
+    exited: Promise<number | null>;
+  }> {
     const helper = await this.helper();
     let started: (pid: number) => void = () => {};
     let failed: (err: Error) => void = () => {};
@@ -497,9 +503,13 @@ export class RemoteWindowsHost implements WindowsHostOps {
       failed = reject;
     });
     pid.catch(() => {});
+    let status: number | null = null;
     const read = lineReader((message) => {
       if (message.t === 'started') started(message.pid);
-      else if (message.t === 'error') failed(helperError(message));
+      else if (message.t === 'result') {
+        const code = (message.value as { code?: unknown } | undefined)?.code;
+        if (typeof code === 'number') status = code;
+      } else if (message.t === 'error') failed(helperError(message));
     });
     const command = this.ssh.runAttachedWindows(
       runHelperScript(helper, 'attached', port === undefined ? {} : { port }, 'current'),
@@ -514,6 +524,6 @@ export class RemoteWindowsHost implements WindowsHostOps {
         ),
       ),
     );
-    return { command, pid };
+    return { command, pid, exited: command.result.then(() => status) };
   }
 }
