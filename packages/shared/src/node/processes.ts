@@ -1,12 +1,13 @@
-import { execFile } from 'node:child_process';
-import { system32Path, type Environment } from './environment.js';
+import type { ChildProcess } from 'node:child_process';
 import {
+  listWindowsProcesses,
   windowsDescendantsOf,
   windowsProcessTree,
   type ProcessTreeRoot,
   type WindowsProcess,
   type WindowsProcessListOptions,
 } from './windows-process-table.js';
+import { isGuiSubsystem, peSubsystem } from './windows-subsystem.js';
 
 /**
  * Whether `pid` names a live process, by a signal-0 probe. POSIX keeps the
@@ -31,31 +32,51 @@ export type WindowsProcessSource = (
   options?: WindowsProcessListOptions,
 ) => Promise<readonly WindowsProcess[]>;
 
+/** A process's PE subsystem (2 for a GUI programme), or null when its image cannot be read. */
+export type WindowsSubsystemSource = (entry: WindowsProcess) => Promise<number | null>;
+
+/** The subsystem of a process's image, from the path the process table gives (peSubsystem). */
+export function imageSubsystem(entry: WindowsProcess): Promise<number | null> {
+  return entry.executablePath ? peSubsystem(entry.executablePath) : Promise.resolve(null);
+}
+
 export interface KillProcessTreeOptions {
   platform?: NodeJS.Platform;
-  /** Bound on waiting for taskkill.exe; 5 s by default. */
-  timeoutMs?: number;
-  /** Locates `%SystemRoot%`; `process.env` by default. */
-  env?: Environment;
-  /**
-   * Windows: stop the tree the process table shows (stopWindowsProcessTree)
-   * rather than the one `taskkill /T` follows, which cannot reach a
-   * descendant whose parent has exited. When the table cannot be read this
-   * stops nothing: by then `pid` may name another process, so `taskkill /T`
-   * on it is no fallback.
-   */
+  /** Windows: the process table to read; the shared worker's (listWindowsProcesses) by default. */
   processes?: WindowsProcessSource;
-  /** With `processes`: what is known about the root (see windowsProcessTree). */
+  /**
+   * Windows: what is known about the root beyond its pid (see
+   * windowsProcessTree). Without it, whichever process holds the pid when
+   * the table is read is taken for the root.
+   */
   root?: Omit<ProcessTreeRoot, 'pid'>;
+  /**
+   * Windows: ends the root through a handle that cannot name another
+   * process, such as `ChildProcess.kill` on a child of this process (libuv
+   * holds its handle until its exit is reaped). Used for the root in place
+   * of its pid, and all that ends when the table cannot be read.
+   */
+  endRoot?: () => void;
+  /** Windows: each process's PE subsystem; imageSubsystem by default. Tests substitute. */
+  subsystem?: WindowsSubsystemSource;
+  /** Windows: ends one process by pid; TerminateProcess through `process.kill` by default. */
+  terminate?: (pid: number) => void;
 }
 
 /**
  * Forcibly stops `pid` and its descendants, resolving whether or not the
- * process existed. Windows runs `taskkill.exe /PID <pid> /T /F` from
- * System32, or with `processes` stops the process table's tree. POSIX sends
- * SIGKILL to the process group `pid` leads and then to `pid` itself, which
- * only reaches descendants that stayed in that group; existing POSIX callers
- * keep their own signal sequences.
+ * process existed. POSIX sends SIGKILL to the process group `pid` leads and
+ * then to `pid` itself, which only reaches descendants that stayed in that
+ * group; existing POSIX callers keep their own signal sequences.
+ *
+ * Windows (docs/windows.md, decision 8) stops the tree the process table
+ * shows, through creation-time-consistent links only
+ * (stopWindowsProcessTree): never a GUI programme below the root, nor
+ * anything below one, nor a process whose image cannot be read. It never
+ * runs `taskkill /T`, which follows parent pids that a reused pid may name.
+ * When the table cannot be read, only `endRoot` ends anything. Unlike a
+ * POSIX process group, the tree includes console processes that were
+ * started detached or in a console of their own.
  */
 export function killProcessTree(pid: number, opts: KillProcessTreeOptions = {}): Promise<void> {
   if (!Number.isSafeInteger(pid) || pid <= 0) {
@@ -71,25 +92,74 @@ export function killProcessTree(pid: number, opts: KillProcessTreeOptions = {}):
     }
     return Promise.resolve();
   }
-  if (opts.processes) {
-    return stopWindowsProcessTree(pid, { processes: opts.processes, root: opts.root }).then(
-      () => undefined,
-      () => undefined,
-    );
-  }
-  return taskkill(pid, opts);
+  let rootEnded = false;
+  const endRoot = opts.endRoot;
+  return stopWindowsProcessTree(pid, {
+    processes: opts.processes ?? listWindowsProcesses,
+    root: opts.root,
+    spareGui: true,
+    ...(opts.subsystem ? { subsystem: opts.subsystem } : {}),
+    ...(opts.terminate ? { terminate: opts.terminate } : {}),
+    ...(endRoot
+      ? {
+          endRoot: () => {
+            rootEnded = true;
+            endRoot();
+          },
+        }
+      : {}),
+  }).then(
+    () => undefined,
+    () => {
+      // No table to tell the root's descendants by: the root alone, by its handle.
+      if (endRoot && !rootEnded) {
+        try {
+          endRoot();
+        } catch {
+          // Exited meanwhile.
+        }
+      }
+    },
+  );
 }
 
-function taskkill(pid: number, opts: KillProcessTreeOptions): Promise<void> {
-  return new Promise((resolve) => {
-    execFile(
-      system32Path('taskkill.exe', opts.env),
-      ['/PID', String(pid), '/T', '/F'],
-      { windowsHide: true, timeout: opts.timeoutMs ?? 5_000 },
-      // Exit status 128 means no such process: the outcome callers want.
-      () => resolve(),
-    );
+/** The part of a ChildProcess that childProcessTree uses. */
+export type SpawnedChild = Pick<ChildProcess, 'pid' | 'kill' | 'once'>;
+
+/** A child of this process, as killProcessTree tells it apart from later holders of its pid. */
+export interface ChildProcessTree {
+  /** What is known about it now, for windowsProcessTree. */
+  root(): Omit<ProcessTreeRoot, 'pid'>;
+  /**
+   * killProcessTree on it, ending it through its own handle; resolves at
+   * once for a child that never started.
+   */
+  kill(opts?: Omit<KillProcessTreeOptions, 'root' | 'endRoot'>): Promise<void>;
+}
+
+/**
+ * Records what identifies `child` on Windows: it was created between
+ * `startedAtMs` (the clock just before `spawn`) and now (call this just
+ * after), and, once it has exited, by when.
+ */
+export function childProcessTree(child: SpawnedChild, startedAtMs: number): ChildProcessTree {
+  const spawnedAtMs = Date.now();
+  let exitedAtMs: number | undefined;
+  child.once('exit', () => {
+    exitedAtMs = Date.now();
   });
+  const root = () => ({
+    startedAtMs,
+    createdBeforeMs: spawnedAtMs,
+    ...(exitedAtMs !== undefined ? { exitedAtMs } : {}),
+  });
+  return {
+    root,
+    kill: (opts = {}) =>
+      child.pid === undefined
+        ? Promise.resolve()
+        : killProcessTree(child.pid, { ...opts, root: root(), endRoot: () => child.kill() }),
+  };
 }
 
 export interface StopWindowsProcessTreeOptions {
@@ -115,6 +185,36 @@ export interface StopWindowsProcessTreeOptions {
   table?: readonly WindowsProcess[];
   /** Ends one process; TerminateProcess through `process.kill` by default. */
   terminate?: (pid: number) => void;
+  /** Ends the running root in place of `terminate` (a handle that cannot name another process). */
+  endRoot?: () => void;
+  /**
+   * Leave every GUI programme below the root, and everything below it, and
+   * every process whose image cannot be read, running; the root's own image
+   * never counts. Off by default: the test suites' guards stop everything.
+   */
+  spareGui?: boolean;
+  /** With `spareGui`: each process's PE subsystem; imageSubsystem by default. */
+  subsystem?: WindowsSubsystemSource;
+}
+
+const identity = (entry: WindowsProcess) => `${entry.pid}@${entry.createdAtMs}`;
+
+/**
+ * Of `entries`, those to spare: GUI programmes, and processes whose image
+ * cannot be read (which could be one).
+ */
+async function guiProcesses(
+  entries: readonly WindowsProcess[],
+  subsystem: WindowsSubsystemSource,
+): Promise<Set<string>> {
+  const spared = new Set<string>();
+  await Promise.all(
+    entries.map(async (entry) => {
+      const kind = await subsystem(entry).catch(() => null);
+      if (kind === null || isGuiSubsystem(kind)) spared.add(identity(entry));
+    }),
+  );
+  return spared;
 }
 
 /**
@@ -125,7 +225,8 @@ export interface StopWindowsProcessTreeOptions {
  * children, so none can start a replacement; then the table is read again
  * for children started in between, at most twice more, counting a stopped
  * process's children only up to when it was stopped. This process is never
- * stopped. Resolves with the processes it ended; rejects when the table
+ * stopped, nor, with `spareGui`, a GUI programme below the root or what it
+ * started. Resolves with the processes it ended; rejects when the table
  * cannot be read.
  */
 export async function stopWindowsProcessTree(
@@ -139,7 +240,6 @@ export async function stopWindowsProcessTree(
     });
   const now = opts.now ?? Date.now;
   const known = opts.known ?? [];
-  const identity = (entry: WindowsProcess) => `${entry.pid}@${entry.createdAtMs}`;
   const table = opts.table ?? (await opts.processes({ fresh: true }));
   const running = new Set(table.map(identity));
   const stopped: WindowsProcess[] = [];
@@ -147,11 +247,30 @@ export async function stopWindowsProcessTree(
   const stoppedAt = new Map<string, number>();
   const exitedBefore = (parent: WindowsProcess) =>
     stoppedAt.get(identity(parent)) ?? opts.knownAtMs;
-  let targets = [
-    ...windowsProcessTree(table, { ...opts.root, pid }),
-    ...known.filter((entry) => running.has(identity(entry))),
-    ...windowsDescendantsOf(table, known, exitedBefore),
-  ];
+  /**
+   * What `find` names, less what `spareGui` spares: `find` runs once to
+   * learn whose images to read, and again sparing the GUI programmes, which
+   * leaves out what is below them too.
+   */
+  const select = async (
+    find: (spare?: (entry: WindowsProcess) => boolean) => WindowsProcess[],
+  ): Promise<WindowsProcess[]> => {
+    if (!opts.spareGui) return find();
+    const spared = await guiProcesses([...find(), ...known], opts.subsystem ?? imageSubsystem);
+    return find((entry) => spared.has(identity(entry)));
+  };
+  let root: WindowsProcess | undefined;
+  let targets = await select((spare) => {
+    const tree = windowsProcessTree(table, { ...opts.root, pid }, spare);
+    // A running root comes first; a dead root's orphans never hold its pid.
+    root = tree[0]?.pid === pid ? tree[0] : undefined;
+    const parents = spare ? known.filter((entry) => !spare(entry)) : known;
+    return [
+      ...tree,
+      ...parents.filter((entry) => running.has(identity(entry))),
+      ...windowsDescendantsOf(table, parents, exitedBefore, spare),
+    ];
+  });
   for (let round = 0; round < 3; round++) {
     const fresh = targets.filter((entry) => !stoppedAt.has(identity(entry)));
     if (fresh.length === 0) break;
@@ -160,17 +279,22 @@ export async function stopWindowsProcessTree(
       stoppedAt.set(identity(target), now());
       if (target.pid === process.pid) continue;
       try {
-        terminate(target.pid);
+        if (target === root && opts.endRoot) opts.endRoot();
+        else terminate(target.pid);
       } catch {
         // Exited meanwhile, or another account's.
       }
       stopped.push(target);
     }
     if (round === 2) break;
-    targets = windowsDescendantsOf(
-      await opts.processes({ fresh: true }),
-      [...stopped, ...known],
-      exitedBefore,
+    const later = await opts.processes({ fresh: true });
+    targets = await select((spare) =>
+      windowsDescendantsOf(
+        later,
+        [...stopped, ...(spare ? known.filter((entry) => !spare(entry)) : known)],
+        exitedBefore,
+        spare,
+      ),
     );
   }
   return stopped;

@@ -342,7 +342,7 @@ describe('killProcessTree', () => {
     await killProcessTree(child.pid!);
     await exited;
     if (process.platform === 'win32') {
-      // taskkill /T reaches descendants however they were started.
+      // The process table's tree reaches console descendants however they were started.
       for (let i = 0; i < 40 && isPidAlive(grandchild); i++) {
         await new Promise((resolve) => setTimeout(resolve, 25));
       }

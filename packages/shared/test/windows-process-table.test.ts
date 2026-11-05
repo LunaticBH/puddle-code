@@ -46,7 +46,7 @@ function answer(marker) {
     { p: queries, q: process.pid, n: 'Fake.EXE', c: null, t: 1700000000000 },
     { p: 'not a pid', q: 1, n: 'broken.exe' },
     null,
-    { p: 7, q: 1, n: 'node.exe', c: 'node "x y.js"', t: null },
+    { p: 7, q: 1, n: 'node.exe', c: 'node "x y.js"', e: 'C:\\\\node\\\\node.exe', t: null },
     { p: 8, q: 7, n: 'System Idle Process' },
   ];
   // Split the answer inside the marker, as a pipe may.
@@ -89,6 +89,7 @@ describe('Windows process table protocol', () => {
       command: 'fake',
       commandLine: null,
       createdAtMs: 1700000000000,
+      executablePath: null,
     });
     expect(processes[1]).toEqual({
       pid: 7,
@@ -97,6 +98,7 @@ describe('Windows process table protocol', () => {
       command: 'node',
       commandLine: 'node "x y.js"',
       createdAtMs: null,
+      executablePath: 'C:\\node\\node.exe',
     });
     expect(processes[2]?.command).toBe('system idle process');
     expect(Object.isFrozen(processes[0])).toBe(true);

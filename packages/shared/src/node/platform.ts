@@ -22,13 +22,19 @@ export {
   type FindExecutableOptions,
 } from './executables.js';
 export {
+  childProcessTree,
+  imageSubsystem,
   isPidAlive,
   killProcessTree,
   stopWindowsProcessTree,
+  type ChildProcessTree,
   type KillProcessTreeOptions,
+  type SpawnedChild,
   type StopWindowsProcessTreeOptions,
   type WindowsProcessSource,
+  type WindowsSubsystemSource,
 } from './processes.js';
+export { isGuiSubsystem, peSubsystem, readPeSubsystem } from './windows-subsystem.js';
 export { renameWithRetry, renameWithRetrySync } from './rename.js';
 export {
   isWindowsArch,

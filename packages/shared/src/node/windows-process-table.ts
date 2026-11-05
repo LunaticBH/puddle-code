@@ -27,6 +27,12 @@ export interface WindowsProcess {
   readonly commandLine: string | null;
   /** Creation time in Unix milliseconds; null for the idle and system pseudo-processes. */
   readonly createdAtMs: number | null;
+  /**
+   * Its image's full path, which tells a GUI programme (peSubsystem). Null
+   * when Windows withholds it (another user's or a protected process);
+   * absent from a table that does not read it.
+   */
+  readonly executablePath?: string | null;
 }
 
 export interface WindowsProcessTableOptions {
@@ -60,9 +66,9 @@ const SETUP =
 function query(marker: string): string {
   return (
     'try { $r = @(Get-CimInstance -ClassName Win32_Process -Property ' +
-    'ProcessId,ParentProcessId,Name,CommandLine,CreationDate | ForEach-Object { ' +
+    'ProcessId,ParentProcessId,Name,CommandLine,CreationDate,ExecutablePath | ForEach-Object { ' +
     '[pscustomobject]@{ p = $_.ProcessId; q = $_.ParentProcessId; n = $_.Name; ' +
-    'c = $_.CommandLine; t = $(if ($_.CreationDate) { ' +
+    'c = $_.CommandLine; e = $_.ExecutablePath; t = $(if ($_.CreationDate) { ' +
     '([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() } else { $null }) } }); ' +
     '[Console]::Out.Write((ConvertTo-Json -InputObject $r -Compress -Depth 2)) } ' +
     'catch { [Console]::Out.Write(\'{"error":\' + ' +
@@ -193,6 +199,8 @@ export interface ProcessTreeRoot {
   readonly createdBeforeMs?: number;
   /** It has exited, at or before this time: whoever holds its pid now is another process. */
   readonly exitedAtMs?: number;
+  /** The process that created it: a holder of its pid naming another parent is another process. */
+  readonly parentPid?: number;
   /**
    * Should it have exited, it did so before this time: a process naming its
    * pid created later is a child of a later holder of that pid.
@@ -212,7 +220,8 @@ const CLOCK_SLACK_MS = 100;
  *
  * A running root is the table's holder of its pid, when that holder was
  * created when the root was (`createdAtMs`), or not before it was started
- * (`startedAtMs`) nor after `createdBeforeMs`. A root that has exited is gone
+ * (`startedAtMs`) nor after `createdBeforeMs`, naming `parentPid` as its
+ * parent when that is given. A root that has exited is gone
  * from the table, but its children still name its pid: they are the
  * processes naming it that were created after it was started and before
  * both any later holder of its pid was and the root's exit (`exitedAtMs`,
@@ -220,11 +229,13 @@ const CLOCK_SLACK_MS = 100;
  * dead root's children from an earlier holder's, so there are none; without
  * an exit bound and with no holder, every later process naming the pid
  * counts. A process whose creation time is unknown is never followed: only
- * the idle and system pseudo-processes lack one.
+ * the idle and system pseudo-processes lack one. A process below the root
+ * that `spare` names is left out, with everything below it; the root never is.
  */
 export function windowsProcessTree(
   table: readonly WindowsProcess[],
   root: ProcessTreeRoot,
+  spare?: (entry: WindowsProcess) => boolean,
 ): WindowsProcess[] {
   const byPid = new Map(table.map((entry) => [entry.pid, entry]));
   const holder = byPid.get(root.pid);
@@ -232,13 +243,14 @@ export function windowsProcessTree(
     holder !== undefined &&
     holder.createdAtMs !== null &&
     root.exitedAtMs === undefined &&
+    (root.parentPid === undefined || holder.ppid === root.parentPid) &&
     (root.createdAtMs !== undefined && root.createdAtMs !== null
       ? holder.createdAtMs === root.createdAtMs
       : (root.startedAtMs === undefined ||
           holder.createdAtMs >= root.startedAtMs - CLOCK_SLACK_MS) &&
         (root.createdBeforeMs === undefined ||
           holder.createdAtMs <= root.createdBeforeMs + CLOCK_SLACK_MS));
-  if (running) return [holder, ...windowsDescendantsOf(table, [holder])];
+  if (running) return [holder, ...windowsDescendantsOf(table, [holder], undefined, spare)];
   const from =
     root.createdAtMs ??
     (root.startedAtMs === undefined ? undefined : root.startedAtMs - CLOCK_SLACK_MS);
@@ -254,9 +266,10 @@ export function windowsProcessTree(
       entry.pid !== root.pid &&
       entry.createdAtMs !== null &&
       entry.createdAtMs >= from &&
-      entry.createdAtMs < until,
+      entry.createdAtMs < until &&
+      !spare?.(entry),
   );
-  return [...orphans, ...windowsDescendantsOf(table, orphans)];
+  return [...orphans, ...windowsDescendantsOf(table, orphans, undefined, spare)];
 }
 
 /**
@@ -267,12 +280,14 @@ export function windowsProcessTree(
  * up to `exitedBefore(parent)`, a time by which it is known to have exited
  * should it have: after that its pid may have named a process that has
  * exited too, whose children name it as well. A parent with neither keeps
- * every later child naming its pid.
+ * every later child naming its pid. A process `spare` names is left out,
+ * and so is everything below it.
  */
 export function windowsDescendantsOf(
   table: readonly WindowsProcess[],
   parents: readonly WindowsProcess[],
   exitedBefore?: (parent: WindowsProcess) => number | undefined,
+  spare?: (entry: WindowsProcess) => boolean,
 ): WindowsProcess[] {
   const byPid = new Map(table.map((entry) => [entry.pid, entry]));
   const childrenOf = new Map<number, WindowsProcess[]>();
@@ -301,6 +316,7 @@ export function windowsDescendantsOf(
       if (child.createdAtMs === null || seen.has(key(child))) continue;
       if (child.createdAtMs < parent.createdAtMs || child.createdAtMs >= until) continue;
       seen.add(key(child));
+      if (spare?.(child)) continue;
       found.push(child);
       queue.push(child);
     }
@@ -429,7 +445,7 @@ function parseProcesses(body: string): readonly WindowsProcess[] {
   const processes: WindowsProcess[] = [];
   for (const entry of parsed as unknown[]) {
     if (typeof entry !== 'object' || entry === null) continue;
-    const { p, q, n, c, t } = entry as Record<string, unknown>;
+    const { p, q, n, c, e, t } = entry as Record<string, unknown>;
     if (!isId(p) || !isId(q) || typeof n !== 'string') continue;
     processes.push(
       Object.freeze({
@@ -439,6 +455,7 @@ function parseProcesses(body: string): readonly WindowsProcess[] {
         command: n.replace(/\.exe$/i, '').toLowerCase(),
         commandLine: typeof c === 'string' ? c : null,
         createdAtMs: typeof t === 'number' && Number.isFinite(t) ? t : null,
+        executablePath: typeof e === 'string' && e !== '' ? e : null,
       }),
     );
   }
