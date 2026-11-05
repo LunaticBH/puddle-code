@@ -7,10 +7,10 @@ import {
 import { runHandshake, type ConfirmDaemonUpgrade } from './handshake.js';
 import { acquireAuthority, type HostConnection } from '../auth/connection-authority.js';
 import { inspectHost } from '../auth/control-channel.js';
-import { controlPipePresent } from '../installation/windows-daemon.js';
+import { windowsOps, type WindowsHostOps } from '../host/windows-ops.js';
 import { sleep } from '../transport/net.js';
-import { clientHome, hostPaths } from '../paths.js';
-import { isLocalWindows } from '../transport/local.js';
+import { hostPaths } from '../paths.js';
+import { isWindowsHost } from '../transport/host-platform.js';
 import type { Transport } from '../transport/transport.js';
 import { CliError, type CliEvent, type Logger, silentLogger } from '../types.js';
 import { pinnedDaemonVersion } from '../version.js';
@@ -72,11 +72,12 @@ export async function ensureDaemon(
   },
 ): Promise<DaemonEndpoint> {
   const logger = opts.logger ?? silentLogger;
-  const localWindows = isLocalWindows(transport);
-  // Defender scans a freshly unpacked Windows runtime on its first start.
-  const startTimeoutMs =
+  // A Windows SSH host may be recognised only by the first host command below.
+  const timeout = () =>
     opts.startTimeoutMs ??
-    (opts.attachedFallback !== undefined ? 5_000 : localWindows ? 60_000 : 20_000);
+    // Defender scans a freshly unpacked Windows runtime on its first start;
+    // a Windows host falls back to an attached daemon on `session_bound`.
+    (isWindowsHost(transport) ? 60_000 : opts.attachedFallback !== undefined ? 5_000 : 20_000);
   let mismatch: CliError | undefined;
   try {
     const authority = await acquireAuthority(transport);
@@ -90,13 +91,25 @@ export async function ensureDaemon(
     return null;
   });
   if (!inspection && mismatch) throw mismatch;
-  const install = async (replaceRunning = true, version?: string) => {
-    await installDaemon(transport, {
-      ...opts,
-      ...(version !== undefined ? { version } : {}),
-      ...(replaceRunning ? {} : { replaceRunning }),
-    });
-    return waitAfterInstall(transport, opts, logger, true, startTimeoutMs);
+  const install = async (replaceRunning = true, version?: string): Promise<DaemonEndpoint> => {
+    try {
+      await installDaemon(transport, {
+        ...opts,
+        ...(version !== undefined ? { version } : {}),
+        ...(replaceRunning ? {} : { replaceRunning }),
+      });
+    } catch (err) {
+      // A Windows SSH host where neither Task Scheduler nor WMI can start a
+      // daemon that outlives the session: keep one attached to this cockpit.
+      if (!(err instanceof CliError) || err.code !== 'session_bound' || !opts.attachedFallback)
+        throw err;
+      logger.warn(
+        `${err.message} on ${transport.label} — keeping it attached to this cockpit; ` +
+          'session state stays on disk and can resume on the next launch',
+      );
+      return opts.attachedFallback();
+    }
+    return waitAfterInstall(transport, opts, logger, true, timeout());
   };
   if (inspection) {
     let replacement: DaemonEndpoint | undefined;
@@ -123,8 +136,9 @@ export async function ensureDaemon(
       throw err;
     }
   }
-  if (localWindows) {
-    return startLocalWindows(transport, logger, startTimeoutMs, install, {
+  const windows = windowsOps(transport);
+  if (windows) {
+    return startWindowsHost(windows, transport, logger, timeout(), install, {
       // An explicit release or archive is what the caller asked for.
       keepInstalled: opts.version === undefined && opts.tarball === undefined,
       // Pinned to this launcher's own release (the default), so it never comes back here.
@@ -150,17 +164,21 @@ export async function ensureDaemon(
  * it: version changes are the handshake's and `puddle upgrade`'s, never a
  * side effect of which launcher happens to start first. Only when that tree
  * cannot run is this launcher's own release installed; one whose protocol
- * is incompatible is handed back to the handshake through `retry`.
+ * is incompatible is handed back to the handshake through `retry`. The same
+ * holds for a Windows SSH host, through its host helper.
  */
-async function startLocalWindows(
+async function startWindowsHost(
+  windows: WindowsHostOps,
   transport: Transport,
   logger: Logger,
   timeoutMs: number,
   install: (replaceRunning: boolean, version?: string) => Promise<DaemonEndpoint>,
   opts: { keepInstalled: boolean; retry: () => Promise<DaemonEndpoint> },
 ): Promise<DaemonEndpoint> {
-  if (await controlPipePresent(clientHome())) {
-    logger.info('puddled is starting on this machine — waiting for it');
+  const where = transport.kind === 'local' ? 'this machine' : transport.label;
+  const target = transport.kind === 'local' ? '' : ` ${transport.label}`;
+  if (await windows.pipePresent()) {
+    logger.info(`puddled is starting on ${where} — waiting for it`);
     try {
       const started = await waitForStartedDaemon(transport, timeoutMs);
       return { ...started, bootstrapped: false, daemonLifetime: 'persistent' };
@@ -168,14 +186,14 @@ async function startLocalWindows(
       if (!(err instanceof CliError) || err.code !== 'daemon_start_timeout') throw err;
       throw new CliError(
         'daemon_unreachable',
-        'puddled holds its control pipe on this machine but does not answer',
-        'see its output with: puddle logs — restart it with: puddle upgrade daemon',
+        `puddled holds its control pipe on ${where} but does not answer`,
+        `see its output with: puddle logs${target} — restart it with: puddle upgrade daemon${target}`,
       );
     }
   }
   const installed = await installedVersion(transport);
   if (installed === null) return install(false);
-  logger.info('starting puddled on this machine');
+  logger.info(`starting puddled on ${where}`);
   if (!opts.keepInstalled) return install(false);
   try {
     // An installed tree is smoke-tested and started in place: no download.

@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { closeSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, win32 } from 'node:path';
 import {
@@ -270,6 +270,91 @@ export async function stopWindowsDaemon(home: string, opts: StopOptions = {}): P
       ? 'its control pipe is held by a process this CLI cannot identify'
       : `stop it in Task Manager (pid ${pids.join(', ')}), then retry`,
   );
+}
+
+/**
+ * The pid a home file records: `runtime.json`, which the daemon serving the
+ * home's control pipe writes, or `puddled.pid`, which its starter writes.
+ */
+function recordedPid(home: string, file: 'runtime.json' | 'puddled.pid'): number | null {
+  let text: string;
+  try {
+    text = readFileSync(join(home, file), 'utf8');
+  } catch {
+    return null;
+  }
+  let value: unknown;
+  if (file === 'puddled.pid') value = Number(text.trim());
+  else {
+    try {
+      value = (JSON.parse(text) as { pid?: unknown }).pid;
+    } catch {
+      return null;
+    }
+  }
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+/** `named`: the home no longer names the pid; `gone`: it is no daemon of this home now. */
+export type DaemonPidStop = 'stopped' | 'named' | 'gone';
+
+/**
+ * Stop one daemon of this home, by pid, and only while the home still names
+ * it (runtime.json or puddled.pid): the daemon an SSH-attached lease started,
+ * never the home's supervisor or a daemon another launcher, or the logon
+ * task, started meanwhile. The POSIX lease likewise signals only the pid it
+ * captured. Graceful first, over the control pipe when runtime.json shows
+ * this daemon serves it; then termination of that identified process alone.
+ * Resolves `named` or `gone`, touching nothing, when it is no longer that
+ * home's daemon.
+ */
+export async function stopWindowsDaemonPid(
+  home: string,
+  pid: number,
+  opts: StopOptions = {},
+): Promise<DaemonPidStop> {
+  const logger = opts.logger ?? silentLogger;
+  const list = opts.list ?? listWindowsProcesses;
+  const serving = recordedPid(home, 'runtime.json') === pid;
+  if (!serving && recordedPid(home, 'puddled.pid') !== pid) return 'named';
+  // A recycled pid, or a process this home does not run, is never stopped.
+  const identified = (await homeDaemonPids(home, list).catch(() => [] as number[])).includes(pid);
+  if (!identified) {
+    clearPidFileOf(home, pid);
+    return 'gone';
+  }
+  if (serving && (await requestDaemonShutdown(home)) === 'stopping') {
+    logger.info('stopping puddled');
+    if (await pidGone(pid, opts.graceMs ?? SHUTDOWN_GRACE_MS)) {
+      clearPidFileOf(home, pid);
+      return 'stopped';
+    }
+  }
+  logger.warn(`puddled (pid ${pid}) did not stop cleanly — terminating it`);
+  await killProcessTree(pid, { platform: 'win32' });
+  if (await pidGone(pid, opts.terminateGraceMs ?? TERMINATE_GRACE_MS)) {
+    clearPidFileOf(home, pid);
+    return 'stopped';
+  }
+  throw new CliError(
+    'daemon_unreachable',
+    `could not stop puddled (pid ${pid})`,
+    `stop it in Task Manager (pid ${pid}), then retry`,
+  );
+}
+
+async function pidGone(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (!isPidAlive(pid, 'win32')) return true;
+    if (Date.now() >= deadline) return false;
+    await sleep(100);
+  }
+}
+
+/** puddled.pid goes only while it still names `pid`. */
+function clearPidFileOf(home: string, pid: number): void {
+  if (recordedPid(home, 'puddled.pid') === pid) clearPidFile(home);
 }
 
 async function stopped(home: string, pids: number[], timeoutMs: number): Promise<boolean> {

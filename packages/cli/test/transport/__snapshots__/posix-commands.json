@@ -1,0 +1,519 @@
+{
+  "open": [
+    {
+      "file": "ssh",
+      "args": [
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPath=<client-home>/cm-%C",
+        "-o",
+        "ControlPersist=10m",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "alice@devbox",
+        "true"
+      ]
+    }
+  ],
+  "isAlive": [
+    {
+      "file": "ssh",
+      "args": [
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPath=<client-home>/cm-%C",
+        "-o",
+        "ControlPersist=10m",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "-O",
+        "check",
+        "alice@devbox"
+      ]
+    }
+  ],
+  "cancelForward": [
+    {
+      "file": "ssh",
+      "args": [
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPath=<client-home>/cm-%C",
+        "-o",
+        "ControlPersist=10m",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "-O",
+        "cancel",
+        "-L",
+        "4100:127.0.0.1:4200",
+        "alice@devbox"
+      ]
+    }
+  ],
+  "installedVersion": [
+    {
+      "file": "ssh",
+      "args": [
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPath=<client-home>/cm-%C",
+        "-o",
+        "ControlPersist=10m",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "alice@devbox",
+        "--",
+        "sh -c 'readlink \"${PUDDLE_HOME:-$HOME/.puddle}\"/bin/current'"
+      ]
+    }
+  ],
+  "install from releases": [
+    {
+      "file": "ssh",
+      "args": [
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPath=<client-home>/cm-%C",
+        "-o",
+        "ControlPersist=10m",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "alice@devbox",
+        "--",
+        "sh -c 'sh -s -- '\\''--version'\\'' '\\''1.2.3'\\'' '\\''--repo'\\'' '\\''acme/puddle'\\'''"
+      ],
+      "stdin": "<install.sh>"
+    }
+  ],
+  "install a tarball": [
+    {
+      "file": "ssh",
+      "args": [
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPath=<client-home>/cm-%C",
+        "-o",
+        "ControlPersist=10m",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "alice@devbox",
+        "--",
+        "sh -c 'mkdir -p $(dirname .puddle/cache/puddled-v1.2.3-linux-x64.tar.gz)'"
+      ]
+    },
+    {
+      "file": "scp",
+      "args": [
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPath=<client-home>/cm-%C",
+        "-o",
+        "ControlPersist=10m",
+        "<tarball>",
+        "alice@devbox:.puddle/cache/puddled-v1.2.3-linux-x64.tar.gz"
+      ]
+    },
+    {
+      "file": "ssh",
+      "args": [
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPath=<client-home>/cm-%C",
+        "-o",
+        "ControlPersist=10m",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "alice@devbox",
+        "--",
+        "sh -c 'mkdir -p $(dirname .puddle/cache/puddled-v1.2.3-linux-x64.tar.gz.sha256)'"
+      ]
+    },
+    {
+      "file": "scp",
+      "args": [
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPath=<client-home>/cm-%C",
+        "-o",
+        "ControlPersist=10m",
+        "<tarball>.sha256",
+        "alice@devbox:.puddle/cache/puddled-v1.2.3-linux-x64.tar.gz.sha256"
+      ]
+    },
+    {
+      "file": "ssh",
+      "args": [
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPath=<client-home>/cm-%C",
+        "-o",
+        "ControlPersist=10m",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "alice@devbox",
+        "--",
+        "sh -c 'sh -s -- '\\''--version'\\'' '\\''1.2.3'\\'' '\\''--tarball'\\'' '\\''.puddle/cache/puddled-v1.2.3-linux-x64.tar.gz'\\'' '\\''--sums'\\'' '\\''.puddle/cache/puddled-v1.2.3-linux-x64.tar.gz.sha256'\\'''"
+      ],
+      "stdin": "<install.sh>"
+    }
+  ],
+  "sweep": [
+    {
+      "file": "ssh",
+      "args": [
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPath=<client-home>/cm-%C",
+        "-o",
+        "ControlPersist=10m",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "alice@devbox",
+        "--",
+        "sh -c 'sh -s'"
+      ],
+      "stdin": "7447ea08b01ccbdc"
+    }
+  ],
+  "remove": [
+    {
+      "file": "ssh",
+      "args": [
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPath=<client-home>/cm-%C",
+        "-o",
+        "ControlPersist=10m",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "alice@devbox",
+        "--",
+        "sh -c 'PUDDLE_PURGE=0 sh -s'"
+      ],
+      "stdin": "0d23de51089a135e"
+    }
+  ],
+  "remove --purge": [
+    {
+      "file": "ssh",
+      "args": [
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPath=<client-home>/cm-%C",
+        "-o",
+        "ControlPersist=10m",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "alice@devbox",
+        "--",
+        "sh -c 'PUDDLE_PURGE=1 sh -s'"
+      ],
+      "stdin": "0d23de51089a135e"
+    }
+  ],
+  "session log": [
+    {
+      "file": "ssh",
+      "args": [
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPath=<client-home>/cm-%C",
+        "-o",
+        "ControlPersist=10m",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "alice@devbox",
+        "--",
+        "sh -c 'tail -c 262144 \"${PUDDLE_HOME:-$HOME/.puddle}\"/logs/s1/agent.log'"
+      ]
+    }
+  ],
+  "session log --follow": [
+    {
+      "file": "ssh",
+      "args": [
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPath=<client-home>/cm-%C",
+        "-o",
+        "ControlPersist=10m",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "alice@devbox",
+        "--",
+        "sh -c 'tail -f -c 262144 \"${PUDDLE_HOME:-$HOME/.puddle}\"/logs/s1/shell.log'"
+      ]
+    }
+  ],
+  "daemon log": [
+    {
+      "file": "ssh",
+      "args": [
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPath=<client-home>/cm-%C",
+        "-o",
+        "ControlPersist=10m",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "alice@devbox",
+        "--",
+        "sh -c 'if command -v journalctl >/dev/null 2>&1 && journalctl --user -u puddled -n 1 >/dev/null 2>&1; then journalctl --user -u puddled -n 200 --no-pager; elif [ -f \"${PUDDLE_HOME:-$HOME/.puddle}\"/logs/puddled.out.log ]; then tail -n 200 \"${PUDDLE_HOME:-$HOME/.puddle}\"/logs/puddled.out.log \"${PUDDLE_HOME:-$HOME/.puddle}\"/logs/puddled.err.log 2>/dev/null; else echo '\\''no daemon logs found — the daemon logs to its supervisor (journalctl --user -u puddled / ~/.puddle/logs)'\\''; fi'"
+      ]
+    }
+  ],
+  "inspect": [
+    {
+      "file": "ssh",
+      "args": [
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPath=<client-home>/cm-%C",
+        "-o",
+        "ControlPersist=10m",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "alice@devbox",
+        "--",
+        "sh -c '\"${PUDDLE_HOME:-$HOME/.puddle}\"/bin/current/bin/node -e '\\''const fs = require('\\''\\'\\'''\\''node:fs'\\''\\'\\'''\\''), path = require('\\''\\'\\'''\\''node:path'\\''\\'\\'''\\''), os = require('\\''\\'\\'''\\''node:os'\\''\\'\\'''\\'');\nconst dir = path.join(process.env.PUDDLE_HOME || path.join(os.homedir(), '\\''\\'\\'''\\''.puddle'\\''\\'\\'''\\''), '\\''\\'\\'''\\''control'\\''\\'\\'''\\'');\nfs.mkdirSync(dir, {recursive:true, mode:0o700});\nconst st = fs.lstatSync(dir);\nif (!st.isDirectory() || st.isSymbolicLink() || st.uid !== process.getuid() || (st.mode & 0o077)) throw Error('\\''\\'\\'''\\''Private control directory required'\\''\\'\\'''\\'');\nconst dest = path.join(dir, '\\''\\'\\'''\\''helper-<digest>.mjs'\\''\\'\\'''\\'');\nconst tmp = dest + '\\''\\'\\'''\\''.'\\''\\'\\'''\\'' + require('\\''\\'\\'''\\''node:crypto'\\''\\'\\'''\\'').randomBytes(16).toString('\\''\\'\\'''\\''hex'\\''\\'\\'''\\'');\nfs.writeFileSync(tmp, fs.readFileSync(0), {mode:0o600, flag:'\\''\\'\\'''\\''wx'\\''\\'\\'''\\''});\nfs.renameSync(tmp, dest);'\\'''"
+      ],
+      "stdin": "<host-control helper>"
+    },
+    {
+      "file": "ssh",
+      "args": [
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPath=<client-home>/cm-%C",
+        "-o",
+        "ControlPersist=10m",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "alice@devbox",
+        "--",
+        "sh -c '\"${PUDDLE_HOME:-$HOME/.puddle}\"/bin/current/bin/node \"${PUDDLE_HOME:-$HOME/.puddle}\"/control/helper-<digest>.mjs --inspect'"
+      ]
+    }
+  ],
+  "control channel": [
+    {
+      "file": "ssh",
+      "args": [
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPath=<client-home>/cm-%C",
+        "-o",
+        "ControlPersist=10m",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "-T",
+        "alice@devbox",
+        "--",
+        "sh -c '\"${PUDDLE_HOME:-$HOME/.puddle}\"/bin/current/bin/node \"${PUDDLE_HOME:-$HOME/.puddle}\"/control/helper-<digest>.mjs'"
+      ]
+    }
+  ],
+  "daemon port": [
+    {
+      "file": "ssh",
+      "args": [
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPath=<client-home>/cm-%C",
+        "-o",
+        "ControlPersist=10m",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "alice@devbox",
+        "--",
+        "sh -c 'cat \"${PUDDLE_HOME:-$HOME/.puddle}\"/runtime.json'"
+      ]
+    }
+  ],
+  "read the supervisor marker": [
+    {
+      "file": "ssh",
+      "args": [
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPath=<client-home>/cm-%C",
+        "-o",
+        "ControlPersist=10m",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "alice@devbox",
+        "--",
+        "sh -c 'cat \"${PUDDLE_HOME:-$HOME/.puddle}\"/supervisor'"
+      ]
+    }
+  ],
+  "run attached": [
+    {
+      "file": "ssh",
+      "args": [
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPath=<client-home>/cm-%C",
+        "-o",
+        "ControlPersist=10m",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "alice@devbox",
+        "--",
+        "sh -c 'exec puddled'"
+      ]
+    }
+  ],
+  "remote access status": [
+    {
+      "file": "ssh",
+      "args": [
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPath=<client-home>/cm-%C",
+        "-o",
+        "ControlPersist=10m",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "alice@devbox",
+        "--",
+        "sh -c 'if test -f \"${PUDDLE_HOME:-$HOME/.puddle}\"/bin/current/daemon/connector.mjs; then \"${PUDDLE_HOME:-$HOME/.puddle}\"/bin/current/bin/node \"${PUDDLE_HOME:-$HOME/.puddle}\"/bin/current/daemon/connector.mjs --version; else exit 44; fi'"
+      ]
+    },
+    {
+      "file": "ssh",
+      "args": [
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPath=<client-home>/cm-%C",
+        "-o",
+        "ControlPersist=10m",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "alice@devbox",
+        "--",
+        "sh -c '\"${PUDDLE_HOME:-$HOME/.puddle}\"/bin/current/bin/node \"${PUDDLE_HOME:-$HOME/.puddle}\"/bin/current/daemon/connector.mjs --inspect'"
+      ],
+      "stdin": "87979d95d330dca1"
+    }
+  ],
+  "puddle remote devices": [
+    {
+      "file": "ssh",
+      "args": [
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "alice@devbox",
+        "true"
+      ]
+    },
+    {
+      "file": "ssh",
+      "args": [
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "alice@devbox",
+        "--",
+        "sh -c 'test -f \"${PUDDLE_HOME:-$HOME/.puddle}\"/bin/current/daemon/connector.mjs'"
+      ]
+    },
+    {
+      "file": "ssh",
+      "args": [
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "alice@devbox",
+        "--",
+        "sh -c '\"${PUDDLE_HOME:-$HOME/.puddle}\"/bin/current/bin/node \"${PUDDLE_HOME:-$HOME/.puddle}\"/bin/current/daemon/connector.mjs --version'"
+      ]
+    },
+    {
+      "file": "ssh",
+      "args": [
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "alice@devbox",
+        "--",
+        "sh -c '\"${PUDDLE_HOME:-$HOME/.puddle}\"/bin/current/bin/node \"${PUDDLE_HOME:-$HOME/.puddle}\"/bin/current/daemon/connector.mjs --admin'"
+      ],
+      "stdin": "9fec6bf1eaa17dfe"
+    }
+  ]
+}

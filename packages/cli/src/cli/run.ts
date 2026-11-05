@@ -37,6 +37,7 @@ import { runInstall, runRemove, runUpgrade } from './manage.js';
 import {
   isCockpitChild,
   killHint,
+  launcherRemotePlatform,
   launchDetached,
   spawnDetachedRefresh,
   terminateCockpit,
@@ -475,6 +476,7 @@ async function runCockpit(
             host: command.target,
             // No terminal, and on Windows no ssh master: authenticate without prompts.
             ...(detached && process.platform === 'win32' ? { sshBatchMode: true } : {}),
+            ...(launcherRemotePlatform() ? { remotePlatform: launcherRemotePlatform() } : {}),
           });
   } catch (err) {
     if (err instanceof CliError) {

@@ -1,12 +1,9 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readCurrentVersion } from './current-link.js';
-import { installWindowsDaemon } from './windows-install.js';
-import { clientHome, hostPaths } from '../paths.js';
-import { isLocalWindows } from '../transport/local.js';
+import { windowsOps, type WindowsHostOps } from '../host/windows-ops.js';
+import { hostPaths } from '../paths.js';
 import type { Transport } from '../transport/transport.js';
-import { windowsHostRefusal } from '../transport/windows-host.js';
 import { CliError, type Logger, silentLogger } from '../types.js';
 import { pinnedDaemonVersion, repoSlug } from '../version.js';
 
@@ -27,12 +24,36 @@ export interface BootstrapOptions {
  * The daemon version installed under ~/.puddle/bin, read from the `current`
  * symlink's target (versions/<X.Y.Z>) — never by executing an unknown
  * `puddled` (a pre-Phase-6 binary would START a daemon on --version).
- * Null when nothing bootstrap-managed is installed.
+ * Null when nothing bootstrap-managed is installed. A Windows host answers
+ * through its own implementation (host/windows-ops.ts), where a tree of
+ * another architecture is not installed: this is what installation decides
+ * on. One recognised only by this command failing is asked again.
  */
-export async function installedVersion(transport: Transport): Promise<string | null> {
-  if (isLocalWindows(transport)) return readCurrentVersion(clientHome(), 'win32') ?? null;
+export function installedVersion(transport: Transport): Promise<string | null> {
+  return linkedVersion(transport, (windows) => windows.installedVersion());
+}
+
+/**
+ * The daemon version present under ~/.puddle/bin, whatever its architecture:
+ * what removal and upgrades act on. The same command as installedVersion on
+ * a POSIX host; on Windows an x64 tree on Arm (every v1 install there) is
+ * still found, so it can be removed or replaced.
+ */
+export function presentVersion(transport: Transport): Promise<string | null> {
+  return linkedVersion(transport, (windows) => windows.presentVersion());
+}
+
+async function linkedVersion(
+  transport: Transport,
+  ask: (windows: WindowsHostOps) => Promise<string | null>,
+): Promise<string | null> {
+  const windows = windowsOps(transport);
+  if (windows) return ask(windows);
   const result = await transport.exec(`readlink ${hostPaths.current}`, { timeoutMs: 15_000 });
-  if (result.code !== 0) return null;
+  if (result.code !== 0) {
+    const recognised = windowsOps(transport);
+    return recognised ? ask(recognised) : null;
+  }
   const match = /versions\/([^/\s]+)\s*$/.exec(result.stdout.trim());
   return match?.[1] ?? null;
 }
@@ -48,17 +69,8 @@ export async function installDaemon(
   opts: BootstrapOptions = {},
 ): Promise<void> {
   const logger = opts.logger ?? silentLogger;
-  if (isLocalWindows(transport)) {
-    if (opts.tarball !== undefined && /^https?:\/\//.test(opts.tarball)) {
-      throw new CliError('bad_arguments', '--tarball must be a local file path');
-    }
-    return installWindowsDaemon({
-      ...(opts.version !== undefined ? { version: opts.version } : {}),
-      ...(opts.tarball !== undefined ? { tarball: opts.tarball } : {}),
-      ...(opts.replaceRunning !== undefined ? { replaceRunning: opts.replaceRunning } : {}),
-      logger,
-    });
-  }
+  const windows = windowsOps(transport);
+  if (windows) return installWindows(transport, opts, logger);
   const version = opts.version ?? pinnedDaemonVersion();
   const script = readInstallScript();
 
@@ -119,14 +131,34 @@ export async function installDaemon(
     },
   });
   if (result.code !== 0) {
-    const refusal = windowsHostRefusal(transport, result);
-    if (refusal) throw refusal;
+    // install.sh named a Git Bash kernel: the host is Windows after all.
+    if (windowsOps(transport)) return installWindows(transport, opts, logger);
     throw new CliError(
       'not_installed',
       `the installer failed on ${transport.label} (exit ${result.code})`,
       lastLines(result.stderr || result.stdout),
     );
   }
+}
+
+/**
+ * A Windows host installs with installation/windows-install.ts, never
+ * install.sh: in process here, or through the host helper over SSH.
+ */
+function installWindows(
+  transport: Transport,
+  opts: BootstrapOptions,
+  logger: Logger,
+): Promise<void> {
+  if (opts.tarball !== undefined && /^https?:\/\//.test(opts.tarball)) {
+    throw new CliError('bad_arguments', '--tarball must be a local file path');
+  }
+  return windowsOps(transport)!.install({
+    ...(opts.version !== undefined ? { version: opts.version } : {}),
+    ...(opts.tarball !== undefined ? { tarball: opts.tarball } : {}),
+    ...(opts.replaceRunning !== undefined ? { replaceRunning: opts.replaceRunning } : {}),
+    logger,
+  });
 }
 
 function lastLines(text: string, count = 3): string {

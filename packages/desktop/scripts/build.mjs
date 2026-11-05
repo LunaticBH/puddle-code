@@ -97,3 +97,8 @@ cpSync(
   join(repoRoot, 'packages/cli/dist/host-control.mjs'),
   join(pkgRoot, 'dist/host-control.mjs'),
 );
+// Staged on Windows SSH hosts by the embedded CLI library (docs/windows.md).
+cpSync(
+  join(repoRoot, 'packages/cli/dist/windows-host.mjs'),
+  join(pkgRoot, 'dist/windows-host.mjs'),
+);

@@ -163,11 +163,8 @@ jobs:
         run: pnpm build:cli-tarball
       - name: exercise standalone CLI without system Node or npm
         run: node scripts/test-cli-tarball.mjs
-      # windows-install.test.ts stays on the x64 job until windows-install.ts
-      # asks windowsHostArch() for its archive: today it downloads the
-      # process's win32-<arch> zip, which the test pins to win32-x64.
       - name: installation and Windows architecture tests
-        run: pnpm exec vitest run packages/cli/test/installation packages/shared/test --exclude '**/windows-install.test.ts'
+        run: pnpm exec vitest run packages/cli/test/installation packages/shared/test
 
   # The ordinary build above proves packaging on the current hosted image.
   # This second job exercises the actual release container before a tag: native
