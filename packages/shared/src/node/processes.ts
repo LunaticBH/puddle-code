@@ -40,8 +40,9 @@ export interface KillProcessTreeOptions {
   /**
    * Windows: stop the tree the process table shows (stopWindowsProcessTree)
    * rather than the one `taskkill /T` follows, which cannot reach a
-   * descendant whose parent has exited. `taskkill /T` still runs when the
-   * table cannot be read.
+   * descendant whose parent has exited. When the table cannot be read this
+   * stops nothing: by then `pid` may name another process, so `taskkill /T`
+   * on it is no fallback.
    */
   processes?: WindowsProcessSource;
   /** With `processes`: what is known about the root (see windowsProcessTree). */
@@ -71,10 +72,9 @@ export function killProcessTree(pid: number, opts: KillProcessTreeOptions = {}):
     return Promise.resolve();
   }
   if (opts.processes) {
-    const { processes, root, ...rest } = opts;
-    return stopWindowsProcessTree(pid, { processes, root }).then(
+    return stopWindowsProcessTree(pid, { processes: opts.processes, root: opts.root }).then(
       () => undefined,
-      () => taskkill(pid, rest),
+      () => undefined,
     );
   }
   return taskkill(pid, opts);
