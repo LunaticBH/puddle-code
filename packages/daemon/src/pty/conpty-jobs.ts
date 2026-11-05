@@ -10,13 +10,17 @@ import { system32Path } from '@puddle/shared/node/platform';
  *
  * Windows records, for every process, the console host it is attached to
  * (NtQueryInformationProcess, ProcessConsoleHostProcess; cleared when it
- * frees its console), and a console lists its own processes
- * (GetConsoleProcessList, from a process attached to it for a moment). A
- * PTY's console host is the headless `conhost.exe` its root runs in: the
- * root names it. A process that left the console (a GUI programme and all
- * it starts, a detached process, one started in a console of its own such
- * as PowerShell's `Start-Process`) is not attached to it and is never
- * named here, as `nohup`, `setsid` and GUI launches survive a hang-up.
+ * frees its console, but left as it was when the host is terminated, so it
+ * counts only for a process created after the host), and a console lists
+ * its own processes (GetConsoleProcessList, from a process attached to it
+ * for a moment). A PTY's console host is the headless `conhost.exe` its
+ * root runs in: the root names it; should the root have gone already, the
+ * daemon, which notes every spawn, picks the one only this spawn could have
+ * created (chooseHost). A process that left the console (a GUI programme
+ * and all it starts, a detached process, one started in a console of its
+ * own such as PowerShell's `Start-Process`) is not attached to it and is
+ * never named here, as `nohup`, `setsid` and GUI launches survive a
+ * hang-up.
  *
  * The helper holds every process it names open (a SYNCHRONIZE handle), the
  * root and the console host from just after `pty.spawn` and each member
@@ -45,7 +49,12 @@ export interface ConsoleMember {
   key: string;
   /** Its image is a GUI programme (PE subsystem 2): never ended. */
   gui: boolean;
-  /** The console host it is attached to now: 0 for none, -1 when Windows will not say. */
+  /**
+   * The console host Windows last recorded for it: 0 for none, -1 when
+   * Windows will not say. Windows leaves it as it was when a host is
+   * terminated, so it names this console only for a process created after
+   * the host was.
+   */
   consoleHost: number;
   /** The console's own process list named it (only when the scan attached to it). */
   listed: boolean;
@@ -79,19 +88,25 @@ export interface ConptyConsole {
   release(): void;
 }
 
+/** When `pty.spawn` began and returned, by this process's clock. */
+export interface SpawnWindow {
+  startedAtMs: number;
+  spawnedAtMs: number;
+}
+
 export interface ConptyJobs {
   /**
-   * Holds the root `pid`, provided it was created between `fromMs` and
-   * `toMs` (Unix ms; a process created at any other time holds a pid the
-   * root has given up), and its console host: the one the root runs in,
-   * or, should the root have exited already, the headless host created
-   * nearest `startedAtMs` (when `pty.spawn` began) that no other PTY holds.
-   * Resolves null when the helper is not available or did not answer in
-   * time.
+   * Holds the root `pid`, provided this process created it between `fromMs`
+   * and `toMs` (Unix ms; a process created at any other time holds a pid
+   * the root has given up) and no other spawn of this process's could have
+   * (attributeRoot), and its console host: the one the root runs in, or,
+   * should the root have exited already, the headless host this process
+   * created that only this spawn could have (chooseHost). Resolves null
+   * when the helper is not available or did not answer in time.
    */
   track(
     pid: number,
-    createdWithin: { fromMs: number; toMs: number; startedAtMs?: number },
+    createdWithin: { fromMs: number; toMs: number; startedAtMs?: number; spawnedAtMs?: number },
   ): Promise<ConptyConsole | null>;
   /** Resolves once the helper can take requests, or cannot start; never rejects. */
   ready(): Promise<boolean>;
@@ -204,12 +219,18 @@ public static class PuddleConsoles
         public int Pid;
         public long Created;
         public IntPtr Handle;
+        // Its parent's pid as the process table showed it (0: not known).
+        public int Parent;
+        // Its image's subsystem, once read (-1 until then).
+        public int Subsystem = -1;
         public string Key { get { return Pid + "@" + Created; } }
     }
 
     class Pty
     {
         public long From, To;
+        // The process that spawned the PTY: its root's and its console host's parent.
+        public int Parent;
         public Pin Root, Host;
         public readonly Dictionary<string, Pin> Members = new Dictionary<string, Pin>();
     }
@@ -258,7 +279,8 @@ public static class PuddleConsoles
 
     static string Handle(string[] f)
     {
-        if (f.Length == 8 && f[1] == "track") return Track(f[2], int.Parse(f[3]), long.Parse(f[4]), long.Parse(f[5]), int.Parse(f[6]), long.Parse(f[7]));
+        if (f.Length == 7 && f[1] == "track") return Track(f[2], int.Parse(f[3]), long.Parse(f[4]), long.Parse(f[5]), int.Parse(f[6]));
+        if (f.Length == 6 && f[1] == "claim") return Claim(f[2], f[3] == "1", int.Parse(f[4]), long.Parse(f[5]));
         if (f.Length == 3 && f[1] == "alive") return Alive(f[2]);
         if (f.Length == 4 && f[1] == "scan") return Scan(f[2], f[3] == "1");
         if (f.Length >= 3 && f[1] == "terminate") return Terminate(f[2], f, 3);
@@ -307,13 +329,22 @@ public static class PuddleConsoles
         }
     }
 
-    // The console host the process is attached to now: its pid, 0 for none, -1 when Windows will not say.
+    // The console host Windows records for the process: its pid, 0 for none,
+    // -1 when Windows will not say. Not cleared when that host is terminated.
     static long ConsoleHost(IntPtr handle)
     {
         IntPtr value;
         if (NtQueryInformationProcess(handle, CONSOLE_HOST, out value, IntPtr.Size, IntPtr.Zero) != 0) return -1;
         long raw = value.ToInt64();
         return (raw & 3) == 1 ? raw & ~3L : 0;
+    }
+
+    // Attached to 'host' now: it names 'host', and was created after it (a
+    // process whose host was terminated keeps naming that pid, which a later
+    // host may hold).
+    static bool AttachedTo(Pin pin, Pin host)
+    {
+        return host != null && pin.Created >= host.Created && ConsoleHost(pin.Handle) == host.Pid;
     }
 
     static string ImagePath(IntPtr handle)
@@ -369,6 +400,12 @@ public static class PuddleConsoles
         return subsystem;
     }
 
+    static int SubsystemOf(Pin pin)
+    {
+        if (pin.Subsystem < 0 && pin.Handle != IntPtr.Zero) pin.Subsystem = Subsystem(pin.Handle);
+        return pin.Subsystem;
+    }
+
     static Dictionary<int, Entry> Table()
     {
         var table = new Dictionary<int, Entry>();
@@ -385,6 +422,19 @@ public static class PuddleConsoles
         }
         finally { CloseHandle(snapshot); }
         return table;
+    }
+
+    static int ParentOf(int pid, Dictionary<int, Entry> table)
+    {
+        Entry entry;
+        return table.TryGetValue(pid, out entry) ? (int)entry.Parent : 0;
+    }
+
+    static bool IsHeadlessHost(Pin pin, Entry entry)
+    {
+        if (!string.Equals(entry.Exe, "conhost.exe", StringComparison.OrdinalIgnoreCase)) return false;
+        string line = CommandLine(pin.Handle);
+        return line != null && line.IndexOf("--headless", StringComparison.OrdinalIgnoreCase) >= 0;
     }
 
     static bool Assigned(Pin host, Pty except)
@@ -404,16 +454,14 @@ public static class PuddleConsoles
     {
         Entry entry;
         if (!table.TryGetValue(pid, out entry) || entry.Parent != parent) return null;
-        if (!string.Equals(entry.Exe, "conhost.exe", StringComparison.OrdinalIgnoreCase)) return null;
         Pin pin = Open(pid);
         if (pin == null) return null;
-        string line = CommandLine(pin.Handle);
-        if (pin.Created < pty.From || pin.Created > pty.To || line == null ||
-            line.IndexOf("--headless", StringComparison.OrdinalIgnoreCase) < 0 || Assigned(pin, pty))
+        if (pin.Created < pty.From || pin.Created > pty.To || !IsHeadlessHost(pin, entry) || Assigned(pin, pty))
         {
             Close(pin);
             return null;
         }
+        pin.Parent = parent;
         return pin;
     }
 
@@ -437,23 +485,36 @@ public static class PuddleConsoles
         }
     }
 
-    // A host a fallback picks must be this much nearer the PTY's start than any other.
-    const long NEAREST_MARGIN_MS = 10;
-
-    static string Track(string id, int pid, long fromMs, long toMs, int parent, long startedMs)
+    // Holds the root, if 'parent' created it between from and to and it is
+    // no console host itself, and names the console host it runs in and
+    // every headless host 'parent' created in that window that no other PTY
+    // holds, holding none of them: the daemon, which knows every PTY it has
+    // spawned, says which is this PTY's ('claim').
+    static string Track(string id, int pid, long fromMs, long toMs, int parent)
     {
         var pty = new Pty();
         pty.From = fromMs;
         pty.To = toMs;
+        pty.Parent = parent;
         string state = "gone";
         Pin root = Open(pid);
-        if (root != null && (root.Created < fromMs || root.Created > toMs))
+        if (root != null)
         {
-            state = "other";
-            Close(root);
-            root = null;
+            Entry entry;
+            var table = Table();
+            if (root.Created < fromMs || root.Created > toMs || !table.TryGetValue(pid, out entry) ||
+                (int)entry.Parent != parent || IsHeadlessHost(root, entry))
+            {
+                state = "other";
+                Close(root);
+                root = null;
+            }
+            else
+            {
+                root.Parent = parent;
+                state = "ok";
+            }
         }
-        if (root != null) state = "ok";
         pty.Root = root;
         // The console the root runs in names its host: wait for the root to
         // attach to it (as it initialises), unless it exits first.
@@ -468,44 +529,42 @@ public static class PuddleConsoles
                 Thread.Sleep(5);
             }
         }
-        // One attribution at a time, so that none takes a host another has just taken.
-        lock (attributing)
+        var reply = new StringBuilder(state + " " + (root != null ? root.Created : 0) + " " + named);
+        var hosts = Table();
+        foreach (var entry in hosts.Values)
         {
-            var table = Table();
-            if (named > 0) pty.Host = OpenHost((int)named, pty, parent, table);
-            // Without it, the headless host that no other PTY holds created
-            // nearest the PTY's start: node-pty creates it first thing in
-            // pty.spawn, and two spawns never overlap.
-            if (pty.Host == null)
-            {
-                Pin best = null;
-                long nearest = long.MaxValue, next = long.MaxValue;
-                foreach (var entry in table.Values)
-                {
-                    if (entry.Parent != parent) continue;
-                    Pin candidate = OpenHost((int)entry.Pid, pty, parent, table);
-                    if (candidate == null) continue;
-                    long distance = Math.Abs(candidate.Created - startedMs);
-                    if (distance < nearest)
-                    {
-                        next = nearest;
-                        nearest = distance;
-                        Close(best);
-                        best = candidate;
-                    }
-                    else
-                    {
-                        next = Math.Min(next, distance);
-                        Close(candidate);
-                    }
-                }
-                if (best != null && next - nearest >= NEAREST_MARGIN_MS) pty.Host = best;
-                else Close(best);
-            }
-            Put(id, pty);
+            if ((int)entry.Parent != parent) continue;
+            Pin candidate = OpenHost((int)entry.Pid, pty, parent, hosts);
+            if (candidate == null) continue;
+            reply.Append(' ').Append(candidate.Pid).Append('@').Append(candidate.Created);
+            Close(candidate);
         }
-        return state + " " + (root != null ? root.Created : 0) + " " +
-            (pty.Host != null ? pty.Host.Pid : 0) + " " + (pty.Host != null ? pty.Host.Created : 0);
+        Put(id, pty);
+        return reply.ToString();
+    }
+
+    // The daemon's word on a tracked PTY: whether the root it holds is the
+    // PTY's, and which console host is (0 for none). One attribution at a
+    // time, so that no host is ever two PTYs'.
+    static string Claim(string id, bool rootOk, int hostPid, long hostCreated)
+    {
+        Pty pty = Find(id);
+        if (pty == null) return "none";
+        if (!rootOk && pty.Root != null)
+        {
+            Close(pty.Root);
+            pty.Root = null;
+        }
+        if (hostPid > 0)
+        {
+            lock (attributing)
+            {
+                Pin host = OpenHost(hostPid, pty, pty.Parent, Table());
+                if (host != null && host.Created == hostCreated) pty.Host = host;
+                else Close(host);
+            }
+        }
+        return "ok " + (pty.Host != null ? pty.Host.Pid + " " + pty.Host.Created : "0 0");
     }
 
     static string Alive(string id)
@@ -516,13 +575,18 @@ public static class PuddleConsoles
             (pty.Host != null && Running(pty.Host.Handle) ? 1 : 0);
     }
 
-    static void Keep(Pty pty, Pin pin)
+    static void Keep(Pty pty, Pin pin, Dictionary<int, Entry> table)
     {
         lock (pty)
         {
             Pin known;
-            if (pty.Members.TryGetValue(pin.Key, out known) && known.Handle != IntPtr.Zero) Close(pin);
-            else pty.Members[pin.Key] = pin;
+            if (pty.Members.TryGetValue(pin.Key, out known) && known.Handle != IntPtr.Zero)
+            {
+                Close(pin);
+                return;
+            }
+            if (pin.Parent == 0) pin.Parent = ParentOf(pin.Pid, table);
+            pty.Members[pin.Key] = pin;
         }
     }
 
@@ -535,29 +599,33 @@ public static class PuddleConsoles
         Pty pty = Find(id);
         if (pty == null) return "none";
         bool rootAlive = pty.Root != null && Running(pty.Root.Handle);
-        bool hostAlive = pty.Host != null && Running(pty.Host.Handle);
-        long host = hostAlive ? pty.Host.Pid : 0;
+        Pin host = pty.Host != null && Running(pty.Host.Handle) ? pty.Host : null;
+        var table = Table();
         var listed = new HashSet<string>();
-        if (hostAlive)
+        if (host != null)
         {
-            foreach (var entry in Table().Values)
+            foreach (var entry in table.Values)
             {
                 Pin pin = Open((int)entry.Pid);
                 if (pin == null) continue;
-                if (ConsoleHost(pin.Handle) == host) Keep(pty, pin);
+                if (AttachedTo(pin, host))
+                {
+                    pin.Parent = (int)entry.Parent;
+                    Keep(pty, pin, table);
+                }
                 else Close(pin);
             }
         }
-        if (attach && (rootAlive || hostAlive))
+        if (attach && (rootAlive || host != null))
         {
-            int through = rootAlive ? pty.Root.Pid : 0;
-            if (through == 0)
+            int through = rootAlive && (host == null || AttachedTo(pty.Root, host)) ? pty.Root.Pid : 0;
+            if (through == 0 && host != null)
             {
                 lock (pty)
                 {
                     foreach (var member in pty.Members.Values)
                     {
-                        if (Running(member.Handle) && ConsoleHost(member.Handle) == host)
+                        if (Running(member.Handle) && AttachedTo(member, host))
                         {
                             through = member.Pid;
                             break;
@@ -565,25 +633,25 @@ public static class PuddleConsoles
                     }
                 }
             }
-            if (through != 0) Listed(pty, through, host, listed);
+            if (through != 0) Listed(pty, through, host, listed, table);
         }
-        var reply = new StringBuilder("ok " + (rootAlive ? 1 : 0) + " " + (hostAlive ? 1 : 0));
+        var reply = new StringBuilder("ok " + (rootAlive ? 1 : 0) + " " + (host != null ? 1 : 0));
         var members = new List<Pin>();
         lock (pty) members.AddRange(pty.Members.Values);
         foreach (var member in members)
         {
             if (!Running(member.Handle)) continue;
             reply.Append(' ').Append(member.Pid).Append(':').Append(member.Created).Append(':')
-                .Append(Subsystem(member.Handle)).Append(':').Append(ConsoleHost(member.Handle)).Append(':')
+                .Append(SubsystemOf(member)).Append(':').Append(ConsoleHost(member.Handle)).Append(':')
                 .Append(listed.Contains(member.Key) ? 1 : 0);
         }
         return reply.ToString();
     }
 
     // The console's own list, through 'through', which must be attached to
-    // 'host' (0: not known): each pid listed again once held open is the
+    // 'host' (null: not known): each pid listed again once held open is the
     // process listed the first time.
-    static void Listed(Pty pty, int through, long host, HashSet<string> listed)
+    static void Listed(Pty pty, int through, Pin host, HashSet<string> listed, Dictionary<int, Entry> table)
     {
         var opened = new List<Pin>();
         lock (attaching)
@@ -591,7 +659,7 @@ public static class PuddleConsoles
             if (!AttachConsole(through)) return;
             try
             {
-                if (host != 0 && ConsoleHost(GetCurrentProcess()) != host) return;
+                if (host != null && ConsoleHost(GetCurrentProcess()) != host.Pid) return;
                 foreach (int pid in List())
                 {
                     Pin pin = Open(pid);
@@ -600,14 +668,14 @@ public static class PuddleConsoles
                 var again = new HashSet<int>(List());
                 foreach (var pin in opened)
                 {
-                    if (again.Contains(pin.Pid) && (host == 0 || ConsoleHost(pin.Handle) == host)) listed.Add(pin.Key);
+                    if (again.Contains(pin.Pid) && (host == null || AttachedTo(pin, host))) listed.Add(pin.Key);
                 }
             }
             finally { FreeConsole(); }
         }
         foreach (var pin in opened)
         {
-            if (listed.Contains(pin.Key)) Keep(pty, pin);
+            if (listed.Contains(pin.Key)) Keep(pty, pin, table);
             else Close(pin);
         }
     }
@@ -645,7 +713,7 @@ public static class PuddleConsoles
                 lock (pty) pty.Members.TryGetValue(f[i], out pin);
             }
             if (pin == null || !Running(pin.Handle)) continue;
-            if (member && Subsystem(pin.Handle) == 2) continue;
+            if (member && SubsystemOf(pin) == 2) continue;
             if (TerminateProcess(pin.Handle, 1)) ended.Add(pin.Handle);
         }
         // TerminateProcess returns before the process has gone: wait a little.
@@ -687,6 +755,7 @@ public static class PuddleConsoles
         var pty = new Pty();
         pty.From = createdMs - 1;
         pty.To = createdMs + 1;
+        pty.Parent = parent;
         pty.Host = OpenHost(pid, pty, parent, Table());
         Put(id, pty);
         return pty.Host != null ? "ok " + pty.Host.Created : "gone";
@@ -696,6 +765,8 @@ public static class PuddleConsoles
     static string Classify(string id, string[] f, int from)
     {
         var pty = new Pty();
+        var table = Table();
+        var seen = new HashSet<string>();
         var reply = new StringBuilder("ok");
         for (int i = from; i < f.Length; i++)
         {
@@ -703,14 +774,14 @@ public static class PuddleConsoles
             if (parts.Length != 2) continue;
             Pin pin = Open(int.Parse(parts[0]));
             if (pin == null) continue;
-            if (Math.Abs(pin.Created - long.Parse(parts[1])) > 1)
+            if (Math.Abs(pin.Created - long.Parse(parts[1])) > 1 || !seen.Add(pin.Key))
             {
                 Close(pin);
                 continue;
             }
-            Keep(pty, pin);
+            Keep(pty, pin, table);
             reply.Append(' ').Append(pin.Pid).Append(':').Append(pin.Created).Append(':')
-                .Append(Subsystem(pin.Handle)).Append(':').Append(ConsoleHost(pin.Handle));
+                .Append(SubsystemOf(pin)).Append(':').Append(ConsoleHost(pin.Handle));
         }
         Put(id, pty);
         return reply.ToString();
@@ -774,6 +845,97 @@ function fields(item: string, size: number): number[] | null {
 }
 
 /**
+ * How much nearer the spawn a process is attributed to must be than any
+ * other spawn. Measured on Windows 11: `pty.spawn` takes 35-50 ms; it
+ * creates the console host 3-15 ms in and the root at its very end
+ * (Windows' creation times and this clock agree within a few ms), so a
+ * host or root of a neighbouring spawn is some 30 ms further away.
+ */
+export const ATTRIBUTION_MARGIN_MS = 10;
+
+/** How far apart spawns are remembered for attributing each other's processes. */
+const SPAWN_MEMORY_MS = 120_000;
+
+/** This process's recent ConPTY spawns, every PtyManager's and every helper's. */
+const spawns: SpawnWindow[] = [];
+
+/**
+ * Remembers a ConPTY spawn of this process, so that no process it created
+ * is taken for another spawn's (PtyManager notes each one; `track` too),
+ * forgetting those long before or after it. Returns the window as
+ * remembered.
+ */
+export function noteConptySpawn(window: SpawnWindow): SpawnWindow {
+  for (let index = spawns.length - 1; index >= 0; index--) {
+    if (Math.abs(spawns[index]!.spawnedAtMs - window.spawnedAtMs) > SPAWN_MEMORY_MS) {
+      spawns.splice(index, 1);
+    }
+  }
+  const known = spawns.find(
+    (each) => each.startedAtMs === window.startedAtMs && each.spawnedAtMs === window.spawnedAtMs,
+  );
+  if (known) return known;
+  const noted = { startedAtMs: window.startedAtMs, spawnedAtMs: window.spawnedAtMs };
+  spawns.push(noted);
+  return noted;
+}
+
+/** Whether `atMs` is nearer `edge` of `own` than that of every other spawn, by the margin. */
+function nearest(
+  atMs: number,
+  own: SpawnWindow,
+  others: readonly SpawnWindow[],
+  edge: keyof SpawnWindow,
+): boolean {
+  const mine = Math.abs(atMs - own[edge]);
+  return others.every(
+    (other) => other === own || Math.abs(atMs - other[edge]) - mine >= ATTRIBUTION_MARGIN_MS,
+  );
+}
+
+/**
+ * Whether a root created at `createdAtMs` is `own`'s: node-pty creates the
+ * root at the very end of `pty.spawn`, so it is nearer that spawn's end than
+ * any other's. A later process of this daemon that took a root's pid (another
+ * PTY's root, say) is not.
+ */
+export function attributeRoot(
+  createdAtMs: number,
+  own: SpawnWindow,
+  others: readonly SpawnWindow[],
+): boolean {
+  return nearest(createdAtMs, own, others, 'spawnedAtMs');
+}
+
+/**
+ * The console host of the spawn `own`: the one its root runs in (`named`,
+ * created before the root), else the one candidate nearer `own`'s start than
+ * any other spawn's and than any other candidate (node-pty creates the host
+ * first thing in `pty.spawn`), by the margin; null when none is, as when
+ * this PTY's own host has exited and the candidates are other spawns'.
+ */
+export function chooseHost(
+  candidates: readonly { pid: number; createdAtMs: number }[],
+  named: number,
+  rootCreatedAtMs: number | null,
+  own: SpawnWindow,
+  others: readonly SpawnWindow[],
+): { pid: number; createdAtMs: number } | null {
+  if (rootCreatedAtMs !== null && named > 0) {
+    const host = candidates.find((candidate) => candidate.pid === named);
+    if (host && host.createdAtMs <= rootCreatedAtMs) return host;
+  }
+  const distance = (candidate: { createdAtMs: number }) =>
+    Math.abs(candidate.createdAtMs - own.startedAtMs);
+  const fitting = candidates
+    .filter((candidate) => nearest(candidate.createdAtMs, own, others, 'startedAtMs'))
+    .sort((a, b) => distance(a) - distance(b));
+  const [best, next] = fitting;
+  if (!best) return null;
+  return next && distance(next) - distance(best) < ATTRIBUTION_MARGIN_MS ? null : best;
+}
+
+/**
  * The helper process (see the module comment). It is started on first use,
  * or by `ready()`. Its handles hold the event loop only while it starts or a
  * request is outstanding, so an idle helper never keeps its process alive.
@@ -824,24 +986,52 @@ export class ConptyHelper implements ConptyJobs, ConsoleInspector {
 
   async track(
     pid: number,
-    createdWithin: { fromMs: number; toMs: number; startedAtMs?: number },
+    createdWithin: { fromMs: number; toMs: number; startedAtMs?: number; spawnedAtMs?: number },
   ): Promise<ConptyConsole | null> {
     if (!Number.isSafeInteger(pid) || pid <= 0) return null;
     const id = `t${++this.sequence}`;
     const { fromMs, toMs } = createdWithin;
-    const startedAtMs = createdWithin.startedAtMs ?? (fromMs + toMs) / 2;
+    const middle = (fromMs + toMs) / 2;
+    const own = noteConptySpawn({
+      startedAtMs: createdWithin.startedAtMs ?? middle,
+      spawnedAtMs: createdWithin.spawnedAtMs ?? createdWithin.startedAtMs ?? middle,
+    });
     const reply = await this.ask(
-      `track ${id} ${pid} ${Math.floor(fromMs)} ${Math.ceil(toMs)} ${this.parentPid} ` +
-        `${Math.round(startedAtMs)}`,
+      `track ${id} ${pid} ${Math.floor(fromMs)} ${Math.ceil(toMs)} ${this.parentPid}`,
     );
-    const [state, rootCreated, hostPid, hostCreated] = (reply ?? '').split(' ');
-    if (!['ok', 'gone', 'other'].includes(state ?? '')) return null;
-    const host = Number(hostPid);
+    const [state, rootCreated, named, ...listed] = (reply ?? '').split(' ');
+    if (!['ok', 'gone', 'other'].includes(state ?? '')) {
+      if (reply !== null) void this.ask(`release ${id}`);
+      return null;
+    }
+    // Every spawn whose host the helper saw has been noted by now: the
+    // helper read the process table after it was created, and each spawn
+    // notes itself as `pty.spawn` returns.
+    const others = [...spawns];
+    const rootAtMs = Number(rootCreated);
+    const rootOk =
+      state === 'ok' && Number.isSafeInteger(rootAtMs) && attributeRoot(rootAtMs, own, others);
+    const candidates = listed.flatMap((item) => {
+      const [hostPid, hostCreated] = item.split('@').map(Number);
+      return Number.isSafeInteger(hostPid) && Number.isSafeInteger(hostCreated)
+        ? [{ pid: hostPid!, createdAtMs: hostCreated! }]
+        : [];
+    });
+    const host = chooseHost(candidates, Number(named), rootOk ? rootAtMs : null, own, others);
+    const claimed = await this.ask(
+      `claim ${id} ${rootOk ? 1 : 0} ${host?.pid ?? 0} ${host?.createdAtMs ?? 0}`,
+    );
+    const [ok, hostPid, hostCreated] = (claimed ?? '').split(' ');
+    if (ok !== 'ok') {
+      if (claimed !== null) void this.ask(`release ${id}`);
+      return null;
+    }
+    const held = Number(hostPid);
     return this.console(
       id,
-      state === 'ok' ? Number(rootCreated) : null,
-      Number.isSafeInteger(host) && host > 0
-        ? { pid: host, createdAtMs: Number(hostCreated) }
+      rootOk ? rootAtMs : null,
+      Number.isSafeInteger(held) && held > 0
+        ? { pid: held, createdAtMs: Number(hostCreated) }
         : null,
     );
   }

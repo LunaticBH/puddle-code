@@ -49,7 +49,7 @@ describe('consoleTargets', () => {
   });
 
   it('takes the root only when asked, as the root, whatever its image', () => {
-    const members = [member(ROOT, 100, HOST, { gui: true }), member(11, 200)];
+    const members = [member(11, 200), member(ROOT, 100, HOST, { gui: true })];
     expect(consoleTargets(scan(members), held, { root: true })).toEqual(['root', '11@200']);
     expect(consoleTargets(scan(members, false), held, { root: true })).toEqual(['11@200']);
   });
@@ -58,6 +58,27 @@ describe('consoleTargets', () => {
     // Another console's process that took pid 10 after the root exited.
     const reuser = member(ROOT, 5000, 8000);
     expect(consoleTargets(scan([reuser], false), held, { root: true })).toEqual([]);
+  });
+
+  it('takes the root only while it is attached to the console', () => {
+    // The process held as the root runs in another console: it is not this PTY's.
+    const elsewhere = member(ROOT, 100, 8000);
+    expect(consoleTargets(scan([elsewhere]), held, { root: true })).toEqual([]);
+    // Nor one that runs and was never seen attached.
+    expect(consoleTargets(scan([]), held, { root: true })).toEqual([]);
+  });
+
+  it('never takes a process left naming a host that was terminated, once its pid is this host’s', () => {
+    // 17 ran in a console whose host (pid 7000 then) was terminated; this
+    // console's host took the pid at 90: 17 still names it, but was created before it.
+    const stale = member(17, 50, HOST);
+    expect(consoleTargets(scan([stale, member(11, 200)]), held, { root: false })).toEqual([
+      '11@200',
+    ]);
+    // The console's own list is the console's word.
+    expect(
+      consoleTargets(scan([member(17, 50, HOST, { listed: true })]), held, { root: false }),
+    ).toEqual(['17@50']);
   });
 
   it('goes by the console’s own list when the host was never told apart', () => {
@@ -118,7 +139,7 @@ describe('endConsole', () => {
   });
 
   it('ends the host after three rounds of a console that keeps filling', async () => {
-    let next = 20;
+    let next = 200;
     const filling: ConptyConsole = {
       ...holding([]).hold,
       scan: async () => scan([member(next, next++)]),
@@ -129,7 +150,7 @@ describe('endConsole', () => {
       return keys.length;
     };
     await endConsole(ROOT, filling, { root: false, host: true, attach: false });
-    expect(terminated).toEqual([['20@20'], ['21@21'], ['22@22'], ['host']]);
+    expect(terminated).toEqual([['200@200'], ['201@201'], ['202@202'], ['host']]);
   });
 
   it('ends nothing when the helper does not answer', async () => {
@@ -141,7 +162,10 @@ describe('endConsole', () => {
   it('keeps reading the console’s own list when the host was never told apart', async () => {
     // (A host never told apart is never alive.)
     const c = holding(
-      [scan([member(11, 200, -1, { listed: true })], true, false), scan([], false, false)],
+      [
+        scan([member(ROOT, 100, -1, { listed: true }), member(11, 200, -1, { listed: true })]),
+        scan([], false, false),
+      ],
       null,
     );
     await endConsole(ROOT, c.hold, { root: true, host: true, attach: true });

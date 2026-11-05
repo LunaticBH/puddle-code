@@ -7,7 +7,12 @@ import pty from 'node-pty';
 import { afterEach, describe, expect, it } from 'vitest';
 import { listWindowsProcesses, type WindowsProcess } from '@puddle/shared/node/platform';
 import { guardConsoleListKill } from '../../src/pty/conpty-console-list.js';
-import { ConptyHelper, HELPER_ARGS, isConptyHelper } from '../../src/pty/conpty-jobs.js';
+import {
+  ConptyHelper,
+  HELPER_ARGS,
+  isConptyHelper,
+  noteConptySpawn,
+} from '../../src/pty/conpty-jobs.js';
 import { onTeardown } from '../helpers/process-guard.js';
 import {
   conptyHosts,
@@ -52,7 +57,13 @@ afterEach(() => {
   }
 });
 
-const window = { fromMs: 1_000_000, toMs: 1_000_500 };
+// A spawn that began at 1 000 000 and returned 50 ms later (no clock slack).
+const window = {
+  fromMs: 1_000_000,
+  toMs: 1_000_050,
+  startedAtMs: 1_000_000,
+  spawnedAtMs: 1_000_050,
+};
 
 describe('ConptyHelper', () => {
   it('holds a root and its console host, and reads what is attached', async () => {
@@ -60,18 +71,27 @@ describe('ConptyHelper', () => {
     expect(await helper.ready()).toBe(true);
     const held = await helper.track(5, window);
     expect(held).toMatchObject({
-      rootCreatedAtMs: window.fromMs,
-      host: { pid: 7000, createdAtMs: window.fromMs - 5 },
+      rootCreatedAtMs: window.toMs,
+      host: { pid: 7000, createdAtMs: window.fromMs },
     });
     const scan = await held!.scan({ attach: true });
+    const member = (pid: number, createdAtMs: number, more: object) => ({
+      pid,
+      createdAtMs,
+      key: `${pid}@${createdAtMs}`,
+      gui: false,
+      consoleHost: 7000,
+      listed: false,
+      ...more,
+    });
     expect(scan).toEqual({
       rootAlive: true,
       hostAlive: true,
       members: [
-        { pid: 10, createdAtMs: 100, key: '10@100', gui: false, consoleHost: 7000, listed: true },
-        { pid: 11, createdAtMs: 200, key: '11@200', gui: false, consoleHost: 7000, listed: true },
-        { pid: 12, createdAtMs: 300, key: '12@300', gui: true, consoleHost: 7000, listed: false },
-        { pid: 13, createdAtMs: 400, key: '13@400', gui: false, consoleHost: 8000, listed: false },
+        member(10, 100, { listed: true }),
+        member(11, 200, { listed: true }),
+        member(12, 300, { gui: true }),
+        member(13, 400, { consoleHost: 8000 }),
       ],
     });
     expect(await held!.terminate(['root', '11@200'])).toBe(2);
@@ -89,10 +109,26 @@ describe('ConptyHelper', () => {
 
   it('tells a root that had exited, or whose pid another process took, from one it holds', async () => {
     const { helper } = fakeHelper('serve');
-    expect(await helper.track(1500, window)).toMatchObject({ rootCreatedAtMs: null, host: null });
-    expect(await helper.track(2500, window)).toMatchObject({ rootCreatedAtMs: null, host: null });
+    // Its host is still told apart: the one created nearest its start.
+    const host = { pid: 7000, createdAtMs: window.fromMs };
+    expect(await helper.track(1500, window)).toMatchObject({ rootCreatedAtMs: null, host });
+    expect(await helper.track(2500, window)).toMatchObject({ rootCreatedAtMs: null, host });
     expect(await helper.track(0, window)).toBeNull();
     expect(await helper.track(-3, window)).toBeNull();
+  });
+
+  it('never takes the console host of a PTY spawned just after for its own', async () => {
+    const { helper } = fakeHelper('serve');
+    const at = 5_000_000;
+    const own = { fromMs: at, toMs: at + 40, startedAtMs: at, spawnedAtMs: at + 40 };
+    // The next spawn began as this one returned; its host is created 40 ms after this one's.
+    noteConptySpawn({ startedAtMs: at + 40, spawnedAtMs: at + 85 });
+    // This PTY's own host had gone: the next one's is the one candidate.
+    expect(await helper.track(3500, own)).toMatchObject({ rootCreatedAtMs: null, host: null });
+    // With both there, its own.
+    expect(await helper.track(2500, own)).toMatchObject({
+      host: { pid: 7000, createdAtMs: at },
+    });
   });
 
   it('holds nothing when the helper cannot start, as under Constrained Language Mode', async () => {
@@ -200,7 +236,12 @@ describe.skipIf(process.platform !== 'win32')('the ConPTY helper on Windows', ()
     let output = '';
     proc.onData((data) => (output += data));
     consoles.push(proc);
-    const held = await helper.track(proc.pid, { fromMs: fromMs - 100, toMs: toMs + 100 });
+    const held = await helper.track(proc.pid, {
+      fromMs: fromMs - 100,
+      toMs: toMs + 100,
+      startedAtMs: fromMs,
+      spawnedAtMs: toMs,
+    });
     await waitUntil(() => output.includes('>'), 20_000, 'a prompt');
     const gui = await guiProgram();
     proc.write(`start "" /b ping -n 120 -w 1000 127.0.0.1 > nul & rem ${dir}:ping\r`);

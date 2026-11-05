@@ -2,7 +2,12 @@ import { EventEmitter } from 'node:events';
 import pty from 'node-pty';
 import type { LogStore } from '../logs/log-store.js';
 import { guardConsoleListKill, onRootExit } from './conpty-console-list.js';
-import { sharedConptyJobs, type ConptyConsole, type ConptyJobs } from './conpty-jobs.js';
+import {
+  noteConptySpawn,
+  sharedConptyJobs,
+  type ConptyConsole,
+  type ConptyJobs,
+} from './conpty-jobs.js';
 import { endConsole, ExitDeadline } from './conpty-teardown.js';
 import { EnvOscFilter, type EnvDelta } from './env-osc.js';
 import { writePtyRoots, type PtyRootRecord } from './pty-roots.js';
@@ -295,7 +300,11 @@ export class PtyManager extends EventEmitter {
       env: plan.env,
     });
     const spawnedAtMs = windows ? Date.now() : 0;
-    if (windows) guardConsoleListKill(proc);
+    if (windows) {
+      guardConsoleListKill(proc);
+      // So that no process of this spawn's is taken for another's (conpty-jobs.ts).
+      noteConptySpawn({ startedAtMs, spawnedAtMs });
+    }
     const filter = new EnvOscFilter();
     const live: Live = {
       proc,
@@ -387,6 +396,7 @@ export class PtyManager extends EventEmitter {
         fromMs: startedAtMs - CLOCK_SLACK_MS,
         toMs: spawnedAtMs + CLOCK_SLACK_MS,
         startedAtMs,
+        spawnedAtMs,
       })
       .catch(() => null);
   }

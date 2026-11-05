@@ -1,4 +1,4 @@
-import type { ConptyConsole, ConsoleScan } from './conpty-jobs.js';
+import type { ConptyConsole, ConsoleMember, ConsoleScan } from './conpty-jobs.js';
 
 /**
  * What a ConPTY's end ends (docs/windows.md, decision 8): exactly the
@@ -25,9 +25,30 @@ export interface HeldRoot {
 }
 
 /**
+ * Whether `member` is attached to the PTY's console: the console's own list
+ * named it, or it names the console's host and was created after it (a
+ * process whose host was terminated keeps naming that pid, which a later
+ * host may hold).
+ */
+export function attachedTo(member: ConsoleMember, host: HeldRoot['console']['host']): boolean {
+  return (
+    member.listed ||
+    (host !== null && member.consoleHost === host.pid && member.createdAtMs >= host.createdAtMs)
+  );
+}
+
+function isRoot(member: ConsoleMember, held: HeldRoot): boolean {
+  return (
+    member.pid === held.pid &&
+    held.console.rootCreatedAtMs !== null &&
+    member.createdAtMs === held.console.rootCreatedAtMs
+  );
+}
+
+/**
  * Which held processes of `scan` a teardown ends: every process attached to
- * the PTY's console (by its console host, else by the console's own list),
- * never a GUI programme; the root only when `root`, as `root`, whatever its
+ * the PTY's console, never a GUI programme; the root
+ * only when `root`, and only while it is attached, as `root`, whatever its
  * image (it is the session's own process).
  */
 export function consoleTargets(
@@ -36,15 +57,14 @@ export function consoleTargets(
   options: { root: boolean },
 ): string[] {
   const targets: string[] = [];
-  if (options.root && scan.rootAlive) targets.push('root');
   const host = held.console.host;
   for (const member of scan.members) {
-    const isRoot =
-      member.pid === held.pid &&
-      held.console.rootCreatedAtMs !== null &&
-      member.createdAtMs === held.console.rootCreatedAtMs;
-    if (isRoot || member.gui) continue;
-    if (host !== null ? member.consoleHost === host.pid : member.listed) targets.push(member.key);
+    if (!attachedTo(member, host)) continue;
+    if (isRoot(member, held)) {
+      if (options.root && scan.rootAlive) targets.unshift('root');
+    } else if (!member.gui) {
+      targets.push(member.key);
+    }
   }
   return targets;
 }
