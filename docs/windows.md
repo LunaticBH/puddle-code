@@ -128,8 +128,19 @@ supported release) and through native system tools (`tar.exe`, `curl.exe`, `task
    port attribution. Every descendant of the PTY root whose creation time is not before its
    parent's counts as foreground; a root missing from the table contributes none. Listeners come
    from `netstat -ano`, matched by foreign address rather than the localised State column; the proxy
-   dials `::1` for ports that listen only on IPv6 loopback. Process trees stop with
-   `taskkill /T /F`. ConPTY is never resized to the size it already has.
+   dials `::1` for ports that listen only on IPv6 loopback. ConPTY is never resized to the size it
+   already has.
+   **PTY teardown.** Windows has no SIGHUP, so nothing ends a session's processes when its console
+   closes. Every ConPTY root goes into a kill-on-close job object of its own just after
+   `pty.spawn`; one hidden Windows PowerShell 5.1 job host per daemon holds the jobs (an `Add-Type`
+   class, values passed on stdin), and assigns a root only when its creation time falls inside the
+   spawn window, so a reused pid is never taken. A kill closes the console as before and gives the
+   root a grace period; then the job ends and a process-table pass stops whatever escaped it
+   (parents first, creation-time-consistent descendants only), including the headless console host.
+   The PTY's exit is reported only after that, at most 4.5 s after a stop request, 250 ms after a
+   SIGKILL and 5 s after a natural exit. The daemon records its live roots in
+   `<home>\pty-roots.json`, and the supervisor stops what a crashed daemon left before restarting
+   it. Process trees elsewhere stop the same way, falling back to `taskkill /T /F`.
 9. **Executables.** Lookup honours `PATHEXT` and uses absolute `PATH` entries only: a bare name is
    never looked up in the working directory, and one missing from `PATH` is refused rather than
    spawned. A relative path with a directory part names a file in the command's working directory.
@@ -223,7 +234,12 @@ supported release) and through native system tools (`tar.exe`, `curl.exe`, `task
 - Inbox ConPTY swallows OSC 10/11 colour queries and consumes escape sequences typed into its
   input; node-pty prints `AttachConsole failed` to the daemon's stderr when a PTY is killed.
 - Listeners owned by `http.sys` (pid 4) cannot be attributed to a session.
-- `taskkill /T` cannot reach a descendant whose parent has already exited.
+- A PTY's job cannot hold processes started through WMI, Task Scheduler, a service or elevation,
+  children that break away from the job, or anything a root starts in the few milliseconds before
+  its assignment; those are stopped only while the process table still links them. Where the job
+  host cannot start (`Add-Type` blocked by Constrained Language Mode, AppLocker or WDAC), teardown
+  relies on the process table alone. Unlike POSIX `nohup`/`setsid`, a background server a session
+  started ends with the session.
 - The logon task starts the daemon at logon, not at boot, and Task Scheduler ends it at logoff. A
   daemon started over SSH through WMI with key authentication has a network-logon token: no DPAPI,
   Credential Manager or network credentials; one started by the logon task has them.
@@ -275,3 +291,6 @@ A signed `Puddle.exe` accepts only an update installer from the same signer.
   host's temporary directory, compared in on-disk spelling; the Windows SSH e2e fails if any home
   ever gets a scheduled task.
 - Daemon tests use a Node fake agent on Windows (`test/helpers`).
+- Each Windows test run gets its own `%TEMP%\puddle-run-*` (TEMP and TMP point there), removed at
+  the end; helpers register teardowns that stop every PTY, daemon and cockpit they start, and the
+  run fails if any process naming that directory is still alive.
