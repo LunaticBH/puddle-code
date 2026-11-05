@@ -20,6 +20,7 @@ Past releases: see docs/changelogs/.
 - Windows: remote access (Settings → Remote & Sync and `puddle remote`) works on Windows hosts; the supervisor runs the connector, and its pipes prove they belong to the home.
 - Native Windows arm64 builds: `win32-arm64` daemon and CLI zips and an arm64 desktop installer, chosen by the operating system's architecture even from an emulated x64 process.
 - Optional Authenticode signing of the Windows archives and installers (a certificate or Azure Trusted Signing) when release secrets are configured; a signed desktop app refuses updates from another signer.
+- Windows: PowerShell 7 installed from the Microsoft Store is used for terminals and `.ps1` runs.
 - Windows: terminals and agent sessions start natively, with PATHEXT lookup, npm/pnpm `.cmd` shims run without `cmd.exe`, and PowerShell 7, else Windows PowerShell, as the session shell.
 - Windows: PowerShell session shells report their directory, capture environment changes and keep session-private history.
 - Windows: terminal agent detection, the ports panel and the reverse proxy work through the process table and `netstat`.
@@ -31,7 +32,7 @@ Past releases: see docs/changelogs/.
 - Windows hosts: the web UI shows native paths (`C:\…`, `~\…`), stops browsing at a drive root, copies native absolute paths, and opens editor links on Windows paths.
 - Windows hosts: terminal file links recognise `C:\x\y.ts:12:5`, `src\a.ts`, UNC paths and `file(12,5)`; terminals run xterm in ConPTY mode.
 - Windows clients: default shortcuts use Ctrl where macOS uses ⌘, while plain Ctrl+letter chords still reach a focused terminal.
-- Windows: release archives `puddled-v<V>-win32-<arch>.zip` and `puddle-cli-v<V>-win32-<arch>.zip` for x64 and arm64, listed in `SHA256SUMS`; every CLI archive ships the Windows host helper.
+- Windows: release archives `puddled-v<V>-win32-<arch>.zip` and `puddle-cli-v<V>-win32-<arch>.zip` for x64 and arm64, listed in `SHA256SUMS`; every CLI archive ships the Windows host helper, which `install.ps1` requires (`install.sh` still installs every earlier release).
 - Windows: install the standalone CLI with `install.ps1`, which adds `%LOCALAPPDATA%\puddle\bin` to the user `PATH` unless `-NoPathUpdate` is given; `puddle upgrade cli` and `puddle remove cli` manage it.
 - Windows: the desktop app ships as a per-user installer that updates itself in-app, shows SSH authentication prompts in its own dialogue, and is managed by `puddle install/upgrade/remove desktop`.
 - CI builds, tests and packages on Windows, and releases publish the Windows archives and desktop installer.

@@ -66,8 +66,8 @@ supported release) and through native system tools (`tar.exe`, `curl.exe`, `task
    the daemon's control channel (`open`, `shutdown`), the supervisor's pipe, and the connector's
    pipes (an optional first `{t:'challenge'}` answered `{t:'proven'}`) all prove themselves, and
    the daemon's notifications and the CLI's administrative requests wait for that proof. A server
-   without it counts as absent; the installer then rotates the nonce under its lock, renaming every
-   pipe of the home. Endpoint checks never open a pipe as a client. Headless agent turns use a
+   without it counts as absent; when the daemon's, the supervisor's or a connector pipe is held by
+   such a server, the installer rotates the nonce under its lock, renaming every pipe of the home. Endpoint checks never open a pipe as a client. Headless agent turns use a
    per-launch pipe whose driver must present a per-launch token; the desktop's SSH askpass bridge
    uses a token in a private file.
 4. **No shell for local host operations.** `LocalTransport.exec` refuses on Windows. Host
@@ -84,9 +84,13 @@ supported release) and through native system tools (`tar.exe`, `curl.exe`, `task
    architecture never counts as installed (remove, upgrade and sweep still act on it).
    `bin\puddled.cmd` exists for humans only. `--tarball` takes a local zip verified against
    `<zip>.sha256`. Release names come from `installation/releases.ts`.
-6. **Supervision.** One root-folder scheduled task per home, `Puddle <first 16 hex of sha256 of the
-   lower-cased canonical home>`, registered idempotently by install, upgrade and launch through the
-   ScheduledTasks cmdlets (values travel in environment variables, never interpolated). It starts at
+6. **Supervision.** One root-folder scheduled task per home, `Puddle <first 16 hex of an
+   HMAC-SHA256, under the home's private ipc-key, of the lower-cased canonical home>` (keyed as the
+   pipe names are, so another account cannot predict the name and register it first), registered
+   idempotently by install, upgrade and launch through the ScheduledTasks cmdlets (values travel in
+   environment variables, never interpolated). Registration and start trust a task of that name only
+   when its principal is this user's SID and its action is this home's supervisor command line;
+   another account's task is never replaced or started. It starts at
    the user's logon with an interactive token and least privilege, ignores new instances while
    running, has no time limit, runs on battery at priority 4, and is not hidden. Its action runs
    `bin\puddle-hidden.exe`, a windowless GUI-subsystem launcher compiled from
@@ -98,9 +102,12 @@ supported release) and through native system tools (`tar.exe`, `curl.exe`, `task
    the versioned `node.exe` on `puddled.mjs` as its child, writes `puddled.pid`, and restarts a
    crashed daemon with backoff from 1 s to 60 s, giving up after 10 failures in 10 minutes. It exits
    0 when its daemon exits 0 (a requested shutdown) or 75 (the home's control pipe is already
-   served), stopping the connector first, and never lingers beside a daemon it does not run. Starts
-   go task → WMI `Win32_Process.Create` (which escapes the caller's job object) → a detached child
-   (local only). The marker is `task`; `detached` records a home whose task could not be
+   served), stopping the connector first, and never lingers beside a daemon it does not run; one
+   whose pipe is held by a server it cannot reach (typically an elevated supervisor) leaves the home
+   to it. It restarts the connector with the same backoff, and after giving up waits until remote
+   access is enabled again. Starts go task → WMI `Win32_Process.Create` (which escapes the caller's
+   job object) → a detached child (local only); a task run Task Scheduler refuses (no desktop
+   session) counts as not run, so WMI follows at once. The marker is `task`; `detached` records a home whose task could not be
    registered. Stops send the `shutdown` control request, wait for the supervisor and daemon pids,
    and force only processes whose command line is that home's `supervisor.mjs` or versioned
    `puddled.mjs`. Removal disables the connector, unregisters the task, stops and deletes. After a
@@ -108,7 +115,9 @@ supported release) and through native system tools (`tar.exe`, `curl.exe`, `task
    own release is installed only when that tree cannot run. Background cockpits stop over their
    launcher pipe (`shutdown`).
 7. **Shells.** PowerShell is the only session shell: `SHELL` counts only when it names an existing
-   absolute `pwsh.exe` or `powershell.exe`, then `pwsh.exe` on `PATH`, then Windows PowerShell 5.1.
+   absolute `pwsh.exe` or `powershell.exe`, then `pwsh.exe` on `PATH`, then the Microsoft Store
+   PowerShell's App Execution Alias (`%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe`; no other
+   Store alias is ever chosen), then Windows PowerShell 5.1.
    cmd.exe, Git Bash and WSL are never session shells; started inside one they run unhooked.
    PowerShell receives shell integration (cwd, title, environment capture, PSReadLine history
    isolation) through `-NoExit -Command ". ([ScriptBlock]::Create([IO.File]::ReadAllText('<hook>')))"`,
@@ -161,11 +170,14 @@ supported release) and through native system tools (`tar.exe`, `curl.exe`, `task
 15. **Packaging.** Release assets use the `win32-<arch>` token (x64 and arm64, each built and
     smoke-tested natively) and `.zip` archives with the POSIX tarball's layout plus `bin\node.exe`,
     `bin\puddle-hidden.exe`, `daemon\supervisor.mjs` and the `.cmd` launchers; every PE file must
-    match the architecture. The architecture is the operating system's (`windowsHostArch()`: the
-    machine-wide `PROCESSOR_ARCHITECTURE` read with `reg.exe`), never the process's. The standalone
-    CLI installs to `%LOCALAPPDATA%\puddle\cli` with launchers in `%LOCALAPPDATA%\puddle\bin`,
-    which `install.ps1` adds to the user `PATH` unless `-NoPathUpdate`; it refuses an archive
-    built for another architecture. Every CLI archive ships `cli\windows-host.mjs` (decision 19).
+    match the architecture. The architecture is the operating system's, never the process's:
+    `windowsHostArch()` reads the machine-wide `PROCESSOR_ARCHITECTURE` with `reg.exe`, else
+    through PowerShell's registry provider or .NET `OSArchitecture`; only when both fail does the
+    process environment answer, and that guess is not remembered. The standalone CLI installs to
+    `%LOCALAPPDATA%\puddle\cli` with launchers in `%LOCALAPPDATA%\puddle\bin`, which `install.ps1`
+    adds to the user `PATH` unless `-NoPathUpdate`; it refuses an archive built for another
+    architecture. Every CLI archive ships `cli\windows-host.mjs` (decision 19), and `install.ps1`
+    requires it; `install.sh` stays byte-identical and installs every published release.
     The desktop installers are `Puddle-<V>-<arch>-setup.exe` and update in-app; `puddle
     install/upgrade desktop` runs them silently and `puddle remove desktop` runs the registered
     uninstaller.
@@ -183,7 +195,10 @@ supported release) and through native system tools (`tar.exe`, `curl.exe`, `task
     a valid answer makes the transport `win32` for good (handed to a background cockpit as
     `PUDDLE_REMOTE_PLATFORM`), and a later POSIX command failing with a Windows signature (cmd.exe's
     9009, `CommandNotFoundException`, an MSYS/MinGW/Cygwin `uname` from a Git Bash default shell)
-    is confirmed the same way. Once `win32`, POSIX commands refuse. Every operation is
+    is confirmed the same way — only for the commands a Git Bash default shell gives itself away in
+    (the control-helper stage and `install.sh`), never after ssh's own 255 and never from relayed
+    output such as logs. Once `win32`, POSIX commands refuse; an operation whose loader never
+    reported a status (a dropped connection) is `ssh_unreachable`, never `not_installed`. Every operation is
     `powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand
     <loader>`, which parses identically under a cmd.exe, PowerShell or Git Bash default shell. The
     loader reads a length-framed UTF-8 script (`PUDDLE1 <bytes>`) from raw stdin and runs it with
@@ -192,12 +207,16 @@ supported release) and through native system tools (`tar.exe`, `curl.exe`, `task
     `SHA256SUMS` with System32 `curl.exe`, checks them with `Get-FileHash`, and unpacks only
     `bin\node.exe`; `--tarball` streams the zip over the operation's own stdin. Everything else runs
     in the CLI's own host helper, `windows-host.mjs`, staged per process in `%TEMP%\puddle-host`
-    (stale copies are cleared after a day) and run by the host's `node.exe`; it reuses the local
-    Windows implementations and answers in JSON lines, and checks the control channel's proof on the
-    host. Windows OpenSSH runs each session in a kill-on-close job, so the helper never starts a
+    (created with an owner-only DACL and refused unless private; stale copies are cleared after a
+    day) and run by the host's `node.exe`; the folder and the helper's SHA-256 are rechecked just
+    before every run, and a missing or changed helper is restaged for every operation. The helper
+    reuses the local Windows implementations, answers in JSON lines, and checks the control
+    channel's proof on the host. Over SSH, an install whose `node.exe` is gone is removed with the
+    `node.exe` of the launcher's release archive. Windows OpenSSH runs each session in a kill-on-close job, so the helper never starts a
     detached child: it starts the logon task, else the supervisor through WMI; if both are refused
     the daemon becomes a session-bound attached lease (`daemonLifetime: 'cockpit'`) that stops only
-    its own pid. Supervised remote access over SSH needs a supervisor that outlives the session.
+    its own pid. Supervised `remote enable` over SSH starts the supervisor (task, then WMI) and is
+    refused `session_bound` only when both fail or the daemon is attached to an SSH session.
 
 ## Known limitations
 
@@ -215,8 +234,15 @@ supported release) and through native system tools (`tar.exe`, `curl.exe`, `task
 - Interrupting a notebook cell blocked in `time.sleep` takes effect when the call returns.
 - File watchers held by live compilation targets can make pruning their worktree answer
   `worktree_busy` until the target stops.
-- Another local account that creates the daemon's pipe while it is stopped and never answers
-  blocks the daemon until that process exits.
+- Another local account that creates one of the home's pipes while it is not served, and never
+  answers, blocks whatever uses that pipe (the daemon, or remote access for the connector's pipes)
+  until its process exits; one that answers without the proof is renamed away by `puddle upgrade
+  daemon`.
+- Windows OpenSSH elevates an administrator's session, so a daemon such a session starts through
+  WMI while nobody is logged on runs elevated, and until it stops that user's unelevated programs
+  (the desktop app, a local CLI, the logon task's supervisor) cannot reach it. The client warns on
+  every launch while it runs; the remedy is to log on and stay logged on, then run `puddle upgrade
+  daemon <host>`, or restart the machine.
 - Plain Ctrl+V in a terminal sends `^V` to the programme, as on Linux; the terminal menu offers
   Paste.
 
@@ -229,7 +255,10 @@ Signing is optional. The release workflow sets `PUDDLE_WINDOWS_SIGNING` to `cert
 subject CN) or `none`, which builds unsigned. `scripts/lib/windows-sign.mjs` signs every
 `.exe`/`.dll`/`.node` in the daemon and CLI zips that Windows does not already report as validly
 signed, plus `cli\install-cli.ps1`, before the smoke tests and checksums; electron-builder signs the
-desktop app, its DLLs, `ssh-askpass.exe` and the installer. CI checks `Get-AuthenticodeSignature`.
+desktop app, its DLLs, `ssh-askpass.exe` and the installer. In certificate mode the PFX password
+never reaches a command line: signtool receives a copy re-encrypted under a one-time password. With
+Azure, the workflow logs in immediately before each signing step and caches the codesigning token,
+because the federated GitHub token lasts about five minutes. CI checks `Get-AuthenticodeSignature`.
 A signed `Puddle.exe` accepts only an update installer from the same signer.
 
 ## Testing
@@ -243,5 +272,6 @@ A signed `Puddle.exe` accepts only an update installer from the same signer.
   `PUDDLE_TEST_WINDOWS_SSH_KEY` and `PUDDLE_TEST_WINDOWS_SSH_TARBALL` are set; it uses an isolated
   remote home and cleans up its task and home.
 - The helper honours `PUDDLE_TEST_WINDOWS_SUPERVISION=wmi|session` only for a home inside the
-  host's temporary directory.
+  host's temporary directory, compared in on-disk spelling; the Windows SSH e2e fails if any home
+  ever gets a scheduled task.
 - Daemon tests use a Node fake agent on Windows (`test/helpers`).
