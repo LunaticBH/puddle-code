@@ -130,17 +130,22 @@ supported release) and through native system tools (`tar.exe`, `curl.exe`, `task
    from `netstat -ano`, matched by foreign address rather than the localised State column; the proxy
    dials `::1` for ports that listen only on IPv6 loopback. ConPTY is never resized to the size it
    already has.
-   **PTY teardown.** Windows has no SIGHUP, so nothing ends a session's processes when its console
-   closes. Every ConPTY root goes into a kill-on-close job object of its own just after
-   `pty.spawn`; one hidden Windows PowerShell 5.1 job host per daemon holds the jobs (an `Add-Type`
-   class, values passed on stdin), and assigns a root only when its creation time falls inside the
-   spawn window, so a reused pid is never taken. A kill closes the console as before and gives the
-   root a grace period; then the job ends and a process-table pass stops whatever escaped it
-   (parents first, creation-time-consistent descendants only), including the headless console host.
-   The PTY's exit is reported only after that, at most 4.5 s after a stop request, 250 ms after a
-   SIGKILL and 5 s after a natural exit. The daemon records its live roots in
-   `<home>\pty-roots.json`, and the supervisor stops what a crashed daemon left before restarting
-   it. Process trees elsewhere stop the same way, falling back to `taskkill /T /F`.
+   **PTY teardown mirrors SIGHUP.** When a session's terminal ends, what is attached to its console
+   ends; what left it — GUI programs and what they start, detached processes, processes in a
+   console of their own (`Start-Process`, `start`) — outlives the session, as POSIX `nohup`,
+   `setsid` and GUI launches do. A hidden Windows PowerShell 5.1 ConPTY helper per daemon (an
+   `Add-Type` class; only numbers cross its stdin) identifies each PTY's root and headless console
+   host within the spawn's time window, pins them with handles so a reused pid is never taken, and
+   reads which processes are attached to that console (each process's console-host record,
+   cross-checked with the console's own list). A stop holds that set, closes the pseudoconsole so
+   everything attached receives its close event and grace, then ends whatever is still attached
+   and finally the console host; SIGKILL ends the root at once. The PTY's exit is reported at most
+   4.5 s after a stop request, 250 ms after a SIGKILL and 5 s after a natural exit, however slow
+   PowerShell is. The daemon records each PTY's root and console host in `<home>\pty-roots.json`,
+   and after a crash the supervisor ends only what is still attached to a recorded console. The
+   headless agent driver ends its CLI's console the same way, never its whole tree. Elsewhere,
+   process trees stop through creation-time-consistent descendants only, never `taskkill /T` on a
+   pid the process table cannot vouch for.
 9. **Executables.** Lookup honours `PATHEXT` and uses absolute `PATH` entries only: a bare name is
    never looked up in the working directory, and one missing from `PATH` is refused rather than
    spawned. A relative path with a directory part names a file in the command's working directory.
@@ -232,7 +237,7 @@ supported release) and through native system tools (`tar.exe`, `curl.exe`, `task
 ## Known limitations
 
 - Inbox ConPTY swallows OSC 10/11 colour queries and consumes escape sequences typed into its
-  input; node-pty prints `AttachConsole failed` to the daemon's stderr when a PTY is killed.
+  input.
 - Listeners owned by `http.sys` (pid 4) cannot be attributed to a session.
 - Where the ConPTY helper cannot run (`Add-Type` blocked by Constrained Language Mode, AppLocker or
   WDAC), a PTY's teardown relies on its console's close or hang-up, which also ends a GUI programme

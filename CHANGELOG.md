@@ -24,7 +24,7 @@ Past releases: see docs/changelogs/.
 - Windows: terminals and agent sessions start natively, with PATHEXT lookup, npm/pnpm `.cmd` shims run without `cmd.exe`, and PowerShell 7, else Windows PowerShell, as the session shell.
 - Windows: PowerShell session shells report their directory, capture environment changes and keep session-private history.
 - Windows: terminal agent detection, the ports panel and the reverse proxy work through the process table and `netstat`.
-- Windows: no process a session started outlives the session or a crashed daemon: each ConPTY runs in a kill-on-close job, and teardown and the supervisor stop whatever escapes it.
+- Windows: ending a session ends what is attached to its console, as SIGHUP does on POSIX, while GUI programs, detached processes and processes in a console of their own outlive it; the supervisor does the same for a crashed daemon's sessions.
 - Windows: Claude Code hooks use exec form, the Claude status line runs alike under whichever shell Claude Code picks, and Gemini CLI hooks are quoted for PowerShell; headless agent mode runs over a token-gated named pipe.
 - Windows: conversation sharing between accounts uses directory junctions; an entry that cannot be linked is not shared, and its data is never copied.
 - Windows: programme terminals run through a built-in Node wrapper, and Ctrl+C returns to the shell with status 130; PowerShell scripts (`.ps1`) run with pwsh or Windows PowerShell.
