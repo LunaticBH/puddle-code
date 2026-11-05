@@ -192,15 +192,19 @@ describe('reapWindowsDaemon', () => {
     expect(existsSync(rootsFile)).toBe(false);
   });
 
-  it('for a console whose host has gone, or is another process now, reads its root’s tree', async () => {
+  it('for a console whose host has gone, or is another process now, ends below its root what names that host', async () => {
     for (const host of [[], [conhost(30, 100, 9000)], [conhost(30, 7, 2005)]]) {
       const w = world([
         ...host,
         entry(11, 10, 2100, { consoleHost: 51 }), // a console of its own
         ownConsole(51, 11, 2101),
         entry(12, 10, 2200), // detached
-        // Its console has gone: whether it was the PTY's can no longer be read.
-        entry(13, 10, 2300, { consoleHost: 77 }),
+        // Attached to the PTY's console, whose host has gone.
+        entry(13, 10, 2300, { consoleHost: 30 }),
+        // A Start-Process (or hidden) child whose own console's host was
+        // terminated: it names another host, so it left the PTY's console.
+        entry(14, 10, 2400, { consoleHost: 77 }),
+        entry(15, 14, 2500, { consoleHost: 77 }), // and its child, in that console
       ]);
       await reapWindowsDaemon(daemon, 5000, {
         processes: w.processes,
@@ -209,6 +213,22 @@ describe('reapWindowsDaemon', () => {
       });
       expect(w.terminated).toEqual([13]);
     }
+  });
+
+  it('spares what may be attached to a later holder of a recorded host’s pid', async () => {
+    const w = world([
+      // The PTY's host (30, created at 2005) has gone; another console's host took pid 30 at 2600.
+      ownConsole(30, 7, 2600),
+      entry(13, 10, 2300, { consoleHost: 30 }), // created before that: the PTY's console's
+      entry(16, 10, 2700, { consoleHost: 30 }), // created after: it may be that console's
+      entry(17, 10, 2003, { consoleHost: 30 }), // older than the PTY's host: not its
+    ]);
+    await reapWindowsDaemon(daemon, 5000, {
+      processes: w.processes,
+      rootsFile: home([root]),
+      consoles: w.inspector,
+    });
+    expect(w.terminated).toEqual([13]);
   });
 
   it('for a console never told apart, ends below its root only what is attached to a PTY console', async () => {

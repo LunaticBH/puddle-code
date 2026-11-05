@@ -50,15 +50,17 @@ const CLOCK_SLACK_MS = 100;
  * attached to them; for each console host it recorded that still runs (it
  * is the one recorded: pid, creation time, headless, the daemon's child),
  * this ends what is still attached to it, then the host. For a PTY whose
- * host was never told apart, or has gone, attachment can no longer be read
- * through it; this ends instead the console programmes below its root,
- * created before the daemon exited and before the root did, that are
- * attached to one of the daemon's PTY consoles (a headless console host the
- * daemon created) or to a console that has gone, never one in a console of
- * its own, a detached one, a GUI programme or anything below those; a later
- * holder of the root's pid keeps its own children. Nothing else is ended:
- * the daemon's other children end with it (Node holds each in a
- * kill-on-close job), and what they started is no PTY console's.
+ * host has gone, attachment can no longer be read through it; this ends
+ * instead the console programmes below its root, created before the daemon
+ * exited and before the root did, that name that host and were created
+ * after it (consoleKinds), and nothing that names another. For one whose
+ * host was never told apart, it ends those below its root attached to one
+ * of the daemon's PTY consoles (a headless console host the daemon created)
+ * or to a console that has gone. Never one in a console of its own, a
+ * detached one, a GUI programme or anything below those; a later holder of
+ * the root's pid keeps its own children. Nothing else is ended: the
+ * daemon's other children end with it (Node holds each in a kill-on-close
+ * job), and what they started is no PTY console's.
  */
 export async function reapWindowsDaemon(
   daemon: Pick<SupervisedChild, 'pid' | 'startedAtMs'>,
@@ -88,7 +90,9 @@ export async function reapWindowsDaemon(
       }
     }
     if (untold.length === 0) return count;
-    const trees = belowRoots(await deps.processes({ fresh: true }), exitedAtMs, untold);
+    const trees = belowRoots(await deps.processes({ fresh: true }), exitedAtMs, untold).map(
+      (tree, index) => ({ tree, host: untold[index]!.host }),
+    );
     count += await endConsolePrograms(helper, trees, async () =>
       // Read after the helper said which host each names, so that every live one is in it.
       consoleKinds(await deps.processes({ fresh: true }), daemon, exitedAtMs),
@@ -126,24 +130,48 @@ export function belowRoots(
 
 /**
  * What a classified process is attached to: one of the dead daemon's PTY
- * consoles (`pty`: a headless console host the daemon created while it ran,
- * before the process), a console that has gone (`gone`: its host no longer
+ * consoles (`pty`), a console that has gone (`gone`: its host no longer
  * runs, or its pid is a later process's), or another console (`other`: one
  * of its own, or one it inherited). Windows leaves a process naming a host
- * that was terminated, whose pid a later host may hold: a host counts only
- * when it was created before the process, or is the host of the console the
- * process created itself (that host's parent, created just after it).
+ * that was terminated, whose pid a later host may hold.
+ *
+ * For a PTY whose console host the daemon recorded (`recorded`), the PTY's
+ * processes name that host and were created after it: such a process is on
+ * the PTY's console (`pty` while the host still runs as recorded, else
+ * `gone`), unless a later process holds the host's pid now and was created
+ * no later than it (it may be that one's: `other`). Whatever names another
+ * host, gone or not, provably left the PTY's console: `other`.
+ *
+ * Without one, `pty` is a headless console host the daemon created while it
+ * ran, before the process; a host counts only when it was created before
+ * the process, or is the host of the console the process created itself
+ * (that host's parent, created just after it); one that has gone may have
+ * been the PTY's.
  */
 export type ConsoleKind = 'pty' | 'gone' | 'other';
+
+type ConsoleFact = Pick<ClassifiedProcess, 'pid' | 'consoleHost' | 'createdAtMs'>;
 
 export function consoleKinds(
   table: readonly WindowsProcess[],
   daemon: Pick<SupervisedChild, 'pid' | 'startedAtMs'>,
   exitedAtMs: number,
-): (fact: Pick<ClassifiedProcess, 'pid' | 'consoleHost' | 'createdAtMs'>) => ConsoleKind {
+): (fact: ConsoleFact, recorded?: PtyRootRecord['host']) => ConsoleKind {
   const from = (daemon.startedAtMs ?? -Infinity) - CLOCK_SLACK_MS;
-  return (fact) => {
+  return (fact, recorded) => {
     const host = table.find((entry) => entry.pid === fact.consoleHost);
+    if (recorded) {
+      if (fact.consoleHost !== recorded.pid || fact.createdAtMs < recorded.createdAtMs) {
+        return 'other';
+      }
+      if (!host) return 'gone';
+      if (host.createdAtMs !== null && Math.abs(host.createdAtMs - recorded.createdAtMs) <= 1) {
+        return 'pty';
+      }
+      return host.createdAtMs !== null && host.createdAtMs > fact.createdAtMs + 1
+        ? 'gone'
+        : 'other';
+    }
     if (!host || host.createdAtMs === null || host.name.toLowerCase() !== 'conhost.exe') {
       return 'gone';
     }
@@ -204,13 +232,16 @@ export function consolePrograms(
   return targets;
 }
 
-/** Ends each tree's console programmes (consolePrograms), held by the helper. */
+/**
+ * Ends each tree's console programmes (consolePrograms), held by the
+ * helper, each by its PTY's recorded console host, if any.
+ */
 async function endConsolePrograms(
   helper: ConsoleInspector,
-  trees: readonly WindowsProcess[][],
-  kinds: () => Promise<(fact: ClassifiedProcess) => ConsoleKind>,
+  trees: readonly { tree: readonly WindowsProcess[]; host: PtyRootRecord['host'] }[],
+  kinds: () => Promise<(fact: ClassifiedProcess, recorded: PtyRootRecord['host']) => ConsoleKind>,
 ): Promise<number> {
-  const all = trees.flat();
+  const all = trees.flatMap(({ tree }) => tree);
   if (all.length === 0) return 0;
   const result = await helper.classify(
     all.flatMap((entry) =>
@@ -220,8 +251,8 @@ async function endConsolePrograms(
   if (!result) return 0;
   try {
     const kindOf = await kinds();
-    const keys = trees.flatMap((tree) =>
-      consolePrograms(tree, result.processes, kindOf).map((fact) => fact.key),
+    const keys = trees.flatMap(({ tree, host }) =>
+      consolePrograms(tree, result.processes, (fact) => kindOf(fact, host)).map((fact) => fact.key),
     );
     return keys.length === 0 ? 0 : await result.console.terminate([...new Set(keys)]);
   } finally {
