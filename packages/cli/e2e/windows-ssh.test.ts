@@ -59,11 +59,19 @@ describe.runIf(process.platform === 'win32' && zip !== undefined && existsSync(h
     const running: ChildProcess[] = [];
     const homes: string[] = [];
 
-    /** The homes' scheduled tasks: none may ever be registered (read-only lookups). */
+    /**
+     * The homes' scheduled tasks: none may ever be registered (read-only
+     * lookups). A task's name is keyed by its home's ipc-key, so each name is
+     * remembered while the key exists, for the lookups after a purge; a home
+     * that never had a key could never have had a task either.
+     */
+    const taskNames = new Map<string, string>();
     async function registeredTasks(): Promise<string[]> {
       const found: string[] = [];
       for (const home of homes) {
-        const name = supervisorTaskName(home);
+        if (existsSync(join(home, 'ipc-key'))) taskNames.set(home, supervisorTaskName(home));
+        const name = taskNames.get(home);
+        if (name === undefined) continue;
         if ((await windowsTaskState(name)).state !== 'absent') found.push(name);
       }
       return found;
