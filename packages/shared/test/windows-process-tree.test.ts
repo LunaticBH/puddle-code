@@ -97,6 +97,26 @@ describe('windowsProcessTree', () => {
     expect(pids(windowsProcessTree(reused, { pid: 10, createdAtMs: 1000 }))).toEqual([11]);
   });
 
+  it('bounds a dead root’s orphans by when it must have exited, though nobody holds its pid', () => {
+    // A short-lived process took pid 10 after the root exited, started 16 and exited too.
+    const orphans = [entry(11, 10, 1100), entry(16, 10, 6000)];
+    expect(
+      pids(windowsProcessTree(orphans, { pid: 10, startedAtMs: 1000, exitedBeforeMs: 5000 })),
+    ).toEqual([11]);
+    // Without a bound every later process naming the pid counts.
+    expect(pids(windowsProcessTree(orphans, { pid: 10, startedAtMs: 1000 }))).toEqual([11, 16]);
+    // The bound does not make a running root count as exited.
+    expect(
+      pids(
+        windowsProcessTree([entry(10, 1, 1000), ...orphans], {
+          pid: 10,
+          startedAtMs: 1000,
+          exitedBeforeMs: 5000,
+        }),
+      ),
+    ).toEqual([10, 11, 16]);
+  });
+
   it('finds nothing below a dead root it cannot date', () => {
     expect(windowsProcessTree([entry(11, 10, 1100)], { pid: 10 })).toEqual([]);
   });
@@ -119,6 +139,20 @@ describe('windowsDescendantsOf', () => {
     ];
     expect(pids(windowsDescendantsOf(now, earlier))).toEqual([12]);
     expect(pids(windowsDescendantsOf(now.slice(0, 1), earlier))).toEqual([12]);
+  });
+
+  it('follows a parent that has exited, its pid held by nobody, only up to its exit bound', () => {
+    const earlier = [entry(11, 10, 1100)];
+    const now = [
+      entry(12, 11, 1200), // 11's child
+      entry(16, 11, 4100), // a child of a short-lived later holder of pid 11
+    ];
+    expect(pids(windowsDescendantsOf(now, earlier, () => 3000))).toEqual([12]);
+    expect(pids(windowsDescendantsOf(now, earlier, () => undefined))).toEqual([12, 16]);
+    // A parent still running keeps every child, whatever its bound.
+    expect(pids(windowsDescendantsOf([entry(11, 10, 1100), ...now], earlier, () => 3000))).toEqual([
+      12, 16,
+    ]);
   });
 });
 
@@ -188,6 +222,40 @@ describe('stopWindowsProcessTree', () => {
       terminate: w.terminate,
     });
     expect(w.terminated.sort()).toEqual([13, 14, 15]);
+  });
+
+  it('counts a stopped process’s children only up to when it was stopped', async () => {
+    let clock = 2000;
+    const w = world([entry(10, 1, 1000), entry(11, 10, 1100)]);
+    w.onTerminate((pid) => {
+      if (pid !== 11) return;
+      // Started by 11 just before its end: found by the next read.
+      w.add(entry(12, 11, 1900));
+      // Pid 11 is taken at once by a process that starts 13 and exits.
+      clock = 5000;
+      w.add(entry(13, 11, 4000));
+    });
+    await stopWindowsProcessTree(10, {
+      processes: w.processes,
+      root: { createdAtMs: 1000 },
+      terminate: w.terminate,
+      now: () => clock,
+    });
+    expect(w.terminated).toEqual([10, 11, 12]);
+  });
+
+  it('counts the children of a known member that has exited only up to when it was read', async () => {
+    // 12 was seen at 3000, below the root; it has exited since, and its pid was
+    // taken by a short-lived process that started 17.
+    const w = world([entry(13, 12, 1300), entry(17, 12, 3500)]);
+    await stopWindowsProcessTree(10, {
+      processes: w.processes,
+      root: { startedAtMs: 1000, exitedAtMs: 3000 },
+      known: [entry(12, 11, 1200)],
+      knownAtMs: 3000,
+      terminate: w.terminate,
+    });
+    expect(w.terminated).toEqual([13]);
   });
 
   it('reads the table once when nothing is left to stop, using a table it is given', async () => {

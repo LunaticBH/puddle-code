@@ -193,6 +193,11 @@ export interface ProcessTreeRoot {
   readonly createdBeforeMs?: number;
   /** It has exited, at or before this time: whoever holds its pid now is another process. */
   readonly exitedAtMs?: number;
+  /**
+   * Should it have exited, it did so before this time: a process naming its
+   * pid created later is a child of a later holder of that pid.
+   */
+  readonly exitedBeforeMs?: number;
 }
 
 /**
@@ -207,13 +212,15 @@ const CLOCK_SLACK_MS = 100;
  *
  * A running root is the table's holder of its pid, when that holder was
  * created when the root was (`createdAtMs`), or not before it was started
- * (`startedAtMs`) nor after `createdBeforeMs`. A root that has exited is gone from the table, but its
- * children still name its pid: they are the processes naming it that were
- * created after it was started and before any later holder of its pid was
- * (or, with no holder, before `exitedAtMs`). Without a creation time or a
- * start time nothing tells a dead root's children from an earlier holder's,
- * so there are none. A process whose creation time is unknown is never
- * followed: only the idle and system pseudo-processes lack one.
+ * (`startedAtMs`) nor after `createdBeforeMs`. A root that has exited is gone
+ * from the table, but its children still name its pid: they are the
+ * processes naming it that were created after it was started and before
+ * both any later holder of its pid was and the root's exit (`exitedAtMs`,
+ * `exitedBeforeMs`). Without a creation time or a start time nothing tells a
+ * dead root's children from an earlier holder's, so there are none; without
+ * an exit bound and with no holder, every later process naming the pid
+ * counts. A process whose creation time is unknown is never followed: only
+ * the idle and system pseudo-processes lack one.
  */
 export function windowsProcessTree(
   table: readonly WindowsProcess[],
@@ -236,10 +243,11 @@ export function windowsProcessTree(
     root.createdAtMs ??
     (root.startedAtMs === undefined ? undefined : root.startedAtMs - CLOCK_SLACK_MS);
   if (from === undefined) return [];
-  const until =
-    holder !== undefined
-      ? (holder.createdAtMs ?? -Infinity)
-      : (root.exitedAtMs ?? Infinity) + CLOCK_SLACK_MS;
+  const until = Math.min(
+    holder !== undefined ? (holder.createdAtMs ?? -Infinity) : Infinity,
+    (root.exitedAtMs ?? Infinity) + CLOCK_SLACK_MS,
+    (root.exitedBeforeMs ?? Infinity) + CLOCK_SLACK_MS,
+  );
   const orphans = table.filter(
     (entry) =>
       entry.ppid === root.pid &&
@@ -255,11 +263,16 @@ export function windowsProcessTree(
  * Every descendant of `parents` (processes from this or an earlier table,
  * running or not) in `table`, by creation-consistent links, parents first,
  * excluding the parents themselves. A parent that has exited keeps its
- * children up to the creation of whichever process holds its pid now.
+ * children up to the creation of whichever process holds its pid now, and
+ * up to `exitedBefore(parent)`, a time by which it is known to have exited
+ * should it have: after that its pid may have named a process that has
+ * exited too, whose children name it as well. A parent with neither keeps
+ * every later child naming its pid.
  */
 export function windowsDescendantsOf(
   table: readonly WindowsProcess[],
   parents: readonly WindowsProcess[],
+  exitedBefore?: (parent: WindowsProcess) => number | undefined,
 ): WindowsProcess[] {
   const byPid = new Map(table.map((entry) => [entry.pid, entry]));
   const childrenOf = new Map<number, WindowsProcess[]>();
@@ -278,9 +291,12 @@ export function windowsDescendantsOf(
     if (parent.createdAtMs === null) continue;
     const holder = byPid.get(parent.pid);
     const until =
-      holder === undefined || holder.createdAtMs === parent.createdAtMs
-        ? Infinity
-        : (holder.createdAtMs ?? -Infinity);
+      holder?.createdAtMs === parent.createdAtMs
+        ? Infinity // still running: nothing else can hold its pid
+        : Math.min(
+            holder === undefined ? Infinity : (holder.createdAtMs ?? -Infinity),
+            (exitedBefore?.(parent) ?? Infinity) + CLOCK_SLACK_MS,
+          );
     for (const child of childrenOf.get(parent.pid) ?? []) {
       if (child.createdAtMs === null || seen.has(key(child))) continue;
       if (child.createdAtMs < parent.createdAtMs || child.createdAtMs >= until) continue;

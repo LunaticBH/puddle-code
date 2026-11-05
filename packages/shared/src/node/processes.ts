@@ -102,6 +102,15 @@ export interface StopWindowsProcessTreeOptions {
    * the root has exited since.
    */
   known?: readonly WindowsProcess[];
+  /**
+   * When `known` was read. The children of a member that has exited since
+   * count only when they were created by then: later, its pid may have
+   * named another process that has exited as well. Without it they count up
+   * to the creation of a later holder of the pid.
+   */
+  knownAtMs?: number;
+  /** This process's clock; `Date.now` by default. */
+  now?: () => number;
   /** A snapshot already read for this stop (a fresh one is read otherwise). */
   table?: readonly WindowsProcess[];
   /** Ends one process; TerminateProcess through `process.kill` by default. */
@@ -114,9 +123,10 @@ export interface StopWindowsProcessTreeOptions {
  * a root, or of any member, that has already exited, while a later holder of
  * a dead process's pid keeps its own children. Parents end before their
  * children, so none can start a replacement; then the table is read again
- * for children started in between, at most twice more. This process is
- * never stopped. Resolves with the processes it ended; rejects when the
- * table cannot be read.
+ * for children started in between, at most twice more, counting a stopped
+ * process's children only up to when it was stopped. This process is never
+ * stopped. Resolves with the processes it ended; rejects when the table
+ * cannot be read.
  */
 export async function stopWindowsProcessTree(
   pid: number,
@@ -127,22 +137,27 @@ export async function stopWindowsProcessTree(
     ((target: number) => {
       process.kill(target);
     });
+  const now = opts.now ?? Date.now;
   const known = opts.known ?? [];
   const identity = (entry: WindowsProcess) => `${entry.pid}@${entry.createdAtMs}`;
   const table = opts.table ?? (await opts.processes({ fresh: true }));
   const running = new Set(table.map(identity));
   const stopped: WindowsProcess[] = [];
-  const seen = new Set<string>();
+  /** When each stopped process was stopped: its children are not created after. */
+  const stoppedAt = new Map<string, number>();
+  const exitedBefore = (parent: WindowsProcess) =>
+    stoppedAt.get(identity(parent)) ?? opts.knownAtMs;
   let targets = [
     ...windowsProcessTree(table, { ...opts.root, pid }),
     ...known.filter((entry) => running.has(identity(entry))),
-    ...windowsDescendantsOf(table, known),
+    ...windowsDescendantsOf(table, known, exitedBefore),
   ];
   for (let round = 0; round < 3; round++) {
-    const fresh = targets.filter((entry) => !seen.has(identity(entry)));
+    const fresh = targets.filter((entry) => !stoppedAt.has(identity(entry)));
     if (fresh.length === 0) break;
     for (const target of fresh) {
-      seen.add(identity(target));
+      if (stoppedAt.has(identity(target))) continue;
+      stoppedAt.set(identity(target), now());
       if (target.pid === process.pid) continue;
       try {
         terminate(target.pid);
@@ -152,7 +167,11 @@ export async function stopWindowsProcessTree(
       stopped.push(target);
     }
     if (round === 2) break;
-    targets = windowsDescendantsOf(await opts.processes({ fresh: true }), [...stopped, ...known]);
+    targets = windowsDescendantsOf(
+      await opts.processes({ fresh: true }),
+      [...stopped, ...known],
+      exitedBefore,
+    );
   }
   return stopped;
 }
