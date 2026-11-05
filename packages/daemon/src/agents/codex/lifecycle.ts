@@ -378,9 +378,10 @@ async function waitForWebSocket(
  * Stops the app-server. POSIX sends SIGTERM to the process the daemon
  * started, which the npm launcher passes on to the native server. On
  * Windows the direct child of an npm install is node running codex.js,
- * which holds the native app-server as its own child, and TerminateProcess
- * on the wrapper alone would leak that server, its port and the commands it
- * runs; never the whole tree, though: see windows-stop.ts.
+ * which holds the native app-server as its own, non-detached child:
+ * TerminateProcess on the wrapper ends that server too, through the
+ * kill-on-close job libuv puts it in, but leaves the commands it runs on
+ * its console. Those end as well, never the whole tree: see windows-stop.ts.
  */
 export function stopProcess(
   server: CodexServerProcess,

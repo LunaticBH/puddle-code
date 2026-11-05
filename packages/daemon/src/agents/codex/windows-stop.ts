@@ -34,8 +34,8 @@ import {
  * detached process, one in a console of its own (`Start-Process`), or one
  * on a pseudoconsole of the server's (which ends as that console closes
  * with the server). Without the helper (Constrained Language Mode), only
- * the launcher ends, by its handle, and the native server it started, as
- * the process table vouches for it.
+ * the native server the launcher started ends, as the process table vouches
+ * for it while the launcher runs, and then the launcher, by its handle.
  */
 
 /** The app-server process the daemon started, and when (this process's clock). */
@@ -111,25 +111,35 @@ export async function stopCodexServerWindows(
     }).catch(() => false);
     if (ended) return;
   }
-  // No console to go by: the launcher, and the native server it started,
-  // as this table vouches for it (a child of the launcher, created since).
-  endLauncher();
+  // No console to go by: the native server the launcher started, as this
+  // table vouches for it (a console child of the launcher, created since),
+  // then the launcher, by its handle. The server goes first, by pid, while
+  // the launcher runs and holds the server's handle (until it sees the
+  // server exit, as codex.js then exits too): once the launcher has ended,
+  // and a node launcher's non-detached child with it through libuv's
+  // kill-on-close job, another process may hold that pid.
   const subsystem = deps.subsystem ?? imageSubsystem;
-  const terminate =
-    deps.terminate ??
-    ((target: number) => {
-      process.kill(target);
-    });
+  const servers: WindowsProcess[] = [];
   for (const entry of tree) {
     if (entry === launcher || entry === host || entry.ppid !== pid) continue;
     const kind = await subsystem(entry).catch(() => null);
-    if (kind === null || isGuiSubsystem(kind)) continue;
-    try {
-      terminate(entry.pid);
-    } catch {
-      // Exited meanwhile.
+    if (kind !== null && !isGuiSubsystem(kind)) servers.push(entry);
+  }
+  if (child.exitCode === null && child.signalCode === null) {
+    const terminate =
+      deps.terminate ??
+      ((target: number) => {
+        process.kill(target);
+      });
+    for (const entry of servers) {
+      try {
+        terminate(entry.pid);
+      } catch {
+        // Exited meanwhile.
+      }
     }
   }
+  endLauncher();
 }
 
 /**

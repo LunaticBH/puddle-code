@@ -30,19 +30,21 @@ const entry = (
   createdAtMs,
 });
 
-/** A stand-in for the app-server's ChildProcess: what it was asked. */
-function launcher(pid: number) {
+/** A stand-in for the app-server's ChildProcess: what it was asked; `onKill` runs as it is ended. */
+function launcher(pid: number, onKill?: () => void) {
   const signals: Array<string | undefined> = [];
   const child = Object.assign(new EventEmitter(), {
     pid,
-    exitCode: null,
+    exitCode: null as number | null,
+    signalCode: null,
     killed: false,
     kill: (signal?: string) => {
       signals.push(signal);
+      onKill?.();
       return true;
     },
   });
-  return { child: child as unknown as ChildProcess, signals };
+  return { child: child as unknown as ChildProcess, signals, exit: () => (child.exitCode = 1) };
 }
 
 /**
@@ -197,17 +199,45 @@ describe('stopping the Codex app-server on Windows', () => {
     expect(w.terminated).toEqual([]);
   });
 
-  it('ends the launcher and its native server alone without a helper', async () => {
+  it('ends the native server, then the launcher, alone without a helper', async () => {
     const w = world(table, { attached });
-    const { child, signals } = launcher(100);
+    const order: string[] = [];
+    // As libuv's kill-on-close job does, ending the launcher ends its server,
+    // whose pid is taken at once by an unrelated process.
+    const { child, signals } = launcher(100, () => {
+      order.push('launcher');
+      w.terminate(102);
+      w.add(entry(102, 1, 9000));
+    });
+    await stopProcess(server(child), 'win32', {
+      processes: w.processes,
+      inspector: null,
+      terminate: (pid) => {
+        order.push(`terminate ${pid}`);
+        w.terminate(pid);
+      },
+      subsystem: async (e) => (e.name === 'gui.exe' ? 2 : 3),
+    });
+    expect(signals).toEqual([undefined]);
+    expect(order).toEqual(['terminate 102', 'launcher']);
+    expect((await w.processes()).filter((e) => e.pid === 102)).toEqual([entry(102, 1, 9000)]);
+  });
+
+  it('ends no server by pid without a helper once the launcher has exited', async () => {
+    const w = world(table, { attached });
+    const { child, signals, exit } = launcher(100);
     await stopProcess(server(child), 'win32', {
       processes: w.processes,
       inspector: null,
       terminate: w.terminate,
-      subsystem: async (e) => (e.name === 'gui.exe' ? 2 : 3),
+      // The launcher exits while the server's image is read: its pid vouches for nothing.
+      subsystem: async () => {
+        exit();
+        return 3;
+      },
     });
+    expect(w.terminated).toEqual([]);
     expect(signals).toEqual([undefined]);
-    expect(w.terminated).toEqual([102]);
   });
 
   it('goes by the table alone when the helper no longer holds the console’s host', async () => {
@@ -280,6 +310,25 @@ describe.runIf(process.platform === 'win32')('a Codex session’s end on Windows
       ['detached', 'gui', 'gui-child', 'gui-child', 'start-process'].sort(),
     );
     await stopProcess({ child, startedAtMs, spawnedAtMs }, 'win32');
+    await exited;
+    expect(await survivors(ending)).toEqual([]);
+    expect((await stillRunning(left)).map(role).sort()).toEqual(left.map(role).sort());
+  });
+
+  it('ends the server, then the launcher, and nothing else without the helper', async () => {
+    const tree = await writeSparedTree();
+    markers.push(tree.marker);
+    const startedAtMs = Date.now();
+    const child = spawn(process.execPath, ['-e', LAUNCHER, ...tree.args], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
+    });
+    const spawnedAtMs = Date.now();
+    const exited = new Promise((resolve) => child.once('exit', resolve));
+    const members = await sparedTreeMembers(tree.marker, 2);
+    const ending = members.filter((e) => role(e) === 'agent');
+    const left = members.filter((e) => !ending.includes(e));
+    await stopProcess({ child, startedAtMs, spawnedAtMs }, 'win32', { inspector: null });
     await exited;
     expect(await survivors(ending)).toEqual([]);
     expect((await stillRunning(left)).map(role).sort()).toEqual(left.map(role).sort());
