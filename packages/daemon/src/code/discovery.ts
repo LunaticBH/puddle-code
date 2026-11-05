@@ -7,6 +7,7 @@ import {
   getEnv,
   system32Path,
 } from '@puddle/shared/node/platform';
+import { isPowerShellAppAlias } from '../pty/shell.js';
 
 const cache = new Map<string, { at: number; path: string | null }>();
 const listings = new Map<string, { at: number; names: string[] }>();
@@ -40,18 +41,23 @@ export function findCodeExecutable(
   names: readonly string[],
   directories = codeSearchDirectories(),
   platform: NodeJS.Platform = process.platform,
+  /** Test seam: whether a path is the Store PowerShell's App Execution Alias. */
+  isPowerShellAlias: (path: string) => boolean = isPowerShellAppAlias,
 ): string | null {
+  const cached = isPowerShellAlias === isPowerShellAppAlias;
   const key = JSON.stringify([platform, names, directories]);
-  const previous = cache.get(key);
+  const previous = cached ? cache.get(key) : undefined;
   if (previous && Date.now() - previous.at < CACHE_TTL_MS) return previous.path;
   let found: string | null = null;
   for (const name of names) {
     found =
       platform === 'win32'
-        ? findWindowsExecutable(name, directories)
+        ? (findWindowsExecutable(name, directories) ??
+          findPowerShellAlias(name, directories, isPowerShellAlias))
         : findPosixExecutable(name, directories);
     if (found) break;
   }
+  if (!cached) return found;
   if (cache.size >= 128) cache.clear();
   cache.set(key, { at: Date.now(), path: found });
   return found;
@@ -92,6 +98,23 @@ function findWindowsExecutable(name: string, directories: readonly string[]): st
 }
 
 /**
+ * The one App Execution Alias that counts: the Microsoft Store's PowerShell
+ * 7 (`pwsh`), when no installed pwsh.exe was found (pty/shell.ts).
+ */
+function findPowerShellAlias(
+  name: string,
+  directories: readonly string[],
+  isAlias: (path: string) => boolean,
+): string | null {
+  if (name.toLowerCase() !== 'pwsh') return null;
+  for (const directory of directories) {
+    const candidate = join(directory, 'pwsh.exe');
+    if (isAlias(candidate)) return candidate;
+  }
+  return null;
+}
+
+/**
  * Windows: PATH (quotes stripped; relative and unexpanded `%VAR%` entries
  * dropped, so nothing resolves against the daemon's working directory), the
  * active venv's `Scripts`, then the default locations of common installers
@@ -123,6 +146,8 @@ function windowsSearchDirectories(env: NodeJS.ProcessEnv, home: string): string[
         ...under(variable('APPDATA'), 'npm'),
         ...under(localAppData, 'pnpm'),
         ...under(localAppData, 'Microsoft', 'WinGet', 'Links'),
+        // App Execution Aliases: only the Store PowerShell's is ever chosen there.
+        ...under(localAppData, 'Microsoft', 'WindowsApps'),
         ...under(localAppData, 'Programs', 'Python').flatMap((root) =>
           versioned(root, /^Python3\d*$/i, ['', 'Scripts']),
         ),
