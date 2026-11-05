@@ -1,12 +1,17 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ConptyConsole, ConsoleMember, ConsoleScan } from '../../src/pty/conpty-jobs.js';
-import { consoleTargets, endConsole, ExitDeadline } from '../../src/pty/conpty-teardown.js';
+import {
+  consoleTargets,
+  endConsole,
+  ExitDeadline,
+  guiAttached,
+} from '../../src/pty/conpty-teardown.js';
 
 /**
  * What a ConPTY's end ends, against a stand-in helper, so the rule is
  * exercised on any OS (the real one is in windows-pty-teardown.test.ts):
- * what is attached to its console, never a GUI programme or what left it,
- * then its host.
+ * what is attached to its console, never a GUI programme, what one started,
+ * or what left it, then its host.
  */
 
 const HOST = 7000;
@@ -21,6 +26,7 @@ const member = (
   createdAtMs,
   key: `${pid}@${createdAtMs}`,
   gui: false,
+  guiStarted: false,
   consoleHost,
   listed: false,
   ...more,
@@ -68,6 +74,15 @@ describe('consoleTargets', () => {
     expect(consoleTargets(scan([]), held, { root: true })).toEqual([]);
   });
 
+  it('never takes what a GUI programme attached to the console started there', () => {
+    const members = [
+      member(12, 300, HOST, { gui: true }),
+      member(15, 310, HOST, { guiStarted: true }),
+      member(16, 320),
+    ];
+    expect(consoleTargets(scan(members), held, { root: false })).toEqual(['16@320']);
+  });
+
   it('never takes a process left naming a host that was terminated, once its pid is this host’s', () => {
     // 17 ran in a console whose host (pid 7000 then) was terminated; this
     // console's host took the pid at 90: 17 still names it, but was created before it.
@@ -85,6 +100,17 @@ describe('consoleTargets', () => {
     const untold = { pid: ROOT, console: { rootCreatedAtMs: 100, host: null } };
     const members = [member(11, 200, -1, { listed: true }), member(12, 300, -1)];
     expect(consoleTargets(scan(members), untold, { root: false })).toEqual(['11@200']);
+  });
+});
+
+describe('guiAttached', () => {
+  it('tells a GUI programme attached to the console, or what one started, from the rest', () => {
+    expect(guiAttached(scan([member(ROOT, 100), member(11, 200)]), held)).toBe(false);
+    expect(guiAttached(scan([member(12, 300, HOST, { gui: true })]), held)).toBe(true);
+    expect(guiAttached(scan([member(15, 310, HOST, { guiStarted: true })]), held)).toBe(true);
+    // One in another console, or the root itself, is no reason to keep this console open.
+    expect(guiAttached(scan([member(12, 300, 8000, { gui: true })]), held)).toBe(false);
+    expect(guiAttached(scan([member(ROOT, 100, HOST, { gui: true })]), held)).toBe(false);
   });
 });
 

@@ -14,7 +14,7 @@
 // one created 40 ms later (7001, another spawn's). From 3000 it names only
 // that other spawn's host. A claim holds the host it is given, if it is one
 // of those. A scan names the root (pid 10), a console child (11), a GUI
-// programme (12) and another console's process (13).
+// programme (12), what it started (14) and another console's process (13).
 // A classify answers pids below 1000 as console programmes on console 7000,
 // from 1000 as GUI programmes, from 2000 as detached, and leaves out those
 // from 3000 (no longer running).
@@ -61,7 +61,8 @@ if (mode === 'mute') {
       if (mode === 'slow-scan') return;
       const listed = args[1] === '1' ? 1 : 0;
       reply(
-        `ok 1 1 10:100:3:7000:${listed} 11:200:3:7000:${listed} 12:300:2:7000:0 13:400:3:8000:0`,
+        `ok 1 1 10:100:3:7000:${listed}:0 11:200:3:7000:${listed}:0 12:300:2:7000:0:0 ` +
+          `14:350:3:7000:0:1 13:400:3:8000:0:0`,
       );
     } else if (verb === 'terminate') {
       const state = held.get(args[0]);

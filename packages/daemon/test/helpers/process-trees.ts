@@ -124,7 +124,59 @@ public static class PuddleTestGui
 }
 `;
 
-let gui: Promise<string> | null = null;
+const ATTACHED_GUI_SOURCE = `
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+public static class PuddleTestAttachedGui
+{
+    [DllImport("kernel32.dll")] static extern bool AttachConsole(int pid);
+
+    // A GUI-subsystem programme that attaches to its parent's console, as
+    // Electron does, starts <file> <args...> there (it inherits the
+    // console), waits <seconds>, then exits.
+    public static int Main(string[] args)
+    {
+        AttachConsole(-1);
+        var line = new StringBuilder();
+        for (int i = 2; i < args.Length; i++) line.Append(i > 2 ? " " : "").Append('"').Append(args[i]).Append('"');
+        var start = new ProcessStartInfo(args[1], line.ToString());
+        start.UseShellExecute = false;
+        Process.Start(start);
+        Thread.Sleep(int.Parse(args[0]) * 1000);
+        return 0;
+    }
+}
+`;
+
+const programs = new Map<string, Promise<string>>();
+
+/** Compiles `source` as a GUI-subsystem programme `<name>.exe`, once per process. */
+function compileGui(name: string, source: string): Promise<string> {
+  let exe = programs.get(name);
+  if (!exe) {
+    exe = (async () => {
+      const windir = process.env.SystemRoot ?? process.env.WINDIR ?? 'C:\\Windows';
+      const compiler = ['Framework64', 'FrameworkArm64', 'Framework']
+        .map((framework) => join(windir, 'Microsoft.NET', framework, 'v4.0.30319', 'csc.exe'))
+        .find((candidate) => existsSync(candidate));
+      if (compiler === undefined) throw new Error('no .NET Framework C# compiler');
+      const dir = mkdtempSync(join(tmpdir(), 'puddle-gui-'));
+      const file = join(dir, `${name}.cs`);
+      const out = join(dir, `${name}.exe`);
+      writeFileSync(file, source);
+      await promisify(execFile)(
+        compiler,
+        ['/nologo', '/target:winexe', '/platform:anycpu', `/out:${out}`, file],
+        { windowsHide: true },
+      );
+      return out;
+    })();
+    programs.set(name, exe);
+  }
+  return exe;
+}
 
 /**
  * A GUI-subsystem programme (`/target:winexe`), compiled once per process
@@ -133,23 +185,17 @@ let gui: Promise<string> | null = null;
  * then exits, its arguments naming whatever the test needs found.
  */
 export function guiProgram(): Promise<string> {
-  return (gui ??= (async () => {
-    const windir = process.env.SystemRoot ?? process.env.WINDIR ?? 'C:\\Windows';
-    const compiler = ['Framework64', 'FrameworkArm64', 'Framework']
-      .map((framework) => join(windir, 'Microsoft.NET', framework, 'v4.0.30319', 'csc.exe'))
-      .find((candidate) => existsSync(candidate));
-    if (compiler === undefined) throw new Error('no .NET Framework C# compiler');
-    const dir = mkdtempSync(join(tmpdir(), 'puddle-gui-'));
-    const source = join(dir, 'gui.cs');
-    const exe = join(dir, 'gui.exe');
-    writeFileSync(source, GUI_SOURCE);
-    await promisify(execFile)(
-      compiler,
-      ['/nologo', '/target:winexe', '/platform:anycpu', `/out:${exe}`, source],
-      { windowsHide: true },
-    );
-    return exe;
-  })());
+  return compileGui('gui', GUI_SOURCE);
+}
+
+/**
+ * A GUI-subsystem programme that attaches to its parent's console, as
+ * Electron does unless told otherwise, and starts a console programme
+ * there: `gui-attach.exe <seconds> <file> [args...]` (each argument passed
+ * on quoted).
+ */
+export function attachedGuiProgram(): Promise<string> {
+  return compileGui('gui-attach', ATTACHED_GUI_SOURCE);
 }
 
 /**

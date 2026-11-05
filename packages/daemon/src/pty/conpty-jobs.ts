@@ -20,7 +20,8 @@ import { system32Path } from '@puddle/shared/node/platform';
  * and all it starts, a detached process, one started in a console of its
  * own such as PowerShell's `Start-Process`) is not attached to it and is
  * never named here, as `nohup`, `setsid` and GUI launches survive a
- * hang-up.
+ * hang-up; nor is a GUI programme that attached to it of its own accord,
+ * or anything that programme started.
  *
  * The helper holds every process it names open (a SYNCHRONIZE handle), the
  * root and the console host from just after `pty.spawn` and each member
@@ -49,6 +50,12 @@ export interface ConsoleMember {
   key: string;
   /** Its image is a GUI programme (PE subsystem 2): never ended. */
   gui: boolean;
+  /**
+   * A GUI programme started it, or one of its ancestors below the PTY's
+   * root (one that attached to the console and started console
+   * programmes in it): never ended either.
+   */
+  guiStarted: boolean;
   /**
    * The console host Windows last recorded for it: 0 for none, -1 when
    * Windows will not say. Windows leaves it as it was when a host is
@@ -82,7 +89,10 @@ export interface ConptyConsole {
    * close would end the helper with its members. Null when it did not answer.
    */
   scan(options: { attach: boolean }): Promise<ConsoleScan | null>;
-  /** Ends held processes: members by key, `root`, `host` (never a GUI member). Resolves with how many. */
+  /**
+   * Ends held processes: members by key, `root`, `host` (never a GUI member,
+   * nor one a GUI programme started). Resolves with how many.
+   */
   terminate(keys: readonly string[]): Promise<number>;
   /** Lets go of every process held for this PTY (once its teardown is over). */
   release(): void;
@@ -223,6 +233,8 @@ public static class PuddleConsoles
         public int Parent;
         // Its image's subsystem, once read (-1 until then).
         public int Subsystem = -1;
+        // A GUI programme started it, or an ancestor of it below the PTY's root.
+        public bool GuiStarted;
         public string Key { get { return Pid + "@" + Created; } }
     }
 
@@ -641,9 +653,11 @@ public static class PuddleConsoles
         foreach (var member in members)
         {
             if (!Running(member.Handle)) continue;
+            if (member.Parent == 0) member.Parent = ParentOf(member.Pid, table);
+            bool guiStarted = StartedByGui(pty, member, table);
             reply.Append(' ').Append(member.Pid).Append(':').Append(member.Created).Append(':')
                 .Append(SubsystemOf(member)).Append(':').Append(ConsoleHost(member.Handle)).Append(':')
-                .Append(listed.Contains(member.Key) ? 1 : 0);
+                .Append(listed.Contains(member.Key) ? 1 : 0).Append(':').Append(guiStarted ? 1 : 0);
         }
         return reply.ToString();
     }
@@ -695,7 +709,75 @@ public static class PuddleConsoles
         return result;
     }
 
-    // Ends the held processes named: 'root', 'host', or a member's key (never a GUI programme).
+    // A process held for this PTY as 'pid', created no later than 'before':
+    // held open, its pid is still its own, though it may have exited.
+    static Pin Held(Pty pty, int pid, long before)
+    {
+        Pin root = pty.Root;
+        if (root != null && root.Pid == pid && root.Created <= before && root.Handle != IntPtr.Zero) return root;
+        lock (pty)
+        {
+            foreach (var member in pty.Members.Values)
+            {
+                if (member.Pid == pid && member.Created <= before && member.Handle != IntPtr.Zero) return member;
+            }
+        }
+        return null;
+    }
+
+    // Whether a GUI programme started 'member', or one of its ancestors
+    // below the PTY's root (whose own image never counts: it is the
+    // session's process): what a GUI programme starts is never ended.
+    // Once found, it stays so.
+    static bool StartedByGui(Pty pty, Pin member, Dictionary<int, Entry> table)
+    {
+        if (member.GuiStarted) return true;
+        int pid = member.Parent;
+        long created = member.Created;
+        for (int depth = 0; depth < 64; depth++)
+        {
+            if (pid <= 4 || pid == pty.Parent || pid == self) return false;
+            int next, subsystem;
+            long ancestorCreated;
+            bool started = false;
+            Pin held = Held(pty, pid, created);
+            if (held != null)
+            {
+                next = held.Parent;
+                ancestorCreated = held.Created;
+                subsystem = SubsystemOf(held);
+                started = held.GuiStarted;
+            }
+            else
+            {
+                Entry entry;
+                if (!table.TryGetValue(pid, out entry)) return false;
+                IntPtr handle = OpenProcess(QUERY_LIMITED, false, pid);
+                if (handle == IntPtr.Zero) return false;
+                try
+                {
+                    ancestorCreated = CreatedMs(handle);
+                    subsystem = Subsystem(handle);
+                }
+                finally { CloseHandle(handle); }
+                // A pid taken after its child was created is not its parent.
+                if (ancestorCreated < 0 || ancestorCreated > created) return false;
+                next = (int)entry.Parent;
+            }
+            if (next == 0 || next == pty.Parent) return false;
+            if (subsystem == 2 || started)
+            {
+                member.GuiStarted = true;
+                return true;
+            }
+            pid = next;
+            created = ancestorCreated;
+        }
+        return false;
+    }
+
+    // Ends the held processes named: 'root', 'host', or a member's key
+    // (never a GUI programme, nor what one started).
     static string Terminate(string id, string[] f, int from)
     {
         Pty pty = Find(id);
@@ -713,7 +795,7 @@ public static class PuddleConsoles
                 lock (pty) pty.Members.TryGetValue(f[i], out pin);
             }
             if (pin == null || !Running(pin.Handle)) continue;
-            if (member && SubsystemOf(pin) == 2) continue;
+            if (member && (SubsystemOf(pin) == 2 || pin.GuiStarted)) continue;
             if (TerminateProcess(pin.Handle, 1)) ended.Add(pin.Handle);
         }
         // TerminateProcess returns before the process has gone: wait a little.
@@ -838,7 +920,7 @@ function count(answer: string | null): number {
   return Number.isSafeInteger(value) && value > 0 ? value : 0;
 }
 
-/** `pid:created:subsystem:host[:listed]` fields; null for anything malformed. */
+/** `pid:created:subsystem:host[:listed:guiStarted]` fields; null for anything malformed. */
 function fields(item: string, size: number): number[] | null {
   const parts = item.split(':').map(Number);
   return parts.length === size && parts.every((part) => Number.isSafeInteger(part)) ? parts : null;
@@ -1104,9 +1186,10 @@ export class ConptyHelper implements ConptyJobs, ConsoleInspector {
         const [, root, hostAlive, ...items] = reply.split(' ');
         const members: ConsoleMember[] = [];
         for (const item of items) {
-          const parts = fields(item, 5);
+          const parts = fields(item, 6);
           if (!parts) continue;
-          const [pid, createdAtMs, subsystem, consoleHost, listed] = parts as [
+          const [pid, createdAtMs, subsystem, consoleHost, listed, guiStarted] = parts as [
+            number,
             number,
             number,
             number,
@@ -1118,6 +1201,7 @@ export class ConptyHelper implements ConptyJobs, ConsoleInspector {
             createdAtMs,
             key: `${pid}@${createdAtMs}`,
             gui: subsystem === 2,
+            guiStarted: guiStarted === 1,
             consoleHost,
             listed: listed === 1,
           });

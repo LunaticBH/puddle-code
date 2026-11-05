@@ -8,7 +8,7 @@ import {
   type ConptyConsole,
   type ConptyJobs,
 } from './conpty-jobs.js';
-import { endConsole, ExitDeadline } from './conpty-teardown.js';
+import { endConsole, ExitDeadline, guiAttached } from './conpty-teardown.js';
 import { EnvOscFilter, type EnvDelta } from './env-osc.js';
 import { writePtyRoots, type PtyRootRecord } from './pty-roots.js';
 import { planPtySpawn } from './pty-spawn.js';
@@ -77,8 +77,11 @@ interface Live {
  * node-pty's thread saw the root exit; `drained` settles once node-pty has
  * reported the exit, a second after the console's output went quiet.
  * `closing` is set once a stop has begun to close the pseudoconsole,
- * `scanning` while the helper is attached to it just before, `killing` once
- * a SIGKILL has come; `settling` once the teardown has begun. `deadline` is
+ * `scanning` while the helper is attached to it just before, `spareGui`
+ * when that found a GUI programme attached to it (or something one started
+ * there), which the console's close would end: the console is then never
+ * closed, and the teardown ends the rest itself. `killing` is set once a
+ * SIGKILL has come; `settling` once the teardown has begun. `deadline` is
  * when the exit is reported at the latest, whatever the helper does.
  */
 interface ConptyState {
@@ -99,6 +102,7 @@ interface ConptyState {
   drained: Deferred;
   closing: boolean;
   scanning: boolean;
+  spareGui: boolean;
   killing: boolean;
   settling: boolean;
   /** The teardown is over: the helper holds nothing for this PTY any more. */
@@ -331,6 +335,7 @@ export class PtyManager extends EventEmitter {
             drained: deferred(),
             closing: false,
             scanning: false,
+            spareGui: false,
             killing: false,
             settling: false,
             released: false,
@@ -454,16 +459,17 @@ export class PtyManager extends EventEmitter {
   /**
    * Ends what the PTY's console still holds (conpty-teardown.ts). A console
    * a stop closed first has its grace: Windows asks what is attached to it
-   * to exit, and the host goes once they have. Without the helper, only the
-   * root can be told apart, and only while node-pty has not seen it exit;
-   * what else its console held ends when the daemon does, its consoles
-   * closing with it.
+   * to exit, and the host goes once they have. One a stop left open for a
+   * GUI programme attached to it has none: nothing but its close could ask
+   * the rest to exit. Without the helper, only the root can be told apart,
+   * and only while node-pty has not seen it exit; what else its console
+   * held ends when the daemon does, its consoles closing with it.
    */
   private async conptyTeardown(live: Live): Promise<void> {
     const state = live.conpty!;
     const held = await this.heldConsole(state);
     try {
-      if (!state.killing) {
+      if (!state.killing && !state.spareGui) {
         if (state.closed) await this.closeGrace(state, held);
         else if (state.exitedAtMs === undefined) await this.rootGrace(state);
       }
@@ -473,8 +479,9 @@ export class PtyManager extends EventEmitter {
         await endConsole(live.proc.pid, held, {
           root: true,
           host: true,
-          // Its own list only while nobody closes it: a close would end the helper attached to it.
-          attach: !state.closed && !state.closing,
+          // Its own list only while it is open (no stop closes it once the
+          // teardown has begun): a close would end the helper attached to it.
+          attach: !state.closed,
         });
       }
     } finally {
@@ -752,7 +759,9 @@ export class PtyManager extends EventEmitter {
    * pseudoconsole, which sends them CTRL_CLOSE_EVENT and ends them once
    * their handlers return, the counterpart of a hang-up; what is left after
    * the grace (CLOSE_GRACE_MS, ending shortly before STOP_BOUND_MS) is
-   * ended. SIGKILL closes the pseudoconsole and ends the root at once, then
+   * ended. When a GUI programme is attached to the console, which its close
+   * would end, the console stays open and what else is attached is ended at
+   * once. SIGKILL closes the pseudoconsole and ends the root at once, then
    * what is attached, and brings the deadline forward, also for a stop
    * already under way. Either way the exit is reported once what was
    * attached is ended too, or at the deadline.
@@ -779,29 +788,35 @@ export class PtyManager extends EventEmitter {
     void this.closeConptyGracefully(rec, state);
   }
 
-  /** A stop: what is attached is held, then the console closes, then its grace (see stop). */
+  /**
+   * A stop: what is attached is held, then the console closes, then its
+   * grace (see stop). A GUI programme attached to it would end with its
+   * close: the console is left open then, and the teardown ends the rest.
+   */
   private async closeConptyGracefully(rec: Live, state: ConptyState): Promise<void> {
     const held = await this.heldConsole(state, SNAPSHOT_BOUND_MS);
     if (held && !state.settling && !state.killing) {
       // Held open now, what outstays the close's grace is ended by identity.
       state.scanning = true;
-      await within(held.scan({ attach: true }), SNAPSHOT_BOUND_MS, null);
+      const scan = await within(held.scan({ attach: true }), SNAPSHOT_BOUND_MS, null);
       state.scanning = false;
+      if (scan && guiAttached(scan, { pid: rec.proc.pid, console: held })) state.spareGui = true;
     }
     // The root exited meanwhile: its teardown runs instead.
     if (state.settling) return;
-    this.closeConsole(rec, state);
+    if (!state.spareGui) this.closeConsole(rec, state);
     this.settleConpty(rec);
   }
 
   /**
    * SIGKILL (see stop). The root goes first, by its pid: node-pty has not
    * seen it exit, so its pid is still its own. The console is closed too
-   * unless the helper may be attached to it, so Windows ends what is
-   * attached as the teardown does.
+   * unless the helper may be attached to it, or a stop found a GUI
+   * programme attached to it, so Windows ends what is attached as the
+   * teardown does.
    */
   private killConpty(rec: Live, state: ConptyState): void {
-    if (!state.settling && !state.scanning) this.closeConsole(rec, state);
+    if (!state.settling && !state.scanning && !state.spareGui) this.closeConsole(rec, state);
     this.endRoot(rec);
   }
 

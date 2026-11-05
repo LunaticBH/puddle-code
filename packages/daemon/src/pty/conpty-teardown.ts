@@ -13,9 +13,13 @@ import type { ConptyConsole, ConsoleMember, ConsoleScan } from './conpty-jobs.js
  * that left the console is never ended: a GUI programme and everything it
  * starts, a detached process, one started in a console of its own (any
  * hidden Node child, PowerShell's `Start-Process`, `start` of a programme),
- * as `nohup`, `setsid` and GUI launches survive a hang-up on POSIX. The
- * ConPTY helper (conpty-jobs.ts) names the console's processes and holds
- * each one open, so a pid it names is never another process's.
+ * as `nohup`, `setsid` and GUI launches survive a hang-up on POSIX. Nor is a
+ * GUI programme that attached to the console itself (Electron does unless
+ * told otherwise), or what it started there: a close would end those too,
+ * so a stop that finds one attached ends the rest itself, without closing
+ * the console (PtyManager). The ConPTY helper (conpty-jobs.ts) names the
+ * console's processes and holds each one open, so a pid it names is never
+ * another process's.
  */
 
 /** The root as the helper holds it, and its pid. */
@@ -47,7 +51,7 @@ function isRoot(member: ConsoleMember, held: HeldRoot): boolean {
 
 /**
  * Which held processes of `scan` a teardown ends: every process attached to
- * the PTY's console, never a GUI programme; the root
+ * the PTY's console, never a GUI programme nor what one started; the root
  * only when `root`, and only while it is attached, as `root`, whatever its
  * image (it is the session's own process).
  */
@@ -62,11 +66,25 @@ export function consoleTargets(
     if (!attachedTo(member, host)) continue;
     if (isRoot(member, held)) {
       if (options.root && scan.rootAlive) targets.unshift('root');
-    } else if (!member.gui) {
+    } else if (!member.gui && !member.guiStarted) {
       targets.push(member.key);
     }
   }
   return targets;
+}
+
+/**
+ * Whether a GUI programme other than the root, or something one started, is
+ * attached to the console: closing it would end them (CTRL_CLOSE_EVENT goes
+ * to every process attached).
+ */
+export function guiAttached(scan: ConsoleScan, held: HeldRoot): boolean {
+  return scan.members.some(
+    (member) =>
+      attachedTo(member, held.console.host) &&
+      !isRoot(member, held) &&
+      (member.gui || member.guiStarted),
+  );
 }
 
 export interface EndConsoleOptions {

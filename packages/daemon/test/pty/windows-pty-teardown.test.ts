@@ -16,6 +16,7 @@ import { stopPtysAfterFile } from '../helpers/process-guard.js';
 import { refusedHelper, silentHelper, slowHelper } from '../helpers/slow-conpty-helper.js';
 import {
   ATTACHED_SERVER,
+  attachedGuiProgram,
   conptyHosts,
   guiProgram,
   marked,
@@ -211,6 +212,64 @@ describe.skipIf(process.platform !== 'win32')(
       // Nothing tells what is still attached apart: it ends with the daemon's consoles.
       strays.push(...attached);
     });
+
+    /**
+     * A cmd.exe PTY that has started a console child (attached) and a GUI
+     * programme that attached to the console and started a console child
+     * there, as Electron programmes do.
+     */
+    async function attachedGui(ptys: PtyManager, output: () => string) {
+      const dir = mkdtempSync(join(tmpdir(), 'puddle-tree-'));
+      markers.push(dir);
+      const program = await attachedGuiProgram();
+      ptys.spawn('g', 'agent', system32Path('cmd.exe'), ['/d', '/k'], { cwd: dir });
+      await waitUntil(() => output().includes('>'), 20_000, 'a prompt');
+      const keep = 'setInterval(()=>{},1e9)';
+      ptys.write(
+        'g',
+        'agent',
+        `start "" /b "${process.execPath}" -e "${keep}" "${dir}:attached"\r`,
+      );
+      ptys.write(
+        'g',
+        'agent',
+        `start "" "${program}" 120 "${process.execPath}" -e "${keep}" "${dir}:gui-child"\r`,
+      );
+      let found: WindowsProcess[] = [];
+      const named = (wanted: string) =>
+        found.filter((p) =>
+          wanted === 'gui'
+            ? p.name.toLowerCase() === 'gui-attach.exe'
+            : p.name.toLowerCase() === 'node.exe' && role(p) === wanted,
+        );
+      await waitUntil(
+        async () => {
+          found = await marked(dir);
+          return ['attached', 'gui', 'gui-child'].every((wanted) => named(wanted).length === 1);
+        },
+        20_000,
+        'the console child, the GUI programme and its child',
+      );
+      return { attached: named('attached'), left: [...named('gui'), ...named('gui-child')] };
+    }
+
+    for (const how of ['kill', 'kill, then SIGKILL', 'exit'] as const) {
+      it(`its ${how} leaves a GUI programme that attached to its console, and what it started there`, async () => {
+        const { ptys, output } = await manager();
+        const { attached, left } = await attachedGui(ptys, output);
+        const exit = exitObserved(ptys, attached, left);
+        if (how === 'exit') ptys.write('g', 'agent', 'exit\r');
+        else ptys.kill('g', 'agent');
+        if (how === 'kill, then SIGKILL') {
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          ptys.kill('g', 'agent', 'SIGKILL');
+        }
+        const { stayed, outlived, ms } = await exit;
+        expect(stayed).toEqual([]);
+        expect(outlived).toHaveLength(2);
+        expect(ms).toBeLessThan(4500);
+      });
+    }
 
     it('a PowerShell session ends ping in its console, never a Start-Process child', async () => {
       const { ptys, output } = await manager();

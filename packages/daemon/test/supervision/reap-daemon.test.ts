@@ -73,6 +73,7 @@ function world(initial: Process[]) {
         createdAtMs: p.createdAtMs!,
         key: key(p),
         gui: p.gui,
+        guiStarted: false,
         consoleHost: p.consoleHost,
         listed: false,
       })),

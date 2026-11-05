@@ -80,6 +80,7 @@ describe('ConptyHelper', () => {
       createdAtMs,
       key: `${pid}@${createdAtMs}`,
       gui: false,
+      guiStarted: false,
       consoleHost: 7000,
       listed: false,
       ...more,
@@ -91,6 +92,7 @@ describe('ConptyHelper', () => {
         member(10, 100, { listed: true }),
         member(11, 200, { listed: true }),
         member(12, 300, { gui: true }),
+        member(14, 350, { guiStarted: true }),
         member(13, 400, { consoleHost: 8000 }),
       ],
     });
