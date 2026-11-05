@@ -393,3 +393,42 @@ describe('Windows Authenticode signing of release trees', () => {
     120_000,
   );
 });
+
+describe('release workflow signing', () => {
+  /** The steps of one job in the release workflow, each as its own text. */
+  function jobSteps(job: string): string[] {
+    const workflow = readFileSync(join(repoRoot, '.github/workflows/release.yml'), 'utf8');
+    const start = workflow.indexOf(`\n  ${job}:\n`);
+    expect(start).toBeGreaterThanOrEqual(0);
+    const rest = workflow.slice(start + 1);
+    const end = rest.slice(1).search(/\n {2}[a-z][\w-]*:\n/);
+    const body = end < 0 ? rest : rest.slice(0, end + 1);
+    return body
+      .slice(body.indexOf('\n    steps:\n'))
+      .split(/\n(?= {6}- )/)
+      .slice(1);
+  }
+
+  // The GitHub ID token azure/login exchanges expires within minutes and
+  // Azure CLI cannot renew it, so a login at the start of the job no longer
+  // works when a long build reaches its first signature.
+  it.each(['tarball-windows', 'desktop-windows'])(
+    '%s logs in to Azure and caches the codesigning token just before each step that signs',
+    (job) => {
+      const steps = jobSteps(job);
+      const indices = (text: string) =>
+        steps.flatMap((step, index) => (step.includes(text) ? [index] : []));
+      const signing = indices('WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}');
+      expect(signing.length).toBeGreaterThan(0);
+      expect(indices('uses: azure/login@')).toEqual(signing.map((index) => index - 2));
+      for (const index of signing) {
+        const [login, cache] = [steps[index - 2]!, steps[index - 1]!];
+        expect(login).toContain("if: env.PUDDLE_WINDOWS_SIGNING == 'azure'");
+        expect(cache).toContain("if: env.PUDDLE_WINDOWS_SIGNING == 'azure'");
+        expect(cache).toContain(
+          'az account get-access-token --resource https://codesigning.azure.net --output none',
+        );
+      }
+    },
+  );
+});

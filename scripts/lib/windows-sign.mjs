@@ -8,7 +8,10 @@
 //   azure        Azure Trusted Signing through Invoke-TrustedSigning, using
 //                the Azure CLI login of azure/login (OIDC) and
 //                AZURE_SIGNING_ENDPOINT, AZURE_SIGNING_ACCOUNT and
-//                AZURE_SIGNING_PROFILE
+//                AZURE_SIGNING_PROFILE. Its AzureCliCredential cannot renew
+//                the federated GitHub token, so the release workflow logs in
+//                and caches the codesigning token just before each step that
+//                signs.
 //   none/unset   nothing is signed: the archive is exactly what an unsigned
 //                build always was
 //
