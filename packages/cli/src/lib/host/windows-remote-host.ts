@@ -17,6 +17,7 @@ import {
   runHelperScript,
   stageScript,
   type HelperRuntime,
+  type StagedHelper,
   type WindowsProbe,
 } from '../transport/windows-remote.js';
 import { CliError, type Logger, silentLogger } from '../types.js';
@@ -120,12 +121,12 @@ export function remoteWindowsHost(ssh: SshTransport): RemoteWindowsHost {
 }
 
 export class RemoteWindowsHost implements WindowsHostOps {
-  private staged: Promise<string> | undefined;
+  private staged: Promise<StagedHelper> | undefined;
 
   constructor(readonly ssh: SshTransport) {}
 
-  /** The staged helper's path on the host. */
-  helper(restage = false): Promise<string> {
+  /** The staged helper on the host: its path and digest. */
+  helper(restage = false): Promise<StagedHelper> {
     if (restage || this.staged === undefined) {
       const pending = this.stage();
       this.staged = pending;
@@ -136,7 +137,7 @@ export class RemoteWindowsHost implements WindowsHostOps {
     return this.staged!;
   }
 
-  private async stage(): Promise<string> {
+  private async stage(): Promise<StagedHelper> {
     const code = readFileSync(helperFile());
     const sha256 = createHash('sha256').update(code).digest('hex');
     const name = `windows-host-${sha256.slice(0, 16)}.mjs`;
@@ -157,7 +158,7 @@ export class RemoteWindowsHost implements WindowsHostOps {
         lastLines(result.stderr) || undefined,
       );
     }
-    return path;
+    return { path, sha256 };
   }
 
   /**
