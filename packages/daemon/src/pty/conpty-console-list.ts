@@ -1,79 +1,48 @@
-import { fork, type ChildProcess } from 'node:child_process';
-import { createRequire } from 'node:module';
-import { dirname, join } from 'node:path';
-
 /**
- * node-pty's ConPTY `kill()` lists the processes attached to the console with
- * a helper process (`conpty_console_list_agent.js`) and ends each one. When
- * the helper cannot attach to the console, because the root has exited
- * already (closing its console or ending its job does that), node-pty waits
- * 5 s and then ends the root's pid regardless, which by then may name another
- * process; and the helper's stack trace lands in the daemon's log. This
- * replaces the listing on one PTY with the same helper and the same list when
- * it succeeds, and with nothing to end, at once, when it fails
- * (docs/windows.md, decision 8). node-pty 1.1's internals, guarded: on
- * another version that lacks them this changes nothing.
+ * node-pty's ConPTY `kill()` lists the processes attached to the console
+ * with a helper process (`conpty_console_list_agent.js`) and ends each one
+ * at once by pid, racing the console's own close: whatever it lists loses
+ * its CTRL_CLOSE grace, a pid listed may name another process by the time
+ * it is ended, and when the helper cannot attach (the root has exited) it
+ * waits 5 s and ends the root's pid regardless, its stack trace landing in
+ * the daemon's log. This makes the listing on one PTY empty, so that its
+ * `kill()` only closes the pseudoconsole; PtyManager ends what the close
+ * leaves through the ConPTY helper, which holds what it ends
+ * (conpty-teardown.ts; docs/windows.md, decision 8). node-pty 1.1's
+ * internals, guarded: on another version that lacks them this changes
+ * nothing.
  */
 export function guardConsoleListKill(proc: unknown): void {
   const agent = (proc as { _agent?: ConsoleListAgent } | null)?._agent;
   if (!agent || typeof agent._getConsoleProcessList !== 'function') return;
-  agent._getConsoleProcessList = () => consoleProcessList(agent._innerPid);
+  agent._getConsoleProcessList = () => Promise.resolve([]);
 }
 
 interface ConsoleListAgent {
-  _innerPid: number;
   _getConsoleProcessList(): Promise<number[]>;
 }
 
-/** node-pty's own bound on the helper. */
-const HELPER_MS = 5000;
-
-let helper: string | null | undefined;
-
-function helperScript(): string | null {
-  if (helper === undefined) {
+/**
+ * Calls `onExit` with the root's exit code as soon as node-pty learns of
+ * it, from the thread that waits on the root: node-pty's own exit event
+ * comes only once the console's output has been quiet for a second, which
+ * a process still attached to it may put off indefinitely. Returns
+ * whether it could (node-pty 1.1's internals, guarded).
+ */
+export function onRootExit(proc: unknown, onExit: (exitCode: number) => void): boolean {
+  const agent = (proc as { _agent?: RootExitAgent } | null)?._agent;
+  if (!agent || typeof agent._$onProcessExit !== 'function') return false;
+  const original = agent._$onProcessExit.bind(agent);
+  agent._$onProcessExit = (exitCode: number) => {
     try {
-      const entry = createRequire(import.meta.url).resolve('node-pty');
-      helper = join(dirname(entry), 'conpty_console_list_agent.js');
-    } catch {
-      helper = null;
+      onExit(exitCode);
+    } finally {
+      original(exitCode);
     }
-  }
-  return helper;
+  };
+  return true;
 }
 
-/** The pids attached to `pid`'s console; none when that cannot be read. */
-export function consoleProcessList(pid: number, script = helperScript()): Promise<number[]> {
-  if (script === null || !Number.isSafeInteger(pid) || pid <= 0) return Promise.resolve([]);
-  return new Promise((resolve) => {
-    let child: ChildProcess;
-    try {
-      child = fork(script, [String(pid)], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
-    } catch {
-      resolve([]);
-      return;
-    }
-    let done = false;
-    const finish = (list: number[]) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      resolve(list);
-    };
-    const timer = setTimeout(() => {
-      child.kill();
-      finish([]);
-    }, HELPER_MS);
-    child.on('message', (message: { consoleProcessList?: unknown } | null) => {
-      const list = message?.consoleProcessList;
-      finish(
-        Array.isArray(list)
-          ? list.filter((entry): entry is number => Number.isSafeInteger(entry) && entry > 0)
-          : [],
-      );
-    });
-    // After the IPC channel has closed, so a message it sent has been read.
-    child.on('close', () => finish([]));
-    child.on('error', () => finish([]));
-  });
+interface RootExitAgent {
+  _$onProcessExit(exitCode: number): void;
 }

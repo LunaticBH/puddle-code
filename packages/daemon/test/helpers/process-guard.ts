@@ -3,7 +3,7 @@ import {
   stopWindowsProcessTree,
   type WindowsProcess,
 } from '@puddle/shared/node/platform';
-import { isConptyJobHost } from '../../src/pty/conpty-jobs.js';
+import { isConptyHelper } from '../../src/pty/conpty-jobs.js';
 
 /**
  * Keeps the test suites from leaving processes behind (docs/windows.md,
@@ -73,7 +73,7 @@ export async function runTeardowns(): Promise<void> {
 export interface PtyOwner {
   killAll(stream?: string, signal?: string): void;
   liveCount(): number;
-  /** Windows: the process-table passes that outlasted their PTYs' deadlines. */
+  /** Windows: the teardowns that outlasted their PTYs' deadlines. */
   settled?(ms: number): Promise<void>;
 }
 
@@ -88,7 +88,8 @@ async function drained(ptys: PtyOwner, ms: number): Promise<boolean> {
 
 /**
  * Closes every live PTY as daemon shutdown does, then forces what remains;
- * on Windows each PTY reports its exit only once its whole tree is stopped.
+ * on Windows each PTY reports its exit only once what was attached to its
+ * console is stopped.
  */
 export async function stopPtys(ptys: PtyOwner): Promise<void> {
   if (ptys.liveCount() > 0) {
@@ -111,15 +112,15 @@ export function stopPtysAfterFile(ptys: PtyOwner, before?: () => void): void {
 
 /**
  * Helpers a worker keeps that end with it, not leaks: the process table's
- * PowerShell worker (which also idles out), the ConPTY job host and
- * esbuild's service.
+ * PowerShell worker (which also idles out), the ConPTY helper and esbuild's
+ * service.
  */
 function isWorkerHelper(entry: WindowsProcess): boolean {
   const line = entry.commandLine ?? '';
   return (
     (entry.name.toLowerCase() === 'powershell.exe' &&
       (/-NonInteractive -ExecutionPolicy Bypass -Command -\s*$/i.test(line) ||
-        isConptyJobHost(line))) ||
+        isConptyHelper(line))) ||
     (entry.name.toLowerCase() === 'esbuild.exe' && /\s--service=\S+/.test(line))
   );
 }

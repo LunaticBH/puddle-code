@@ -16,9 +16,12 @@ import { onTeardown } from '../helpers/process-guard.js';
 import {
   marked,
   orphansOf,
+  role,
+  stillRunning,
   stopMarked,
   survivors,
   waitUntil,
+  withRoles,
   writeTreeAgent,
   type TreeAgent,
 } from '../helpers/process-trees.js';
@@ -28,29 +31,30 @@ const built = existsSync(fileURLToPath(new URL('../../dist/daemon.js', import.me
 
 /**
  * A real daemon process (the built code; `pnpm build` first) running an
- * agent whose tree escapes the console, two of its members through
- * intermediates that exited at once (test/helpers/process-trees.ts): its
- * shutdown leaves nothing, and neither does its termination, which ends its
- * ConPTY jobs with it. Without the job host, what the resident supervisor
- * stops before a restart is all that the process table still leads to
- * (docs/windows.md, decisions 6 and 8).
+ * agent whose tree has processes on its console and processes that left it,
+ * some through intermediates that exited at once
+ * (test/helpers/process-trees.ts). Its shutdown, and its termination, end
+ * what is attached to the console and nothing that left it; so does the
+ * resident supervisor's reap after a crash, which, for a console it was
+ * never told the host of, ends instead the console programmes below the
+ * root (docs/windows.md, decisions 6 and 8).
  */
-describe.runIf(process.platform === 'win32' && built)('a Windows daemon’s PTY trees', () => {
+describe.runIf(process.platform === 'win32' && built)('a Windows daemon’s PTY consoles', () => {
   const trees: TreeAgent[] = [];
   afterEach(async () => {
     for (const tree of trees.splice(0)) await stopMarked(tree.marker);
   });
 
-  async function start(options: { jobs?: false } = {}) {
+  async function start(options: { helper?: false } = {}) {
     const home = mkdtempSync(join(tmpdir(), 'puddle-tree-home-'));
-    const tree = writeTreeAgent({ orphans: true });
+    const tree = await writeTreeAgent({ orphans: true });
     trees.push(tree);
     const env: NodeJS.ProcessEnv = { ...process.env, PUDDLE_HOME: home };
     for (const key of Object.keys(env)) {
       if (/^CLAUDE(CODE|_CODE_)/i.test(key)) delete env[key];
     }
     const startedAtMs = Date.now();
-    const args = [entry, ...tree.args, ...(options.jobs === false ? ['--no-jobs'] : [])];
+    const args = [entry, ...tree.args, ...(options.helper === false ? ['--no-helper'] : [])];
     const child: ChildProcess = spawn(process.execPath, args, {
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -75,54 +79,70 @@ describe.runIf(process.platform === 'win32' && built)('a Windows daemon’s PTY 
       30_000,
       'the agent’s tree',
     );
-    expect(await orphansOf(members)).toHaveLength(2);
-    return { home, child, exited, startedAtMs, pid: ready.pid, members };
+    // The orphans, and the GUI programme, whose `cmd /c start` has exited.
+    expect(await orphansOf(members)).toHaveLength(4);
+    return {
+      home,
+      child,
+      exited,
+      startedAtMs,
+      pid: ready.pid,
+      attached: withRoles(members, tree.attached),
+      left: withRoles(members, tree.left),
+    };
   }
 
-  it('a requested shutdown stops every PTY’s tree before the daemon exits', async () => {
+  it('a requested shutdown ends what is attached to every PTY’s console before it exits', async () => {
     const d = await start();
-    expect(readPtyRoots(ptyRootsFile(d.home), d.pid)).toHaveLength(1);
+    await waitUntil(
+      () => readPtyRoots(ptyRootsFile(d.home), d.pid)?.[0]?.host !== undefined,
+      10_000,
+      'the console host recorded',
+    );
     expect(await requestDaemonShutdown(d.home)).toBe('stopping');
     expect(await d.exited).toBe(0);
-    expect(await survivors(d.members)).toEqual([]);
+    expect(await survivors(d.attached)).toEqual([]);
+    expect((await stillRunning(d.left)).map(role).sort()).toEqual(d.left.map(role).sort());
     expect(existsSync(ptyRootsFile(d.home))).toBe(false);
   });
 
-  it('a terminated daemon takes every PTY’s tree with it, orphans included', async () => {
+  it('a terminated daemon’s consoles end what is attached; the supervisor ends nothing that left', async () => {
     const d = await start();
+    await waitUntil(
+      () => readPtyRoots(ptyRootsFile(d.home), d.pid)?.[0]?.host !== undefined,
+      10_000,
+      'the console host recorded',
+    );
     d.child.kill(); // TerminateProcess, as a crash
     await d.exited;
-    // Its job host died with it, and Windows ended every process in its jobs.
-    expect(await survivors(d.members, 3000)).toEqual([]);
-    // The supervisor's reap then finds nothing of the tree, and forgets the roots.
-    await reapWindowsDaemon({ pid: d.pid, startedAtMs: d.startedAtMs }, Date.now(), {
+    const exitedAtMs = Date.now();
+    await reapWindowsDaemon({ pid: d.pid, startedAtMs: d.startedAtMs }, exitedAtMs, {
       processes: listWindowsProcesses,
       rootsFile: ptyRootsFile(d.home),
     });
+    // Windows closed the consoles with the daemon, which ends what is attached.
+    expect(await survivors(d.attached, 6000)).toEqual([]);
+    expect((await stillRunning(d.left)).map(role).sort()).toEqual(d.left.map(role).sort());
     expect(existsSync(ptyRootsFile(d.home))).toBe(false);
   });
 
-  it('without the job host, the supervisor’s reap stops all that the process table leads to', async () => {
-    const d = await start({ jobs: false });
+  it('for a console it was never told the host of, the supervisor ends nothing that left it', async () => {
+    const d = await start({ helper: false });
+    const recorded = readPtyRoots(ptyRootsFile(d.home), d.pid);
+    expect(recorded).toHaveLength(1);
+    expect(recorded![0]!.host).toBeUndefined();
     d.child.kill();
     await d.exited;
     const exitedAtMs = Date.now();
-    // The pseudoconsoles end their roots with the daemon, but not what escaped them.
-    const left = await survivors(d.members, 2000);
-    expect(left.some((p) => p.commandLine?.includes(':detached'))).toBe(true);
-    const stopped = await reapWindowsDaemon(
-      { pid: d.pid, startedAtMs: d.startedAtMs },
-      exitedAtMs,
-      {
-        processes: listWindowsProcesses,
-        rootsFile: ptyRootsFile(d.home),
-      },
-    );
-    expect(stopped).toBeGreaterThanOrEqual(left.length - 2);
-    // Only the orphans remain: their intermediates have exited, so nothing
-    // in the table leads to them; only a job holds them.
-    const after = (await survivors(d.members)).map((p) => p.commandLine?.split(':').pop()?.trim());
-    expect(after.sort()).toEqual(['orphan-detached', 'orphan-start-process']);
+    expect(await survivors(d.attached, 6000)).toEqual([]);
+    await reapWindowsDaemon({ pid: d.pid, startedAtMs: d.startedAtMs }, exitedAtMs, {
+      processes: listWindowsProcesses,
+      rootsFile: ptyRootsFile(d.home),
+    });
+    // Never the detached child, nor anything else that left the console (the
+    // orphans are beyond what the process table leads to anyway).
+    const after = (await stillRunning(d.left)).map(role).sort();
+    expect(after).toEqual(['detached', 'gui', 'orphan-detached', 'orphan-start-process']);
     expect(existsSync(ptyRootsFile(d.home))).toBe(false);
   });
 });

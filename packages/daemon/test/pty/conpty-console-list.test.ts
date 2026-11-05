@@ -1,56 +1,51 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { consoleProcessList, guardConsoleListKill } from '../../src/pty/conpty-console-list.js';
+import { guardConsoleListKill, onRootExit } from '../../src/pty/conpty-console-list.js';
 
-/**
- * node-pty's ConPTY kill() ends the processes its helper lists; when the
- * helper fails, node-pty would end the root's pid 5 s later whatever holds
- * it by then. Stand-in helpers, so this runs on any OS.
- */
-describe('consoleProcessList', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'puddle-console-list-'));
-  const helper = (name: string, body: string) => {
-    const file = join(dir, `${name}.cjs`);
-    writeFileSync(file, body);
-    return file;
-  };
-
-  it('answers with the helper’s list', async () => {
-    const file = helper(
-      'lists',
-      'process.send({ consoleProcessList: [Number(process.argv[2]), 77, -1, "x"] }); process.exit(0);',
-    );
-    expect(await consoleProcessList(42, file)).toEqual([42, 77]);
-  });
-
-  it('answers with nothing, at once, when the helper cannot attach', async () => {
-    const file = helper('fails', "throw new Error('AttachConsole failed');");
-    const started = Date.now();
-    expect(await consoleProcessList(42, file)).toEqual([]);
-    expect(Date.now() - started).toBeLessThan(4000);
-  });
-
-  it('answers with nothing for no helper or no pid', async () => {
-    expect(await consoleProcessList(42, null)).toEqual([]);
-    expect(await consoleProcessList(0, helper('unused', ''))).toEqual([]);
-  });
-});
+/** node-pty 1.1's Windows internals that PtyManager leans on, against stand-ins. */
 
 describe('guardConsoleListKill', () => {
-  it('replaces node-pty’s listing on a ConPTY, and leaves anything else alone', async () => {
+  it('makes node-pty’s kill list nothing to end by pid, and leaves anything else alone', async () => {
     const agent = {
-      _innerPid: 0,
-      _getConsoleProcessList: () => Promise.resolve([12345]),
+      _innerPid: 4321,
+      _getConsoleProcessList: () => Promise.resolve([4321, 12345]),
     };
     guardConsoleListKill({ _agent: agent });
-    // No pid to list: nothing is ended, rather than the root's pid.
+    // The close alone ends what is attached; PtyManager ends what outstays it.
     expect(await agent._getConsoleProcessList()).toEqual([]);
     expect(() => guardConsoleListKill({})).not.toThrow();
     expect(() => guardConsoleListKill(null)).not.toThrow();
     const other = { _agent: { _getConsoleProcessList: 'not a function' } };
     guardConsoleListKill(other);
     expect(other._agent._getConsoleProcessList).toBe('not a function');
+  });
+});
+
+describe('onRootExit', () => {
+  it('reports the root’s exit from node-pty’s own callback, which still runs', () => {
+    const calls: string[] = [];
+    const agent = {
+      _$onProcessExit(code: number) {
+        calls.push(`node-pty ${code}`);
+      },
+    };
+    expect(onRootExit({ _agent: agent }, (code) => calls.push(`ours ${code}`))).toBe(true);
+    agent._$onProcessExit(3);
+    expect(calls).toEqual(['ours 3', 'node-pty 3']);
+  });
+
+  it('keeps node-pty’s callback running when ours throws', () => {
+    const calls: number[] = [];
+    const agent = { _$onProcessExit: (code: number) => void calls.push(code) };
+    onRootExit({ _agent: agent }, () => {
+      throw new Error('ours');
+    });
+    expect(() => agent._$onProcessExit(1)).toThrow('ours');
+    expect(calls).toEqual([1]);
+  });
+
+  it('says so on a node-pty without that callback', () => {
+    expect(onRootExit({}, () => {})).toBe(false);
+    expect(onRootExit(null, () => {})).toBe(false);
+    expect(onRootExit({ _agent: { _$onProcessExit: 1 } }, () => {})).toBe(false);
   });
 });

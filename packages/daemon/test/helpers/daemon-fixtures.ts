@@ -28,6 +28,7 @@ import { KeyedMutex } from '../../src/git/mutex.js';
 import { LogStore } from '../../src/logs/log-store.js';
 import { ensureHome, resolvePaths } from '../../src/paths.js';
 import { PortScanner } from '../../src/ports/scanner.js';
+import type { ConptyJobs } from '../../src/pty/conpty-jobs.js';
 import { PtyManager } from '../../src/pty/pty-manager.js';
 import { installShellHooks, type ShellHooks } from '../../src/pty/shell-hooks.js';
 import { ConversationShare } from '../../src/sessions/conversation-share.js';
@@ -255,6 +256,8 @@ export function fixture(
      * 'fake' agent (which has none) exercises the PTY-log fallback.
      */
     secondAgent?: boolean;
+    /** Windows: the ConPTY helper (src/pty/conpty-jobs.ts); the shared one by default. */
+    conptyJobs?: ConptyJobs | null;
   } = {},
 ): Fixture {
   const paths = resolvePaths(mkdtempSync(join(tmpdir(), 'puddle-home-')));
@@ -273,7 +276,7 @@ export function fixture(
     layouts: new LayoutStore(db),
   };
   const logs = new LogStore(paths.logsDir, 256 * 1024);
-  const ptys = new PtyManager(logs);
+  const ptys = new PtyManager(logs, undefined, undefined, undefined, { jobs: opts.conptyJobs });
   const scanner = new PortScanner({ ptys });
   const worktrees = new WorktreeManager({
     paths,

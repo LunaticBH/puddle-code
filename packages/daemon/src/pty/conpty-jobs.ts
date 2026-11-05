@@ -4,54 +4,133 @@ import { createInterface } from 'node:readline';
 import { system32Path } from '@puddle/shared/node/platform';
 
 /**
- * A kill-on-close job object per ConPTY (docs/windows.md, decision 8).
+ * The ConPTY helper (docs/windows.md, decision 8): what tells the daemon
+ * which processes are attached to each PTY's console, so that a PTY's end
+ * ends exactly those, as a hang-up ends a POSIX terminal's session.
  *
- * A Windows process stays in its job whatever happens to its parent, so a
- * job holds what the process table cannot follow: a server started through
- * `cmd /c start`, PowerShell's `Start-Process` or a short-lived detaching
- * process, whose parent has exited. Each PTY root is put in a job of its own
- * just after `pty.spawn`, and everything it starts from then on joins it.
- * Ending the job ends all of them at once; and the jobs are kill-on-close, so
- * when the daemon dies, however it dies, its job host dies with it (Node
- * ends its non-detached children with it) and Windows ends every process
- * still in any of the jobs.
+ * Windows records, for every process, the console host it is attached to
+ * (NtQueryInformationProcess, ProcessConsoleHostProcess; cleared when it
+ * frees its console), and a console lists its own processes
+ * (GetConsoleProcessList, from a process attached to it for a moment). A
+ * PTY's console host is the headless `conhost.exe` its root runs in: the
+ * root names it. A process that left the console (a GUI programme and all
+ * it starts, a detached process, one started in a console of its own such
+ * as PowerShell's `Start-Process`) is not attached to it and is never
+ * named here, as `nohup`, `setsid` and GUI launches survive a hang-up.
  *
- * Node has no job object API, so the jobs live in one hidden Windows
- * PowerShell 5.1 process per daemon, running a small C# class (`Add-Type`,
- * compiled by the .NET Framework that ships with Windows) that answers
- * requests on stdin. It starts in about half a second; an assignment takes a
- * few milliseconds. What a root starts before its assignment, or with
- * CREATE_BREAKAWAY_FROM_JOB (which the jobs allow, so that no programme
- * asking for it fails), is outside the job: the process table's tree still
- * covers it (conpty-teardown.ts). A job never outlives the host's handle,
- * so the host is never restarted while it holds one, and never stopped by a
- * request that is slow to answer.
+ * The helper holds every process it names open (a SYNCHRONIZE handle), the
+ * root and the console host from just after `pty.spawn` and each member
+ * from when it was listed, so that a pid it names can never be another
+ * process's by the time the daemon acts on it: it ends only processes it
+ * holds. It runs no job objects: what it names is the console's, however a
+ * process got there, and nothing it holds ends with it.
+ *
+ * Node has no API for any of this, so the helper is one hidden Windows
+ * PowerShell 5.1 process per daemon (and one per supervisor) running a small
+ * C# class (`Add-Type`, compiled by the .NET Framework that ships with
+ * Windows; its source travels in an environment variable) that answers
+ * requests on stdin, where numbers are all that cross. It starts in about
+ * half a second; a request takes a few milliseconds. Where
+ * it cannot run (Constrained Language Mode refuses `Add-Type`), the daemon
+ * falls back on what node-pty itself can do (pty-manager.ts). Kept under
+ * its first name, the job host's: `ConptyJobs` is what the daemon passes.
  */
 
-export interface ConptyJob {
+/** A process attached to a PTY's console, held open by the helper. */
+export interface ConsoleMember {
+  pid: number;
+  /** Its creation time, Unix ms, as Windows records it. */
+  createdAtMs: number;
+  /** Its key for `terminate`. */
+  key: string;
+  /** Its image is a GUI programme (PE subsystem 2): never ended. */
+  gui: boolean;
+  /** The console host it is attached to now: 0 for none, -1 when Windows will not say. */
+  consoleHost: number;
+  /** The console's own process list named it (only when the scan attached to it). */
+  listed: boolean;
+}
+
+export interface ConsoleScan {
+  rootAlive: boolean;
+  hostAlive: boolean;
+  /** Every process attached to the console, the root included while it runs. */
+  members: ConsoleMember[];
+}
+
+/** One PTY as the helper holds it; every method never rejects. */
+export interface ConptyConsole {
+  /** The root's creation time; null when it had already exited, or its pid named another process. */
+  readonly rootCreatedAtMs: number | null;
+  /** The PTY's headless console host, held open; null when it could not be told apart. */
+  readonly host: { pid: number; createdAtMs: number } | null;
+  /** Whether the root and the console host still run; null when the helper did not answer. */
+  alive(): Promise<{ root: boolean; host: boolean } | null>;
   /**
-   * Ends every process still in the job at once and waits, up to a second,
-   * until they have exited; resolves with how many were running, 0 when the
-   * job was already ended. Never rejects.
+   * What is attached to the console now, each process held open from now on.
+   * With `attach`, the helper also reads the console's own list, attaching
+   * to it for a moment: never while the console is being closed, whose
+   * close would end the helper with its members. Null when it did not answer.
    */
-  end(): Promise<number>;
+  scan(options: { attach: boolean }): Promise<ConsoleScan | null>;
+  /** Ends held processes: members by key, `root`, `host` (never a GUI member). Resolves with how many. */
+  terminate(keys: readonly string[]): Promise<number>;
+  /** Lets go of every process held for this PTY (once its teardown is over). */
+  release(): void;
 }
 
 export interface ConptyJobs {
   /**
-   * Puts process `pid` in a new kill-on-close job, provided it was created
-   * between `fromMs` and `toMs` (Unix ms): a process created at any other
-   * time holds a pid the PTY's root has given up. Resolves null when it
-   * could not: the process has exited, the host is not available, or it did
-   * not answer in time. Never rejects.
+   * Holds the root `pid`, provided it was created between `fromMs` and
+   * `toMs` (Unix ms; a process created at any other time holds a pid the
+   * root has given up), and its console host: the one the root runs in,
+   * or, should the root have exited already, the headless host created
+   * nearest `startedAtMs` (when `pty.spawn` began) that no other PTY holds.
+   * Resolves null when the helper is not available or did not answer in
+   * time.
    */
-  assign(pid: number, createdWithin: { fromMs: number; toMs: number }): Promise<ConptyJob | null>;
-  /** Resolves once the host can take assignments, or cannot start; never rejects. */
+  track(
+    pid: number,
+    createdWithin: { fromMs: number; toMs: number; startedAtMs?: number },
+  ): Promise<ConptyConsole | null>;
+  /** Resolves once the helper can take requests, or cannot start; never rejects. */
   ready(): Promise<boolean>;
 }
 
+/** A process the supervisor asked about (ConsoleInspector.classify). */
+export interface ClassifiedProcess {
+  pid: number;
+  createdAtMs: number;
+  key: string;
+  gui: boolean;
+  /** The console host it is attached to: 0 for none (a detached process), -1 unknown. */
+  consoleHost: number;
+}
+
+/** What the resident supervisor asks of a helper of its own (supervision/reap-daemon.ts). */
+export interface ConsoleInspector {
+  ready(): Promise<boolean>;
+  /**
+   * Holds the console host a crashed daemon `parentPid` recorded, if it
+   * still is that process (`createdAtMs`, a headless conhost.exe child of
+   * that daemon); null when it has exited, or on no answer.
+   */
+  adopt(host: {
+    pid: number;
+    createdAtMs: number;
+    parentPid: number;
+  }): Promise<ConptyConsole | null>;
+  /**
+   * Holds each process still running as created then and says what it is,
+   * for `terminate` on the returned console; null on no answer.
+   */
+  classify(
+    processes: readonly { pid: number; createdAtMs: number }[],
+  ): Promise<{ console: ConptyConsole; processes: ClassifiedProcess[] } | null>;
+}
+
 /** The C# side: one request per stdin line, `<seq> <verb> <args...>`, one reply line each. */
-const JOBS_SOURCE = String.raw`
+const HELPER_SOURCE = String.raw`
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -59,257 +138,831 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 
-public static class PuddleConptyJobs
+public static class PuddleConsoles
 {
-    [StructLayout(LayoutKind.Sequential)]
-    struct BasicLimits
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct Entry
     {
-        public long PerProcessUserTimeLimit, PerJobUserTimeLimit;
-        public uint LimitFlags;
-        public UIntPtr MinimumWorkingSetSize, MaximumWorkingSetSize;
-        public uint ActiveProcessLimit;
-        public UIntPtr Affinity;
-        public uint PriorityClass, SchedulingClass;
+        public uint Size, Usage, Pid;
+        public IntPtr Heap;
+        public uint Module, Threads, Parent;
+        public int Priority;
+        public uint Flags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string Exe;
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    struct IoCounters
+    struct UnicodeString
     {
-        public ulong ReadOperations, WriteOperations, OtherOperations, ReadBytes, WriteBytes, OtherBytes;
+        public ushort Length, MaximumLength;
+        public IntPtr Buffer;
     }
 
-    [StructLayout(LayoutKind.Sequential)]
-    struct ExtendedLimits
-    {
-        public BasicLimits Basic;
-        public IoCounters Io;
-        public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
-    }
+    delegate bool CtrlHandler(int type);
 
-    [StructLayout(LayoutKind.Sequential)]
-    struct Accounting
-    {
-        public long TotalUserTime, TotalKernelTime, PeriodUserTime, PeriodKernelTime;
-        public uint PageFaults, TotalProcesses, ActiveProcesses, TerminatedProcesses;
-    }
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    static extern IntPtr CreateJobObjectW(IntPtr attributes, IntPtr name);
-    [DllImport("kernel32.dll", SetLastError = true)]
-    static extern bool SetInformationJobObject(IntPtr job, int infoClass, ref ExtendedLimits info, int length);
-    [DllImport("kernel32.dll", SetLastError = true)]
-    static extern bool QueryInformationJobObject(IntPtr job, int infoClass, out Accounting info, int length, IntPtr returned);
-    [DllImport("kernel32.dll", SetLastError = true)]
-    static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
-    [DllImport("kernel32.dll", SetLastError = true)]
-    static extern bool TerminateJobObject(IntPtr job, uint exitCode);
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
     [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool GetProcessTimes(IntPtr process, out long created, out long exited, out long kernel, out long user);
     [DllImport("kernel32.dll", SetLastError = true)]
-    static extern bool CloseHandle(IntPtr handle);
+    static extern uint WaitForSingleObject(IntPtr handle, uint ms);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool TerminateProcess(IntPtr process, uint code);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool QueryFullProcessImageNameW(IntPtr process, int flags, StringBuilder name, ref int size);
+    [DllImport("ntdll.dll")]
+    static extern int NtQueryInformationProcess(IntPtr process, int infoClass, out IntPtr info, int length, IntPtr returned);
+    [DllImport("ntdll.dll")]
+    static extern int NtQueryInformationProcess(IntPtr process, int infoClass, IntPtr info, int length, out int returned);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool FreeConsole();
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool AttachConsole(int pid);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern int GetConsoleProcessList(int[] list, int count);
+    [DllImport("kernel32.dll")]
+    static extern IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll")]
+    static extern bool SetConsoleCtrlHandler(CtrlHandler handler, bool add);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr CreateToolhelp32Snapshot(uint flags, int pid);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool Process32FirstW(IntPtr snapshot, ref Entry entry);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool Process32NextW(IntPtr snapshot, ref Entry entry);
 
-    const uint TERMINATE = 0x0001, SET_QUOTA = 0x0100, QUERY_LIMITED = 0x1000;
-    const uint BREAKAWAY_OK = 0x0800, KILL_ON_JOB_CLOSE = 0x2000;
+    const uint TERMINATE = 0x0001, QUERY_LIMITED = 0x1000, SYNCHRONIZE = 0x00100000;
+    const uint WAIT_TIMEOUT = 0x102;
     const long UNIX_EPOCH = 116444736000000000L;
+    const int CONSOLE_HOST = 49, COMMAND_LINE = 60;
 
-    static readonly Dictionary<string, IntPtr> jobs = new Dictionary<string, IntPtr>();
+    // A process held open: its pid cannot name another process while it is.
+    class Pin
+    {
+        public int Pid;
+        public long Created;
+        public IntPtr Handle;
+        public string Key { get { return Pid + "@" + Created; } }
+    }
+
+    class Pty
+    {
+        public long From, To;
+        public Pin Root, Host;
+        public readonly Dictionary<string, Pin> Members = new Dictionary<string, Pin>();
+    }
+
+    static readonly Dictionary<string, Pty> ptys = new Dictionary<string, Pty>();
+    static readonly Dictionary<string, int> subsystems = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+    static readonly object attaching = new object();
+    static readonly object attributing = new object();
+    static readonly object writing = new object();
+    static readonly int self = System.Diagnostics.Process.GetCurrentProcess().Id;
+    static CtrlHandler ignore;
+    static StreamWriter output;
 
     public static void Serve()
     {
+        // Attached to a PTY's console for a moment, this process must not
+        // stop for a Ctrl+C or Ctrl+Break typed there.
+        ignore = delegate(int type) { return type == 0 || type == 1; };
+        SetConsoleCtrlHandler(ignore, true);
+        FreeConsole();
         var input = new StreamReader(Console.OpenStandardInput(), new UTF8Encoding(false));
-        var output = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false));
+        output = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false));
         output.NewLine = "\n";
         output.AutoFlush = true;
-        output.WriteLine("ready");
+        Write("ready");
         string line;
-        // End of input: the daemon has gone. Returning closes every job,
-        // which ends whatever is still in them.
+        // End of input: the daemon has gone, and every handle closes with this process.
         while ((line = input.ReadLine()) != null)
         {
-            var f = line.Split(' ');
-            string reply;
-            try { reply = Handle(f); }
-            catch (Exception error) { reply = "error " + error.GetType().Name; }
-            output.WriteLine(f[0] + " " + reply);
+            string request = line;
+            ThreadPool.QueueUserWorkItem(delegate(object state)
+            {
+                var f = request.Split(' ');
+                string reply;
+                try { reply = Handle(f); }
+                catch (Exception error) { reply = "error " + error.GetType().Name; }
+                Write(f[0] + " " + reply);
+            });
         }
+    }
+
+    static void Write(string line)
+    {
+        lock (writing) output.WriteLine(line);
     }
 
     static string Handle(string[] f)
     {
-        if (f.Length == 5 && f[1] == "assign") return Assign(f[0], int.Parse(f[2]), long.Parse(f[3]), long.Parse(f[4]));
-        if (f.Length == 3 && f[1] == "end") return End(f[2]);
+        if (f.Length == 8 && f[1] == "track") return Track(f[2], int.Parse(f[3]), long.Parse(f[4]), long.Parse(f[5]), int.Parse(f[6]), long.Parse(f[7]));
+        if (f.Length == 3 && f[1] == "alive") return Alive(f[2]);
+        if (f.Length == 4 && f[1] == "scan") return Scan(f[2], f[3] == "1");
+        if (f.Length >= 3 && f[1] == "terminate") return Terminate(f[2], f, 3);
+        if (f.Length == 3 && f[1] == "release") return Release(f[2]);
+        if (f.Length == 6 && f[1] == "adopt") return Adopt(f[2], int.Parse(f[3]), long.Parse(f[4]), int.Parse(f[5]));
+        if (f.Length >= 3 && f[1] == "classify") return Classify(f[2], f, 3);
         return "error usage";
     }
 
-    static string Assign(string id, int pid, long fromMs, long toMs)
+    static long CreatedMs(IntPtr handle)
     {
-        IntPtr process = OpenProcess(SET_QUOTA | TERMINATE | QUERY_LIMITED, false, pid);
-        if (process == IntPtr.Zero) return "gone " + Marshal.GetLastWin32Error();
+        long created, exited, kernel, user;
+        if (!GetProcessTimes(handle, out created, out exited, out kernel, out user)) return -1;
+        return (created - UNIX_EPOCH) / 10000;
+    }
+
+    static bool Running(IntPtr handle)
+    {
+        return handle != IntPtr.Zero && WaitForSingleObject(handle, 0) == WAIT_TIMEOUT;
+    }
+
+    static Pin Open(int pid)
+    {
+        if (pid <= 4 || pid == self) return null;
+        IntPtr handle = OpenProcess(SYNCHRONIZE | QUERY_LIMITED | TERMINATE, false, pid);
+        if (handle == IntPtr.Zero) return null;
+        long created = CreatedMs(handle);
+        if (created < 0 || !Running(handle))
+        {
+            CloseHandle(handle);
+            return null;
+        }
+        var pin = new Pin();
+        pin.Pid = pid;
+        pin.Created = created;
+        pin.Handle = handle;
+        return pin;
+    }
+
+    static void Close(Pin pin)
+    {
+        if (pin != null && pin.Handle != IntPtr.Zero)
+        {
+            CloseHandle(pin.Handle);
+            pin.Handle = IntPtr.Zero;
+        }
+    }
+
+    // The console host the process is attached to now: its pid, 0 for none, -1 when Windows will not say.
+    static long ConsoleHost(IntPtr handle)
+    {
+        IntPtr value;
+        if (NtQueryInformationProcess(handle, CONSOLE_HOST, out value, IntPtr.Size, IntPtr.Zero) != 0) return -1;
+        long raw = value.ToInt64();
+        return (raw & 3) == 1 ? raw & ~3L : 0;
+    }
+
+    static string ImagePath(IntPtr handle)
+    {
+        var name = new StringBuilder(1024);
+        int size = name.Capacity;
+        return QueryFullProcessImageNameW(handle, 0, name, ref size) ? name.ToString() : null;
+    }
+
+    static string CommandLine(IntPtr handle)
+    {
+        int length;
+        NtQueryInformationProcess(handle, COMMAND_LINE, IntPtr.Zero, 0, out length);
+        if (length <= 0 || length > 1 << 20) return null;
+        IntPtr buffer = Marshal.AllocHGlobal(length);
         try
         {
-            long created, exited, kernel, user;
-            if (!GetProcessTimes(process, out created, out exited, out kernel, out user)) return "gone " + Marshal.GetLastWin32Error();
-            if (exited != 0) return "gone 0";
-            long createdMs = (created - UNIX_EPOCH) / 10000;
-            if (createdMs < fromMs || createdMs > toMs) return "other " + createdMs;
-            IntPtr job = CreateJobObjectW(IntPtr.Zero, IntPtr.Zero);
-            if (job == IntPtr.Zero) return "refused " + Marshal.GetLastWin32Error();
-            var limits = new ExtendedLimits();
-            limits.Basic.LimitFlags = KILL_ON_JOB_CLOSE | BREAKAWAY_OK;
-            if (!SetInformationJobObject(job, 9, ref limits, Marshal.SizeOf(typeof(ExtendedLimits))) ||
-                !AssignProcessToJobObject(job, process))
-            {
-                int code = Marshal.GetLastWin32Error();
-                CloseHandle(job);
-                return "refused " + code;
-            }
-            jobs[id] = job;
-            return "ok " + createdMs;
+            if (NtQueryInformationProcess(handle, COMMAND_LINE, buffer, length, out length) != 0) return null;
+            var text = (UnicodeString)Marshal.PtrToStructure(buffer, typeof(UnicodeString));
+            return text.Buffer == IntPtr.Zero ? "" : Marshal.PtrToStringUni(text.Buffer, text.Length / 2);
         }
-        finally { CloseHandle(process); }
+        finally { Marshal.FreeHGlobal(buffer); }
     }
 
-    static uint Active(IntPtr job)
+    // The image's subsystem from its PE header: 2 for a GUI programme, 3 for a console one, 0 unknown.
+    static int Subsystem(IntPtr handle)
     {
-        Accounting info;
-        return QueryInformationJobObject(job, 1, out info, Marshal.SizeOf(typeof(Accounting)), IntPtr.Zero) ? info.ActiveProcesses : 0;
+        string path = ImagePath(handle);
+        if (path == null) return 0;
+        lock (subsystems)
+        {
+            int known;
+            if (subsystems.TryGetValue(path, out known)) return known;
+        }
+        int subsystem = 0;
+        try
+        {
+            using (var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            {
+                var reader = new BinaryReader(file);
+                file.Seek(0x3C, SeekOrigin.Begin);
+                int header = reader.ReadInt32();
+                file.Seek(header, SeekOrigin.Begin);
+                if (reader.ReadUInt32() == 0x00004550)
+                {
+                    file.Seek(header + 4 + 20 + 68, SeekOrigin.Begin);
+                    subsystem = reader.ReadUInt16();
+                }
+            }
+        }
+        catch (Exception) { return 0; }
+        lock (subsystems) subsystems[path] = subsystem;
+        return subsystem;
     }
 
-    static string End(string id)
+    static Dictionary<int, Entry> Table()
     {
-        IntPtr job;
-        if (!jobs.TryGetValue(id, out job)) return "ok 0";
-        uint active = Active(job);
-        TerminateJobObject(job, 1);
-        for (int waited = 0; waited < 1000 && Active(job) > 0; waited += 10) Thread.Sleep(10);
-        jobs.Remove(id);
-        CloseHandle(job);
-        return "ok " + active;
+        var table = new Dictionary<int, Entry>();
+        IntPtr snapshot = CreateToolhelp32Snapshot(2, 0);
+        if (snapshot == new IntPtr(-1)) return table;
+        try
+        {
+            var entry = new Entry();
+            entry.Size = (uint)Marshal.SizeOf(typeof(Entry));
+            if (Process32FirstW(snapshot, ref entry))
+            {
+                do { table[(int)entry.Pid] = entry; } while (Process32NextW(snapshot, ref entry));
+            }
+        }
+        finally { CloseHandle(snapshot); }
+        return table;
+    }
+
+    static bool Assigned(Pin host, Pty except)
+    {
+        lock (ptys)
+        {
+            foreach (var other in ptys.Values)
+            {
+                if (other != except && other.Host != null && other.Host.Handle != IntPtr.Zero && other.Host.Key == host.Key) return true;
+            }
+        }
+        return false;
+    }
+
+    // A headless console host that process 'parent' created between pty.From and pty.To, held by no other PTY.
+    static Pin OpenHost(int pid, Pty pty, int parent, Dictionary<int, Entry> table)
+    {
+        Entry entry;
+        if (!table.TryGetValue(pid, out entry) || entry.Parent != parent) return null;
+        if (!string.Equals(entry.Exe, "conhost.exe", StringComparison.OrdinalIgnoreCase)) return null;
+        Pin pin = Open(pid);
+        if (pin == null) return null;
+        string line = CommandLine(pin.Handle);
+        if (pin.Created < pty.From || pin.Created > pty.To || line == null ||
+            line.IndexOf("--headless", StringComparison.OrdinalIgnoreCase) < 0 || Assigned(pin, pty))
+        {
+            Close(pin);
+            return null;
+        }
+        return pin;
+    }
+
+    static void Put(string id, Pty pty)
+    {
+        Pty old;
+        lock (ptys)
+        {
+            if (!ptys.TryGetValue(id, out old)) old = null;
+            ptys[id] = pty;
+        }
+        if (old != null) Drop(old);
+    }
+
+    static Pty Find(string id)
+    {
+        lock (ptys)
+        {
+            Pty pty;
+            return ptys.TryGetValue(id, out pty) ? pty : null;
+        }
+    }
+
+    // A host a fallback picks must be this much nearer the PTY's start than any other.
+    const long NEAREST_MARGIN_MS = 10;
+
+    static string Track(string id, int pid, long fromMs, long toMs, int parent, long startedMs)
+    {
+        var pty = new Pty();
+        pty.From = fromMs;
+        pty.To = toMs;
+        string state = "gone";
+        Pin root = Open(pid);
+        if (root != null && (root.Created < fromMs || root.Created > toMs))
+        {
+            state = "other";
+            Close(root);
+            root = null;
+        }
+        if (root != null) state = "ok";
+        pty.Root = root;
+        // The console the root runs in names its host: wait for the root to
+        // attach to it (as it initialises), unless it exits first.
+        long named = 0;
+        if (root != null)
+        {
+            for (int waited = 0; waited <= 2000; waited += 5)
+            {
+                long host = ConsoleHost(root.Handle);
+                if (host > 0) named = host;
+                if (host != 0 || !Running(root.Handle)) break;
+                Thread.Sleep(5);
+            }
+        }
+        // One attribution at a time, so that none takes a host another has just taken.
+        lock (attributing)
+        {
+            var table = Table();
+            if (named > 0) pty.Host = OpenHost((int)named, pty, parent, table);
+            // Without it, the headless host that no other PTY holds created
+            // nearest the PTY's start: node-pty creates it first thing in
+            // pty.spawn, and two spawns never overlap.
+            if (pty.Host == null)
+            {
+                Pin best = null;
+                long nearest = long.MaxValue, next = long.MaxValue;
+                foreach (var entry in table.Values)
+                {
+                    if (entry.Parent != parent) continue;
+                    Pin candidate = OpenHost((int)entry.Pid, pty, parent, table);
+                    if (candidate == null) continue;
+                    long distance = Math.Abs(candidate.Created - startedMs);
+                    if (distance < nearest)
+                    {
+                        next = nearest;
+                        nearest = distance;
+                        Close(best);
+                        best = candidate;
+                    }
+                    else
+                    {
+                        next = Math.Min(next, distance);
+                        Close(candidate);
+                    }
+                }
+                if (best != null && next - nearest >= NEAREST_MARGIN_MS) pty.Host = best;
+                else Close(best);
+            }
+            Put(id, pty);
+        }
+        return state + " " + (root != null ? root.Created : 0) + " " +
+            (pty.Host != null ? pty.Host.Pid : 0) + " " + (pty.Host != null ? pty.Host.Created : 0);
+    }
+
+    static string Alive(string id)
+    {
+        Pty pty = Find(id);
+        if (pty == null) return "ok 0 0";
+        return "ok " + (pty.Root != null && Running(pty.Root.Handle) ? 1 : 0) + " " +
+            (pty.Host != null && Running(pty.Host.Handle) ? 1 : 0);
+    }
+
+    static void Keep(Pty pty, Pin pin)
+    {
+        lock (pty)
+        {
+            Pin known;
+            if (pty.Members.TryGetValue(pin.Key, out known) && known.Handle != IntPtr.Zero) Close(pin);
+            else pty.Members[pin.Key] = pin;
+        }
+    }
+
+    // What is attached to the PTY's console now, each process held open: by
+    // each process's console host, by the console's own list (when 'attach',
+    // through the root, else a member), and what an earlier scan held that
+    // still runs.
+    static string Scan(string id, bool attach)
+    {
+        Pty pty = Find(id);
+        if (pty == null) return "none";
+        bool rootAlive = pty.Root != null && Running(pty.Root.Handle);
+        bool hostAlive = pty.Host != null && Running(pty.Host.Handle);
+        long host = hostAlive ? pty.Host.Pid : 0;
+        var listed = new HashSet<string>();
+        if (hostAlive)
+        {
+            foreach (var entry in Table().Values)
+            {
+                Pin pin = Open((int)entry.Pid);
+                if (pin == null) continue;
+                if (ConsoleHost(pin.Handle) == host) Keep(pty, pin);
+                else Close(pin);
+            }
+        }
+        if (attach && (rootAlive || hostAlive))
+        {
+            int through = rootAlive ? pty.Root.Pid : 0;
+            if (through == 0)
+            {
+                lock (pty)
+                {
+                    foreach (var member in pty.Members.Values)
+                    {
+                        if (Running(member.Handle) && ConsoleHost(member.Handle) == host)
+                        {
+                            through = member.Pid;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (through != 0) Listed(pty, through, host, listed);
+        }
+        var reply = new StringBuilder("ok " + (rootAlive ? 1 : 0) + " " + (hostAlive ? 1 : 0));
+        var members = new List<Pin>();
+        lock (pty) members.AddRange(pty.Members.Values);
+        foreach (var member in members)
+        {
+            if (!Running(member.Handle)) continue;
+            reply.Append(' ').Append(member.Pid).Append(':').Append(member.Created).Append(':')
+                .Append(Subsystem(member.Handle)).Append(':').Append(ConsoleHost(member.Handle)).Append(':')
+                .Append(listed.Contains(member.Key) ? 1 : 0);
+        }
+        return reply.ToString();
+    }
+
+    // The console's own list, through 'through', which must be attached to
+    // 'host' (0: not known): each pid listed again once held open is the
+    // process listed the first time.
+    static void Listed(Pty pty, int through, long host, HashSet<string> listed)
+    {
+        var opened = new List<Pin>();
+        lock (attaching)
+        {
+            if (!AttachConsole(through)) return;
+            try
+            {
+                if (host != 0 && ConsoleHost(GetCurrentProcess()) != host) return;
+                foreach (int pid in List())
+                {
+                    Pin pin = Open(pid);
+                    if (pin != null) opened.Add(pin);
+                }
+                var again = new HashSet<int>(List());
+                foreach (var pin in opened)
+                {
+                    if (again.Contains(pin.Pid) && (host == 0 || ConsoleHost(pin.Handle) == host)) listed.Add(pin.Key);
+                }
+            }
+            finally { FreeConsole(); }
+        }
+        foreach (var pin in opened)
+        {
+            if (listed.Contains(pin.Key)) Keep(pty, pin);
+            else Close(pin);
+        }
+    }
+
+    static int[] List()
+    {
+        var list = new int[64];
+        int count = GetConsoleProcessList(list, list.Length);
+        if (count > list.Length)
+        {
+            list = new int[count + 16];
+            count = GetConsoleProcessList(list, list.Length);
+        }
+        if (count < 0 || count > list.Length) count = 0;
+        var result = new int[count];
+        Array.Copy(list, result, count);
+        return result;
+    }
+
+    // Ends the held processes named: 'root', 'host', or a member's key (never a GUI programme).
+    static string Terminate(string id, string[] f, int from)
+    {
+        Pty pty = Find(id);
+        if (pty == null) return "ok 0";
+        var ended = new List<IntPtr>();
+        for (int i = from; i < f.Length; i++)
+        {
+            Pin pin = null;
+            bool member = false;
+            if (f[i] == "root") pin = pty.Root;
+            else if (f[i] == "host") pin = pty.Host;
+            else
+            {
+                member = true;
+                lock (pty) pty.Members.TryGetValue(f[i], out pin);
+            }
+            if (pin == null || !Running(pin.Handle)) continue;
+            if (member && Subsystem(pin.Handle) == 2) continue;
+            if (TerminateProcess(pin.Handle, 1)) ended.Add(pin.Handle);
+        }
+        // TerminateProcess returns before the process has gone: wait a little.
+        int deadline = Environment.TickCount + 500;
+        foreach (var handle in ended)
+        {
+            int left = deadline - Environment.TickCount;
+            if (left > 0) WaitForSingleObject(handle, (uint)left);
+        }
+        return "ok " + ended.Count;
+    }
+
+    static void Drop(Pty pty)
+    {
+        Close(pty.Root);
+        Close(pty.Host);
+        lock (pty)
+        {
+            foreach (var member in pty.Members.Values) Close(member);
+            pty.Members.Clear();
+        }
+    }
+
+    static string Release(string id)
+    {
+        Pty pty;
+        lock (ptys)
+        {
+            if (!ptys.TryGetValue(id, out pty)) return "ok";
+            ptys.Remove(id);
+        }
+        Drop(pty);
+        return "ok";
+    }
+
+    // A console host a crashed daemon recorded, held while it is still that process.
+    static string Adopt(string id, int pid, long createdMs, int parent)
+    {
+        var pty = new Pty();
+        pty.From = createdMs - 1;
+        pty.To = createdMs + 1;
+        pty.Host = OpenHost(pid, pty, parent, Table());
+        Put(id, pty);
+        return pty.Host != null ? "ok " + pty.Host.Created : "gone";
+    }
+
+    // Holds each pid@created still running as created then, and says what it is.
+    static string Classify(string id, string[] f, int from)
+    {
+        var pty = new Pty();
+        var reply = new StringBuilder("ok");
+        for (int i = from; i < f.Length; i++)
+        {
+            var parts = f[i].Split('@');
+            if (parts.Length != 2) continue;
+            Pin pin = Open(int.Parse(parts[0]));
+            if (pin == null) continue;
+            if (Math.Abs(pin.Created - long.Parse(parts[1])) > 1)
+            {
+                Close(pin);
+                continue;
+            }
+            Keep(pty, pin);
+            reply.Append(' ').Append(pin.Pid).Append(':').Append(pin.Created).Append(':')
+                .Append(Subsystem(pin.Handle)).Append(':').Append(ConsoleHost(pin.Handle));
+        }
+        Put(id, pty);
+        return reply.ToString();
     }
 }
 `;
 
-const HOST_SCRIPT =
-  "$ProgressPreference = 'SilentlyContinue'; $ErrorActionPreference = 'Stop'\n" +
-  `Add-Type -TypeDefinition @'\n${JOBS_SOURCE}\n'@\n` +
-  '[PuddleConptyJobs]::Serve()\n';
+/**
+ * Where the helper finds its C# source: an environment variable, as a
+ * command line holding it would pass Windows' 32,767-character limit.
+ */
+const SOURCE_VARIABLE = 'PUDDLE_CONPTY_HELPER_SOURCE';
 
-/** The host's arguments to Windows PowerShell 5.1. */
-export const JOB_HOST_ARGS: readonly string[] = [
+const HELPER_SCRIPT =
+  "$ProgressPreference = 'SilentlyContinue'; $ErrorActionPreference = 'Stop'\n" +
+  `$source = $env:${SOURCE_VARIABLE}; Remove-Item Env:${SOURCE_VARIABLE}\n` +
+  'Add-Type -TypeDefinition $source\n' +
+  '[PuddleConsoles]::Serve()\n';
+
+/** The helper's arguments to Windows PowerShell 5.1. */
+export const HELPER_ARGS: readonly string[] = [
   '-NoLogo',
   '-NoProfile',
   '-NonInteractive',
   '-ExecutionPolicy',
   'Bypass',
   '-EncodedCommand',
-  Buffer.from(HOST_SCRIPT, 'utf16le').toString('base64'),
+  Buffer.from(HELPER_SCRIPT, 'utf16le').toString('base64'),
 ];
 
-/** Whether `commandLine` is a ConPTY job host's (the test suites' process guard leaves it be). */
-export function isConptyJobHost(commandLine: string): boolean {
-  return commandLine.includes(JOB_HOST_ARGS[JOB_HOST_ARGS.length - 1]!);
+/** Whether `commandLine` is a ConPTY helper's (the test suites' process guard leaves it be). */
+export function isConptyHelper(commandLine: string): boolean {
+  return commandLine.includes(HELPER_ARGS[HELPER_ARGS.length - 1]!);
 }
 
-export interface JobHostOptions {
-  /** The host to run; Windows PowerShell 5.1 with JOB_HOST_ARGS by default. Tests substitute a fake. */
+export interface ConptyHelperOptions {
+  /** The helper to run; Windows PowerShell 5.1 with HELPER_ARGS by default. Tests substitute a fake. */
   worker?: { file: string; args: readonly string[] };
-  /** Bound on the host's start (PowerShell and the compile); 15 s by default. */
+  /** Bound on the helper's start (PowerShell and the compile); 15 s by default. */
   startMs?: number;
   /** Bound on one answer, after which that request counts as failed; 5 s by default. */
   answerMs?: number;
-  /** Told once when a host that held jobs exits: every process in them has ended with it. */
+  /** Told once when a helper that held processes exits: the PTYs it held are no longer told apart. */
   onLost?: (reason: string) => void;
+  /** The process that spawns the PTYs, whose child every ConPTY host is; this one by default. */
+  parentPid?: number;
 }
 
-/** How long after a host that could not start (no PowerShell, `Add-Type` refused) none is tried. */
+/** How long after a helper that could not start (no PowerShell, `Add-Type` refused) none is tried. */
 const RETRY_MS = 5 * 60_000;
 
+function count(answer: string | null): number {
+  const value = answer?.startsWith('ok ') ? Number(answer.slice(3)) : 0;
+  return Number.isSafeInteger(value) && value > 0 ? value : 0;
+}
+
+/** `pid:created:subsystem:host[:listed]` fields; null for anything malformed. */
+function fields(item: string, size: number): number[] | null {
+  const parts = item.split(':').map(Number);
+  return parts.length === size && parts.every((part) => Number.isSafeInteger(part)) ? parts : null;
+}
+
 /**
- * The daemon's job host (see the module comment). It is started on first
- * use, or by `ready()`. Its handles hold the event loop only while it starts
- * or a request is outstanding, so an idle host never keeps the daemon alive.
+ * The helper process (see the module comment). It is started on first use,
+ * or by `ready()`. Its handles hold the event loop only while it starts or a
+ * request is outstanding, so an idle helper never keeps its process alive.
+ * A helper that exits takes its holds with it and ends nothing; the next
+ * request starts another.
  */
-export class JobHost implements ConptyJobs {
+export class ConptyHelper implements ConptyJobs, ConsoleInspector {
   private readonly worker: { file: string; args: readonly string[] };
   private readonly startMs: number;
   private readonly answerMs: number;
   private readonly onLost: ((reason: string) => void) | undefined;
+  private readonly parentPid: number;
   private child: ChildProcess | null = null;
   private started: Promise<boolean> | null = null;
   private starting = false;
-  /** A host that never became ready is not tried again before this. */
+  /** A helper that never became ready is not tried again before this. */
   private retryAfter = 0;
   private sequence = 0;
-  /** Which host this is: a job is only ever ended by the host that holds it. */
+  /** Which helper this is: a hold is only ever used with the helper that has it. */
   private generation = 0;
-  /** Jobs assigned and not yet ended. */
+  /** PTYs held and not yet released. */
   private held = 0;
   private readonly waiting = new Map<string, (reply: string | null) => void>();
 
-  constructor(options: JobHostOptions = {}) {
+  constructor(options: ConptyHelperOptions = {}) {
     this.worker = options.worker ?? {
       file: system32Path(win32.join('WindowsPowerShell', 'v1.0', 'powershell.exe')),
-      args: JOB_HOST_ARGS,
+      args: HELPER_ARGS,
     };
     this.startMs = options.startMs ?? 15_000;
     this.answerMs = options.answerMs ?? 5_000;
     this.onLost = options.onLost;
+    this.parentPid = options.parentPid ?? process.pid;
   }
 
-  /** The host's pid while it runs (tests). */
+  /** The helper's pid while it runs (tests). */
   get pid(): number | undefined {
     return this.child?.pid;
   }
 
   ready(): Promise<boolean> {
-    // A host that has exited holds no job any more: a new one may start.
+    // A helper that has exited holds nothing any more: a new one may start.
     if (this.started && !this.child && !this.starting && Date.now() >= this.retryAfter) {
       this.started = null;
     }
     return (this.started ??= this.start());
   }
 
-  async assign(
+  async track(
     pid: number,
-    createdWithin: { fromMs: number; toMs: number },
-  ): Promise<ConptyJob | null> {
+    createdWithin: { fromMs: number; toMs: number; startedAtMs?: number },
+  ): Promise<ConptyConsole | null> {
     if (!Number.isSafeInteger(pid) || pid <= 0) return null;
-    const request = this.request(
-      `assign ${pid} ${Math.floor(createdWithin.fromMs)} ${Math.ceil(createdWithin.toMs)}`,
+    const id = `t${++this.sequence}`;
+    const { fromMs, toMs } = createdWithin;
+    const startedAtMs = createdWithin.startedAtMs ?? (fromMs + toMs) / 2;
+    const reply = await this.ask(
+      `track ${id} ${pid} ${Math.floor(fromMs)} ${Math.ceil(toMs)} ${this.parentPid} ` +
+        `${Math.round(startedAtMs)}`,
     );
-    if (!(await request.reply)?.startsWith('ok ')) return null;
+    const [state, rootCreated, hostPid, hostCreated] = (reply ?? '').split(' ');
+    if (!['ok', 'gone', 'other'].includes(state ?? '')) return null;
+    const host = Number(hostPid);
+    return this.console(
+      id,
+      state === 'ok' ? Number(rootCreated) : null,
+      Number.isSafeInteger(host) && host > 0
+        ? { pid: host, createdAtMs: Number(hostCreated) }
+        : null,
+    );
+  }
+
+  async adopt(host: {
+    pid: number;
+    createdAtMs: number;
+    parentPid: number;
+  }): Promise<ConptyConsole | null> {
+    const values = [host.pid, host.createdAtMs, host.parentPid];
+    if (!values.every((value) => Number.isSafeInteger(value) && value > 0)) return null;
+    const id = `a${++this.sequence}`;
+    const reply = await this.ask(`adopt ${id} ${values.join(' ')}`);
+    if (!reply?.startsWith('ok ')) {
+      if (reply === 'gone') void this.ask(`release ${id}`);
+      return null;
+    }
+    return this.console(id, null, { pid: host.pid, createdAtMs: Number(reply.slice(3)) });
+  }
+
+  async classify(
+    processes: readonly { pid: number; createdAtMs: number }[],
+  ): Promise<{ console: ConptyConsole; processes: ClassifiedProcess[] } | null> {
+    const id = `c${++this.sequence}`;
+    const keys = processes
+      .filter((entry) => Number.isSafeInteger(entry.pid) && entry.pid > 0)
+      .filter((entry) => Number.isSafeInteger(entry.createdAtMs))
+      .map((entry) => `${entry.pid}@${entry.createdAtMs}`);
+    const reply = await this.ask(`classify ${id} ${keys.join(' ')}`.trimEnd());
+    if (reply === null || (reply !== 'ok' && !reply.startsWith('ok '))) return null;
+    const classified: ClassifiedProcess[] = [];
+    for (const item of reply.split(' ').slice(1)) {
+      const parts = fields(item, 4);
+      if (!parts) continue;
+      const [pid, createdAtMs, subsystem, consoleHost] = parts as [number, number, number, number];
+      classified.push({
+        pid,
+        createdAtMs,
+        key: `${pid}@${createdAtMs}`,
+        gui: subsystem === 2,
+        consoleHost,
+      });
+    }
+    return { console: this.console(id, null, null), processes: classified };
+  }
+
+  private console(
+    id: string,
+    rootCreatedAtMs: number | null,
+    host: { pid: number; createdAtMs: number } | null,
+  ): ConptyConsole {
     const generation = this.generation;
     this.held++;
-    let ended: Promise<number> | null = null;
+    let released = false;
+    // A helper that has exited holds nothing: its PTY is no longer told apart.
+    const current = () => !released && generation === this.generation && this.child !== null;
     return {
-      end: () =>
-        (ended ??=
-          // A host that has exited took its jobs' processes with it.
-          generation !== this.generation || this.child === null
-            ? Promise.resolve(0)
-            : this.request(`end ${request.id}`).reply.then((answer) => {
-                if (generation === this.generation) this.held--;
-                const count = answer?.startsWith('ok ') ? Number(answer.slice(3)) : 0;
-                return Number.isSafeInteger(count) ? count : 0;
-              })),
+      rootCreatedAtMs,
+      host,
+      alive: async () => {
+        if (!current()) return null;
+        const reply = await this.ask(`alive ${id}`);
+        const [ok, root, hostAlive] = (reply ?? '').split(' ');
+        return ok === 'ok' ? { root: root === '1', host: hostAlive === '1' } : null;
+      },
+      scan: async ({ attach }) => {
+        if (!current()) return null;
+        const reply = await this.ask(`scan ${id} ${attach ? 1 : 0}`);
+        if (!reply?.startsWith('ok ')) return null;
+        const [, root, hostAlive, ...items] = reply.split(' ');
+        const members: ConsoleMember[] = [];
+        for (const item of items) {
+          const parts = fields(item, 5);
+          if (!parts) continue;
+          const [pid, createdAtMs, subsystem, consoleHost, listed] = parts as [
+            number,
+            number,
+            number,
+            number,
+            number,
+          ];
+          members.push({
+            pid,
+            createdAtMs,
+            key: `${pid}@${createdAtMs}`,
+            gui: subsystem === 2,
+            consoleHost,
+            listed: listed === 1,
+          });
+        }
+        return { rootAlive: root === '1', hostAlive: hostAlive === '1', members };
+      },
+      terminate: async (keys) => {
+        if (!current() || keys.length === 0) return 0;
+        const valid = keys.filter((key) => /^(root|host|\d+@\d+)$/.test(key));
+        return valid.length === 0 ? 0 : count(await this.ask(`terminate ${id} ${valid.join(' ')}`));
+      },
+      release: () => {
+        if (released) return;
+        released = true;
+        if (generation !== this.generation) return;
+        this.held = Math.max(0, this.held - 1);
+        if (this.child !== null) void this.ask(`release ${id}`);
+      },
     };
   }
 
-  private request(command: string): { id: string; reply: Promise<string | null> } {
+  /** One request; null when the helper is not available, fails it or does not answer in time. */
+  private ask(command: string): Promise<string | null> {
     const id = String(++this.sequence);
-    const reply = this.ready().then((up) => {
+    return this.ready().then((up) => {
       const child = this.child;
       if (!up || child === null) return null;
       return new Promise<string | null>((resolve) => {
-        // A slow answer fails this request only: stopping the host would end every job.
+        // A slow answer fails this request only: stopping the helper would let every hold go.
         const timer = setTimeout(() => settle(null), this.answerMs);
         const settle = (answer: string | null) => {
           clearTimeout(timer);
           this.waiting.delete(id);
           this.reference();
-          resolve(answer);
+          resolve(answer !== null && answer.startsWith('error') ? null : answer);
         };
         this.waiting.set(id, settle);
         this.reference();
@@ -318,7 +971,6 @@ export class JobHost implements ConptyJobs {
         });
       });
     });
-    return { id, reply };
   }
 
   private start(): Promise<boolean> {
@@ -328,6 +980,7 @@ export class JobHost implements ConptyJobs {
         child = spawn(this.worker.file, [...this.worker.args], {
           windowsHide: true,
           stdio: ['pipe', 'pipe', 'pipe'],
+          env: { ...process.env, [SOURCE_VARIABLE]: HELPER_SOURCE },
         });
       } catch {
         resolve(false);
@@ -346,7 +999,7 @@ export class JobHost implements ConptyJobs {
         this.reference();
         resolve(ok);
       };
-      // Until it is ready it holds no job: stopping it then ends nothing.
+      // Until it is ready it holds nothing: stopping it then lets nothing go.
       const timer = setTimeout(() => {
         child.kill();
         if (this.child === child) this.child = null;
@@ -398,12 +1051,14 @@ export class JobHost implements ConptyJobs {
   }
 }
 
-let shared: JobHost | null = null;
+let shared: ConptyHelper | null = null;
 
-/** This process's job host, shared by every PtyManager in it. */
-export function sharedConptyJobs(): ConptyJobs {
-  return (shared ??= new JobHost({
+/** This process's helper, shared by every PtyManager in it (and by the supervisor's reap). */
+export function sharedConptyJobs(): ConptyHelper {
+  return (shared ??= new ConptyHelper({
     onLost: (reason) =>
-      console.warn(`the ConPTY job host exited (${reason}); its PTYs have ended with it`),
+      console.warn(
+        `the ConPTY helper exited (${reason}); the PTYs it held end with what node-pty can close`,
+      ),
   }));
 }
