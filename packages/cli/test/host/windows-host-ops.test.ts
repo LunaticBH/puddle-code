@@ -7,6 +7,7 @@ import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it } from 'vitest';
 import { PROTOCOL_VERSION } from '@puddle/shared';
 import { ipcPath, ipcProof, listenPrivate } from '@puddle/shared/node';
+import type { PowerShellRunner } from '@puddle/shared/node/platform';
 import { runWindowsHostOp, testSupervision } from '../../src/lib/host/windows-host-ops.js';
 import { parseHelperMessage } from '../../src/lib/host/windows-host-protocol.js';
 
@@ -63,6 +64,26 @@ async function serve(home: string, reply: (challenge: string | undefined) => obj
 }
 
 const home = () => mkdtempSync(join(tmpdir(), 'puddle-host-op-'));
+
+/** A supervisor answering on the home's supervisor pipe, with its proof. */
+function serveSupervisor(home: string): Promise<Server> {
+  return listenPrivate(ipcPath(home, 'supervisor'), (socket: Socket) => {
+    socket.on('error', () => {});
+    socket.once('data', (data: Buffer) => {
+      const { challenge } = JSON.parse(data.toString()) as { challenge: string };
+      socket.end(
+        JSON.stringify({
+          t: 'supervisor',
+          proof: ipcProof(home, 'supervisor', challenge),
+          pid: 4242,
+          daemon: null,
+          connector: null,
+          stopping: false,
+        }) + '\n',
+      );
+    });
+  });
+}
 
 describe('the control channel a Windows SSH host relays', () => {
   it('challenges the home’s daemon itself and relays a proven answer', async () => {
@@ -162,23 +183,76 @@ describe('the host helper’s other operations', () => {
     expect(whole.lines()[0]).toMatchObject({ t: 'error', code: 'bad_arguments' });
   });
 
-  it('enables supervised remote access only with a supervisor running outside the session', async () => {
-    const at = home();
+  /** `--configure` for a managed (supervised) connector, as `remote enable` asks. */
+  function enable(context: Omit<Parameters<typeof runWindowsHostOp>[2], 'stdin' | 'stdout'>) {
     const configure = io();
     const done = runWindowsHostOp(
       'connector',
       { args: ['--configure'] },
-      { home: at, ...configure },
+      { ...context, ...configure },
     );
     configure.stdin.end(
       JSON.stringify({ profile: 'default', setup: { code: 'c'.repeat(64), managed: true } }) + '\n',
     );
+    return { done, lines: configure.lines };
+  }
+
+  it('enables supervised remote access only once Task Scheduler or WMI has started the supervisor', async () => {
+    // Neither way works here (the test seam refuses both): only then is it refused.
+    const { done, lines } = enable({ home: home(), supervision: 'session' });
     await expect(done).resolves.toBe(1);
-    expect(configure.lines()).toEqual([
-      expect.objectContaining({ t: 'error', code: 'session_bound' }),
-    ]);
+    expect(lines().at(-1)).toMatchObject({
+      t: 'error',
+      code: 'session_bound',
+      message: expect.stringContaining('neither Task Scheduler nor WMI could start it'),
+    });
+    // WMI was asked, and no detached child of this session was started instead.
+    const log = lines()
+      .filter((line) => line.t === 'log')
+      .map((line) => String(line.message))
+      .join('\n');
+    expect(log).toMatch(/WMI could not start the supervisor \(.*WMI is refused in tests/);
     // The registration code never reaches the answer.
-    expect(JSON.stringify(configure.lines())).not.toContain('c'.repeat(64));
+    expect(JSON.stringify(lines())).not.toContain('c'.repeat(64));
+  });
+
+  it('starts the supervisor through WMI before enabling, as an install does', async () => {
+    const at = home();
+    const asked: string[] = [];
+    const powershell: PowerShellRunner = async (_script, env) => {
+      if ('PUDDLE_PROCESS_COMMAND' in env) {
+        asked.push(env.PUDDLE_PROCESS_COMMAND!);
+        server = await serveSupervisor(at);
+        return { code: 0, stdout: JSON.stringify({ code: 0, pid: 4242, error: '' }), stderr: '' };
+      }
+      return {
+        code: 0,
+        stdout: JSON.stringify({ ran: false, state: 'absent', error: '' }),
+        stderr: '',
+      };
+    };
+    const { done, lines } = enable({ home: at, powershell });
+    await done;
+    expect(asked).toEqual([expect.stringContaining('supervisor.mjs')]);
+    // Past the guard: whatever the (absent) connector then says, it is not session_bound.
+    expect(lines().filter((line) => line.code === 'session_bound')).toEqual([]);
+  });
+
+  it('refuses remote access beside a daemon attached to an SSH session, starting nothing', async () => {
+    const at = home();
+    await serve(at, (challenge) => authority(ipcProof(at, 'host', challenge!)));
+    let asked = false;
+    const powershell: PowerShellRunner = async () => {
+      asked = true;
+      return { code: 0, stdout: '{}', stderr: '' };
+    };
+    const { done, lines } = enable({ home: at, powershell });
+    await expect(done).resolves.toBe(1);
+    expect(lines().at(-1)).toMatchObject({
+      code: 'session_bound',
+      message: expect.stringContaining('attached to an SSH session'),
+    });
+    expect(asked).toBe(false);
   });
 
   it('honours the supervision test seam for a home in the temporary directory only', () => {
