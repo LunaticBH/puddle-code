@@ -764,7 +764,12 @@ public static class PuddleConsoles
     // Whether a GUI programme started 'member', or one of its ancestors
     // below the PTY's root (whose own image never counts: it is the
     // session's process): what a GUI programme starts is never ended.
-    // Once found, it stays so.
+    // Once found, it stays so. Found only through an ancestor that runs or
+    // that a scan has held: Windows keeps nothing of an exited process
+    // nobody holds, and scans run only as the PTY ends, so what a GUI
+    // launcher started on the console and left there by exiting before then
+    // is taken for a console programme (an accepted limitation: only a
+    // record made as each process is created could tell).
     static bool StartedByGui(Pty pty, Pin member, Dictionary<int, Entry> table)
     {
         if (member.GuiStarted) return true;

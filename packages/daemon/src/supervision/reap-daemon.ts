@@ -188,11 +188,14 @@ export function consoleKinds(
 
 /**
  * Of `tree` (parents first) as the helper classified it, the processes to
- * end: console programmes attached to a PTY console of the daemon's, or to
- * a console that has gone, whose attachment can no longer be read. A GUI
- * programme, a process with no console (detached) or one the helper could
- * not say has one, one in a console of its own, and everything below them,
- * are spared; so is whatever no longer runs as it was created.
+ * end: console programmes that `kindOf` does not place in another console
+ * (consoleKinds). A GUI programme, a process with no console (detached) or
+ * one the helper could not say has one, one in a console of its own, and
+ * everything below them, are spared; so is whatever no longer runs as it
+ * was created. A GUI programme that has exited can no longer be told
+ * apart (Windows keeps nothing of an exited process nobody holds): what it
+ * started is judged as its own console says, an accepted limitation the
+ * PTY teardown shares (conpty-jobs.ts, StartedByGui).
  */
 export function consolePrograms(
   tree: readonly WindowsProcess[],
