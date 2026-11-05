@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, win32 } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -25,7 +25,7 @@ import { psQuote } from '../src/lib/transport/windows-remote.js';
  * account's own `.puddle` is never touched. The test removes that home with
  * `remove --purge` (which also unregisters its scheduled task), then
  * unregisters any task still naming it and deletes what is left, whether
- * or not the test passed.
+ * or not the test passed, as well as its own temporary folder here.
  */
 const target = process.env.PUDDLE_TEST_WINDOWS_SSH;
 const key = process.env.PUDDLE_TEST_WINDOWS_SSH_KEY;
@@ -139,6 +139,12 @@ Remove-Item -LiteralPath $home_ -Recurse -Force -ErrorAction SilentlyContinue`,
     } finally {
       if (previousHome === undefined) delete process.env.PUDDLE_HOME;
       else process.env.PUDDLE_HOME = previousHome;
+      // This side's files too: the client home, the ssh wrapper and its known_hosts.
+      try {
+        rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+      } catch {
+        // A file a scanner still holds; the OS's temporary clean-up takes it.
+      }
     }
   }, 300_000);
 
