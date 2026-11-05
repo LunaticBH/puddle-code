@@ -290,4 +290,15 @@ describe('a host recognised by a failed POSIX command', () => {
     });
     expect(spawned[0]!.stdin.endsWith('data')).toBe(true);
   });
+
+  it('marks an operation whose loader never reported its status as incomplete', async () => {
+    host.reply = () => ({ code: 255, stderr: 'Connection to winbox closed.\n' });
+    const ssh = new SshTransport('alice@winbox', { platform: 'linux', remotePlatform: 'win32' });
+    expect(await ssh.execWindows('$global:PuddleExit = 0')).toEqual({
+      code: 255,
+      stdout: '',
+      stderr: 'Connection to winbox closed.\n',
+      incomplete: true,
+    });
+  });
 });

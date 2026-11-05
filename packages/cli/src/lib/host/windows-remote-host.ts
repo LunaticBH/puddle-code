@@ -77,6 +77,16 @@ export interface HelperRun {
   signal?: AbortSignal;
 }
 
+/** What one helper run said: its status, standard error, and the result or error it reported. */
+interface HelperOutcome {
+  code: number;
+  stderr: string;
+  /** No status from the loader: the connection ended or the operation was killed. */
+  incomplete?: true;
+  result?: { value?: unknown };
+  error?: Error;
+}
+
 /** The home has no runtime, so no node.exe could run the helper. */
 class NoRuntimeError extends CliError {
   constructor(label: string) {
@@ -166,13 +176,10 @@ export class RemoteWindowsHost implements WindowsHostOps {
     }
   }
 
-  private async collect(
-    script: string,
-    opts: HelperRun,
-  ): Promise<{ code: number; stderr: string; result?: { value?: unknown }; error?: CliError }> {
+  private async collect(script: string, opts: HelperRun): Promise<HelperOutcome> {
     const logger = opts.logger ?? silentLogger;
     let result: { value?: unknown } | undefined;
-    let error: CliError | undefined;
+    let error: Error | undefined;
     const read = lineReader((message) => {
       if (message.t === 'log') logger[message.level](message.message);
       else if (message.t === 'out') opts.onOut?.(message.text);
@@ -188,17 +195,29 @@ export class RemoteWindowsHost implements WindowsHostOps {
     return {
       code: outcome.code,
       stderr: outcome.stderr,
+      ...(outcome.incomplete ? { incomplete: true as const } : {}),
       ...(result ? { result } : {}),
       ...(error ? { error } : {}),
     };
   }
 
-  private settle(
-    op: string,
-    outcome: { code: number; stderr: string; result?: { value?: unknown }; error?: CliError },
-  ): unknown {
+  /**
+   * The helper's answer. One that never came is the helper's failure only
+   * when the loader reported a status: a connection that dropped, or an
+   * operation killed by its timeout, says nothing about the installed tree,
+   * so it never reads as `not_installed` (which a launcher answers by
+   * installing its own release).
+   */
+  private settle(op: string, outcome: HelperOutcome): unknown {
     if (outcome.error) throw outcome.error;
     if (outcome.result) return outcome.result.value;
+    if (outcome.incomplete) {
+      throw new CliError(
+        'ssh_unreachable',
+        `the SSH connection to ${this.ssh.label} ended during the ${op} operation (exit ${outcome.code})`,
+        lastLines(outcome.stderr) || undefined,
+      );
+    }
     throw new CliError(
       'not_installed',
       `the ${op} operation failed on ${this.ssh.label} (exit ${outcome.code})`,
@@ -352,9 +371,13 @@ export class RemoteWindowsHost implements WindowsHostOps {
   }
 
   /** collect() with a file streamed after the script. */
-  private async collectStream(script: string, logger: Logger, file?: string) {
+  private async collectStream(
+    script: string,
+    logger: Logger,
+    file?: string,
+  ): Promise<HelperOutcome> {
     let result: { value?: unknown } | undefined;
-    let error: CliError | undefined;
+    let error: Error | undefined;
     const read = lineReader((message) => {
       if (message.t === 'log') logger[message.level](message.message);
       else if (message.t === 'result') result = { value: message.value };
@@ -368,6 +391,7 @@ export class RemoteWindowsHost implements WindowsHostOps {
     return {
       code: outcome.code,
       stderr: outcome.stderr,
+      ...(outcome.incomplete ? { incomplete: true as const } : {}),
       ...(result ? { result } : {}),
       ...(error ? { error } : {}),
     };

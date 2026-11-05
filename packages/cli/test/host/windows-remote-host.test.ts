@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { describe, expect, it } from 'vitest';
 import { RemoteWindowsHost } from '../../src/lib/host/windows-remote-host.js';
+import { errorMessage, helperError } from '../../src/lib/host/windows-host-protocol.js';
+import { CliError } from '../../src/lib/types.js';
 import type { SshTransport, WindowsExecOptions } from '../../src/lib/transport/ssh.js';
 import {
   HELPER_MISSING_EXIT,
@@ -24,7 +26,13 @@ interface Sent {
 }
 
 function fakeSsh(
-  answer: (script: string) => { code: number; lines?: object[]; stdout?: string },
+  answer: (script: string) => {
+    code: number;
+    lines?: object[];
+    stdout?: string;
+    stderr?: string;
+    incomplete?: true;
+  },
   probe: Partial<WindowsProbe> = {},
 ) {
   const sent: Sent[] = [];
@@ -60,7 +68,12 @@ function fakeSsh(
       const stdout =
         reply.stdout ?? (reply.lines ?? []).map((l) => JSON.stringify(l) + '\n').join('');
       opts.onStdout?.(stdout);
-      return { code: reply.code, stdout, stderr: '' };
+      return {
+        code: reply.code,
+        stdout,
+        stderr: reply.stderr ?? '',
+        ...(reply.incomplete ? { incomplete: true } : {}),
+      };
     },
   };
   return { ssh: ssh as unknown as SshTransport, sent, probes };
@@ -130,6 +143,43 @@ describe('a Windows SSH host’s client', () => {
     await expect(new RemoteWindowsHost(empty.ssh).run('sweep', {})).rejects.toMatchObject({
       code: 'not_installed',
       message: 'no Puddle runtime is installed on alice@winbox',
+    });
+  });
+
+  it('reports a connection that ended mid-operation as unreachable, never as not installed', async () => {
+    // ssh's own 255, or a timeout's kill: no trailer, so nothing the helper said.
+    for (const code of [255, -1]) {
+      const { ssh } = fakeSsh(() => ({
+        code,
+        stderr: 'Connection to winbox closed by remote host.',
+        incomplete: true,
+      }));
+      await expect(
+        new RemoteWindowsHost(ssh).run('install', { version: '1.2.3' }),
+      ).rejects.toMatchObject({
+        code: 'ssh_unreachable',
+        message: `the SSH connection to alice@winbox ended during the install operation (exit ${code})`,
+        hint: 'Connection to winbox closed by remote host.',
+      });
+    }
+  });
+
+  it('keeps a failure the host did not foresee a plain error, as on a local host', async () => {
+    const { ssh } = fakeSsh(() => ({
+      code: 1,
+      lines: [{ t: 'error', code: 'unexpected', message: 'EBUSY: resource busy or locked' }],
+    }));
+    const failure = await new RemoteWindowsHost(ssh)
+      .run('install', {})
+      .catch((err: unknown) => err);
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).not.toBeInstanceOf(CliError);
+    expect((failure as Error).message).toBe('EBUSY: resource busy or locked');
+    // What the helper sends for such a failure, and what the client makes of it.
+    const sent = errorMessage(new Error('EBUSY: resource busy or locked'));
+    expect(helperError(sent)).not.toBeInstanceOf(CliError);
+    expect(helperError(errorMessage(new CliError('not_installed', 'no tree')))).toMatchObject({
+      code: 'not_installed',
     });
   });
 

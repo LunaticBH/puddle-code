@@ -57,6 +57,16 @@ export interface SshOptions {
   windowsHome?: string;
 }
 
+/** A PowerShell operation's outcome on a Windows host. */
+export interface WindowsExecResult extends ExecResult {
+  /**
+   * The loader never reported the script's status: ssh failed (255), the
+   * connection dropped, or a timeout or abort killed the operation. `code`
+   * is then ssh's own status, not the host's.
+   */
+  incomplete?: true;
+}
+
 /** Options for one PowerShell operation on a Windows host. */
 export interface WindowsExecOptions {
   /** Bytes that follow the script on the same standard input. */
@@ -464,7 +474,7 @@ export class SshTransport implements Transport {
    * never rejects on a non-zero status, except for a ConstrainedLanguage
    * session, where no operation can run.
    */
-  execWindows(script: string, opts: WindowsExecOptions = {}): Promise<ExecResult> {
+  execWindows(script: string, opts: WindowsExecOptions = {}): Promise<WindowsExecResult> {
     return new Promise((resolve, reject) => {
       const child = this.spawnWindows(script);
       const out: Buffer[] = [];
@@ -489,7 +499,12 @@ export class SshTransport implements Transport {
       child.stderr!.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
       child.on('error', (err) => {
         if (timer) clearTimeout(timer);
-        resolve({ code: -1, stdout: Buffer.concat(out).toString('utf8'), stderr: String(err) });
+        resolve({
+          code: -1,
+          stdout: Buffer.concat(out).toString('utf8'),
+          stderr: String(err),
+          incomplete: true,
+        });
       });
       child.on('close', (code) => {
         if (timer) clearTimeout(timer);
@@ -503,6 +518,7 @@ export class SshTransport implements Transport {
           code: trailer.code ?? code ?? -1,
           stdout: Buffer.concat(out).toString('utf8'),
           stderr: trailer.stderr,
+          ...(trailer.code === null ? { incomplete: true as const } : {}),
         });
       });
       const payload = opts.payload;
