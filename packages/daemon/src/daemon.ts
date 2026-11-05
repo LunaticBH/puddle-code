@@ -38,6 +38,7 @@ import { PortScanner } from './ports/scanner.js';
 import { attachProxyUpgrade } from './proxy/upgrade.js';
 import { ProxySocketTracker } from './proxy/sockets.js';
 import { PtyManager } from './pty/pty-manager.js';
+import { clearPtyRoots, ptyRootsFile } from './pty/pty-roots.js';
 import { TerminalTheme } from './pty/terminal-theme.js';
 import { installShellHooks } from './pty/shell-hooks.js';
 import { clearRuntime, writeRuntime } from './runtime-file.js';
@@ -163,12 +164,18 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
     // Clients report their resolved terminal colours over the WS (14.1); the
     // PTY layer answers agents' OSC 10/11 colour queries from the last report.
     const terminalTheme = new TerminalTheme();
-    const ptys = new PtyManager(logs, terminalTheme, paths.logsDir, (degraded) =>
-      storage.setLogsDegraded(degraded, 'screens'),
+    const ptys = new PtyManager(
+      logs,
+      terminalTheme,
+      paths.logsDir,
+      (degraded) => storage.setLogsDegraded(degraded, 'screens'),
+      // The supervisor's lead to what a crashed daemon's PTYs left running.
+      platform === 'win32' ? ptyRootsFile(paths.home) : undefined,
     );
     const shellHooks = installShellHooks(paths);
-    failedStartup.push(() => {
+    failedStartup.push(async () => {
       ptys.killAll();
+      if (platform === 'win32') await settleConptys(ptys);
       logs.closeAll();
     });
     const scanner = new PortScanner({ ptys });
@@ -433,8 +440,13 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
       const deadline = Date.now() + 3000;
       while (ptys.liveCount() > 0) {
         if (Date.now() > deadline) {
-          // ConPTY has no signals; its kill is already forceful.
-          ptys.killAll(undefined, platform === 'win32' ? undefined : 'SIGKILL');
+          if (platform === 'win32') {
+            // Windows has no hang-up: a PTY counts as live until what its
+            // root left running is stopped, so this waits for that too.
+            await stopRemainingConptys(ptys);
+            break;
+          }
+          ptys.killAll(undefined, 'SIGKILL');
           await new Promise((r) => setTimeout(r, 200));
           break;
         }
@@ -442,6 +454,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
       }
       await ptys.closeTerminalStates();
       logs.closeAll();
+      if (platform === 'win32') clearPtyRoots(ptyRootsFile(paths.home));
       // Proxied WebSocket sockets (client + outbound upstream) are not covered
       // by closeAllConnections and would hold the process open — detach the
       // listener and tear the pairs down before closing the server.
@@ -484,6 +497,33 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
     }
     throw err;
   }
+}
+
+/**
+ * Windows shutdown, once the PTYs' consoles have had their time to close:
+ * SIGKILL stops each remaining PTY's whole process tree (PtyManager), then
+ * this waits until every PTY has reported its exit, which it does only once
+ * what its root left running is stopped too, bounded by PtyManager's own
+ * teardown bound.
+ */
+export async function stopRemainingConptys(
+  ptys: Pick<PtyManager, 'killAll' | 'liveCount'>,
+  boundMs = 15_000,
+): Promise<void> {
+  ptys.killAll(undefined, 'SIGKILL');
+  const deadline = Date.now() + boundMs;
+  while (ptys.liveCount() > 0 && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
+
+/** After a Windows `killAll()`: the consoles' time to close, then stopRemainingConptys. */
+async function settleConptys(ptys: Pick<PtyManager, 'killAll' | 'liveCount'>): Promise<void> {
+  const deadline = Date.now() + 3000;
+  while (ptys.liveCount() > 0 && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  if (ptys.liveCount() > 0) await stopRemainingConptys(ptys);
 }
 
 /**

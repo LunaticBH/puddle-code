@@ -1,8 +1,10 @@
 import { EventEmitter } from 'node:events';
 import pty from 'node-pty';
-import { killProcessTree } from '@puddle/shared/node/platform';
+import { killProcessTree, type WindowsProcess } from '@puddle/shared/node/platform';
 import type { LogStore } from '../logs/log-store.js';
+import { conptyTeardownDeps, reapConptyTree, snapshotConptyTree } from './conpty-teardown.js';
 import { EnvOscFilter, type EnvDelta } from './env-osc.js';
+import { conptyRootBounds, writePtyRoots } from './pty-roots.js';
 import { planPtySpawn } from './pty-spawn.js';
 import { TerminalScreenStateStore } from './terminal-screen-state.js';
 import { findColourQueries, QUERY_CARRY, type TerminalTheme } from './terminal-theme.js';
@@ -60,13 +62,32 @@ interface Live {
  * whole screen even when the size is unchanged, which would duplicate a
  * viewer's just-replayed snapshot as live output, so an unchanged size is
  * never re-applied.
+ *
+ * `startedAtMs` and `spawnedAtMs` bracket `pty.spawn`, which creates the
+ * console host: with them the process table tells this PTY's root, its
+ * orphans and its host apart from other processes (conpty-teardown.ts).
+ * `closing` is set once a kill has begun to close the pseudoconsole, and
+ * `members` is the tree read just before it did.
  */
 interface ConptyState {
   ready: boolean;
   closed: boolean;
   exited: boolean;
   size: { cols: number; rows: number };
+  startedAtMs: number;
+  spawnedAtMs: number;
+  closing: boolean;
+  members: WindowsProcess[];
 }
+
+/**
+ * Bound on stopping what a ConPTY root left running before its exit is
+ * reported anyway (the stopping goes on): within a session kill's wait.
+ */
+const CONPTY_TEARDOWN_MS = 5000;
+
+/** Bound on reading a ConPTY's tree before a kill closes its console (a cold table takes ~0.5 s). */
+const SNAPSHOT_BOUND_MS = 1500;
 
 const windows = process.platform === 'win32';
 
@@ -110,9 +131,29 @@ export class PtyManager extends EventEmitter {
     private readonly theme?: TerminalTheme,
     stateDir?: string,
     onScreenHealth?: (degraded: boolean) => void,
+    /**
+     * Windows: where to record the live ConPTY roots for the resident
+     * supervisor (pty-roots.ts); the daemon passes `<home>\pty-roots.json`.
+     */
+    private readonly rootsFile?: string,
   ) {
     super();
     this.screens = new TerminalScreenStateStore(stateDir, onScreenHealth);
+    this.recordRoots();
+  }
+
+  /** Replaces the supervisor's record of this process's live ConPTY roots. */
+  private recordRoots(): void {
+    if (!windows || this.rootsFile === undefined) return;
+    writePtyRoots(
+      this.rootsFile,
+      process.pid,
+      [...this.live.values()].map((live) => ({
+        pid: live.proc.pid,
+        startedAtMs: live.conpty!.startedAtMs,
+        spawnedAtMs: live.conpty!.spawnedAtMs,
+      })),
+    );
   }
 
   spawn(
@@ -128,6 +169,7 @@ export class PtyManager extends EventEmitter {
     const size = this.sizes.get(key) ?? DEFAULT_SIZE;
     this.screens.resize(stream, term, size.cols, size.rows);
     const plan = planPtySpawn(file, args, opts.env);
+    const startedAtMs = windows ? Date.now() : 0;
     const proc = pty.spawn(plan.file, plan.args, {
       name: 'xterm-256color',
       cols: size.cols,
@@ -144,9 +186,21 @@ export class PtyManager extends EventEmitter {
       term,
       quiesced: null,
       queryTail: '',
-      conpty: windows ? { ready: false, closed: false, exited: false, size } : null,
+      conpty: windows
+        ? {
+            ready: false,
+            closed: false,
+            exited: false,
+            size,
+            startedAtMs,
+            spawnedAtMs: Date.now(),
+            closing: false,
+            members: [],
+          }
+        : null,
     };
     this.live.set(key, live);
+    this.recordRoots();
     proc.onData((raw) => {
       if (live.conpty && !live.conpty.ready) this.conptyReady(live);
       if (live.quiesced !== null) {
@@ -156,25 +210,64 @@ export class PtyManager extends EventEmitter {
       this.handleData(live, raw);
     });
     proc.onExit(({ exitCode }) => {
-      if (live.conpty) live.conpty.exited = true;
-      // A lifecycle rebind may be freezing the old segment when the process
-      // exits. Flush every held byte against whichever placement currently
-      // owns the runtime before closing its log/screen.
-      const held = live.quiesced;
-      live.quiesced = null;
-      for (const raw of held ?? []) this.handleData(live, raw);
-      const currentStream = live.stream;
-      const currentTerm = live.term;
-      if (record) this.logs.close(currentStream, currentTerm);
-      this.live.delete(this.key(currentStream, currentTerm));
-      this.emit('exit', {
-        stream: currentStream,
-        term: currentTerm,
-        // ConPTY reports the exit when its output pipe closes, which can come
-        // before the native exit code is known.
-        exitCode: exitCode ?? -1,
-      } satisfies PtyExitEvent);
-      void this.screens.release(currentStream, currentTerm);
+      if (live.conpty) {
+        live.conpty.exited = true;
+        // Windows has no hang-up: the PTY stays live, and its exit
+        // unreported, until what its root left running is stopped, so a
+        // session's kill and the daemon's shutdown wait for that too.
+        void this.reapConpty(live, exitCode).then(() => this.exited(live, exitCode));
+        return;
+      }
+      this.exited(live, exitCode);
+    });
+  }
+
+  private exited(live: Live, exitCode: number | undefined): void {
+    // A lifecycle rebind may be freezing the old segment when the process
+    // exits. Flush every held byte against whichever placement currently
+    // owns the runtime before closing its log/screen.
+    const held = live.quiesced;
+    live.quiesced = null;
+    for (const raw of held ?? []) this.handleData(live, raw);
+    const currentStream = live.stream;
+    const currentTerm = live.term;
+    if (live.record) this.logs.close(currentStream, currentTerm);
+    this.live.delete(this.key(currentStream, currentTerm));
+    this.recordRoots();
+    this.emit('exit', {
+      stream: currentStream,
+      term: currentTerm,
+      // ConPTY reports the exit when its output pipe closes, which can come
+      // before the native exit code is known.
+      exitCode: exitCode ?? -1,
+    } satisfies PtyExitEvent);
+    void this.screens.release(currentStream, currentTerm);
+  }
+
+  /**
+   * Stops what a ConPTY root left running and its console host
+   * (conpty-teardown.ts), within CONPTY_TEARDOWN_MS. Never rejects. When the
+   * process table cannot be read nothing is stopped: the root's pid may name
+   * another process by now, so `taskkill /T` on it is no fallback.
+   */
+  private reapConpty(live: Live, exitCode: number | undefined): Promise<void> {
+    const state = live.conpty!;
+    const reaped = reapConptyTree(
+      {
+        pid: live.proc.pid,
+        startedAtMs: state.startedAtMs,
+        spawnedAtMs: state.spawnedAtMs,
+        exited: exitCode !== undefined,
+      },
+      conptyTeardownDeps,
+      state.members,
+    ).catch(() => undefined);
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, CONPTY_TEARDOWN_MS);
+      void reaped.finally(() => {
+        clearTimeout(timer);
+        resolve();
+      });
     });
   }
 
@@ -375,10 +468,12 @@ export class PtyManager extends EventEmitter {
 
   /**
    * POSIX delivers `signal` (node-pty's default is SIGHUP). ConPTY has no
-   * signals, and node-pty throws for any: SIGKILL stops the process tree with
-   * `taskkill /T /F` and then closes the pseudoconsole; every other signal
-   * just closes it, which sends CTRL_CLOSE_EVENT to its processes and then
-   * terminates them, the counterpart of a hang-up.
+   * signals, and node-pty throws for any: SIGKILL stops the process tree the
+   * process table shows and then closes the pseudoconsole; every other
+   * signal reads that tree, then just closes the pseudoconsole, which sends
+   * CTRL_CLOSE_EVENT to its processes and then terminates them, the
+   * counterpart of a hang-up. Either way the exit is reported only once
+   * whatever is left of that tree is stopped too.
    */
   private stop(rec: Live, signal: string | undefined): void {
     const state = rec.conpty;
@@ -386,13 +481,37 @@ export class PtyManager extends EventEmitter {
       rec.proc.kill(signal);
       return;
     }
+    // Once the root has exited its pid may name another process; the
+    // teardown of what it left is already running.
+    if (state.exited) return;
     if (signal === 'SIGKILL') {
-      void killProcessTree(rec.proc.pid, { platform: 'win32' })
+      void killProcessTree(rec.proc.pid, {
+        platform: 'win32',
+        processes: conptyTeardownDeps.processes,
+        root: conptyRootBounds(state),
+      })
         .catch(() => undefined)
         .then(() => this.closeConsole(rec, state));
       return;
     }
-    this.closeConsole(rec, state);
+    if (state.closed || state.closing) return;
+    state.closing = true;
+    const snapshot = snapshotConptyTree(
+      { pid: rec.proc.pid, startedAtMs: state.startedAtMs, spawnedAtMs: state.spawnedAtMs },
+      conptyTeardownDeps,
+    ).then((members) => {
+      state.members = members;
+    });
+    // A slow table must not hold the console open: the root is what counts.
+    void new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, SNAPSHOT_BOUND_MS);
+      void snapshot
+        .catch(() => undefined)
+        .finally(() => {
+          clearTimeout(timer);
+          resolve();
+        });
+    }).then(() => this.closeConsole(rec, state));
   }
 
   private closeConsole(rec: Live, state: ConptyState): void {

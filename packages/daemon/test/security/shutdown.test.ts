@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { controlResponseSchema } from '@puddle/shared';
 import { ipcPath, jsonLines } from '@puddle/shared/node';
-import { listenWithFallback, startDaemon } from '../../src/daemon.js';
+import { listenWithFallback, startDaemon, stopRemainingConptys } from '../../src/daemon.js';
 
 function request(path: string, message: object) {
   return new Promise<ReturnType<typeof controlResponseSchema.parse>>((resolve, reject) => {
@@ -73,6 +73,34 @@ describe('host-control shutdown (protocol 25.7)', () => {
     } finally {
       await daemon.stop();
     }
+  });
+});
+
+describe('stopping the ConPTYs that outlast their consoles’ closing', () => {
+  it('forces each one’s tree, then waits until every one has reported its exit', async () => {
+    let live = 2;
+    const signals: Array<string | undefined> = [];
+    const ptys = {
+      killAll: (_stream?: string, signal?: string) => {
+        signals.push(signal);
+        // Each reports its exit only once its tree is stopped: later.
+        setTimeout(() => (live = 1), 30);
+        setTimeout(() => (live = 0), 60);
+      },
+      liveCount: () => live,
+    };
+    const started = Date.now();
+    await stopRemainingConptys(ptys);
+    expect(signals).toEqual(['SIGKILL']);
+    expect(live).toBe(0);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(50);
+  });
+
+  it('gives up waiting at its bound', async () => {
+    const ptys = { killAll: () => {}, liveCount: () => 1 };
+    const started = Date.now();
+    await stopRemainingConptys(ptys, 100);
+    expect(Date.now() - started).toBeLessThan(2000);
   });
 });
 
