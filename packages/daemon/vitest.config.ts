@@ -23,5 +23,12 @@ export default defineConfig({
   // restart test dying between daemon stop and reassign left every later
   // test fetching a dead port. Slow-but-passing beats fast-but-flaky here —
   // a healthy run never gets near these numbers.
-  test: { name: 'daemon', testTimeout: 60000, hookTimeout: 60000 },
+  test: {
+    name: 'daemon',
+    testTimeout: 60000,
+    hookTimeout: 60000,
+    // No test may leave a process running (test/helpers/process-guard.ts).
+    globalSetup: ['test/helpers/process-guard.global.ts'],
+    setupFiles: ['test/helpers/process-guard.setup.ts'],
+  },
 });

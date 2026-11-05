@@ -18,6 +18,7 @@ import {
   windowsExitCodeLabel,
 } from '../../src/pty/windows-console.js';
 import { writeFakeExecutable } from '../helpers/fake-executable.js';
+import { stopPtysAfterFile } from '../helpers/process-guard.js';
 
 async function waitFor(cond: () => boolean, ms = 10_000): Promise<void> {
   const start = Date.now();
@@ -153,6 +154,7 @@ describe.skipIf(process.platform !== 'win32')('PtyManager on ConPTY', () => {
   function manager() {
     const logs = new LogStore(mkdtempSync(join(tmpdir(), 'puddle-logs-')), 64 * 1024);
     const ptys = new PtyManager(logs);
+    stopPtysAfterFile(ptys);
     const chunks: string[] = [];
     const exits: PtyExitEvent[] = [];
     ptys.on('data', (e: { data: string }) => chunks.push(e.data));

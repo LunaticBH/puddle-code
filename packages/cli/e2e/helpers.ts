@@ -5,6 +5,8 @@ import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 import { cockpitStatusSchema, type WsServerMessage } from '@puddle/shared';
+import { listWindowsProcesses, stopWindowsProcessTree } from '@puddle/shared/node/platform';
+import { onTeardown } from '../../daemon/test/helpers/process-guard.js';
 import { findFreePort } from '../src/lib/transport/net.js';
 
 export const root = fileURLToPath(new URL('../../../', import.meta.url));
@@ -32,16 +34,55 @@ export function env(home: string): NodeJS.ProcessEnv {
     PUDDLE_HOME: home,
   };
 }
+const windows = process.platform === 'win32';
+/** When each child was started: the lower bound that recognises its orphans. */
+const started = new WeakMap<ChildProcess, number>();
+function track<T extends ChildProcess>(start: () => T): T {
+  const at = Date.now();
+  const child = start();
+  started.set(child, at);
+  return child;
+}
+
+/**
+ * Stops a child and waits for its exit. Windows has no SIGTERM from another
+ * process (`kill` is TerminateProcess): a fixture daemon is asked over its
+ * IPC channel, so it stops its PTYs as on POSIX, and once the child has
+ * exited, whatever it left running is stopped too.
+ */
 export async function stop(child: ChildProcess, signal: NodeJS.Signals = 'SIGTERM'): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  child.kill(signal);
-  await new Promise<void>((resolve) => child.once('exit', () => resolve()));
+  const exited = new Promise<void>((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) resolve();
+    else child.once('exit', () => resolve());
+  });
+  if (child.exitCode === null && child.signalCode === null) {
+    if (windows && signal === 'SIGTERM' && child.connected) {
+      child.send({ t: 'stop' });
+      const timer = setTimeout(() => child.kill(), 30_000);
+      await exited;
+      clearTimeout(timer);
+    } else {
+      child.kill(signal);
+    }
+  }
+  await exited;
+  if (windows && child.pid !== undefined && started.has(child)) {
+    await stopWindowsProcessTree(child.pid, {
+      processes: listWindowsProcesses,
+      root: { startedAtMs: started.get(child)!, exitedAtMs: Date.now() },
+    });
+  }
 }
 export async function startFixtureDaemon(home: string) {
-  const daemon = fork(resolve(root, 'packages/cli/e2e/fixtures/daemon.mjs'), {
-    env: env(home),
-    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-  });
+  // The home names the daemon's command line for the run's process guard.
+  const daemon = track(() =>
+    fork(resolve(root, 'packages/cli/e2e/fixtures/daemon.mjs'), [home], {
+      env: env(home),
+      stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+    }),
+  );
+  // A test that fails before its own stop still stops it with the file.
+  onTeardown(() => stop(daemon));
   let daemonLog = '';
   daemon.stdout!.on('data', (c) => (daemonLog += String(c)));
   daemon.stderr!.on('data', (c) => (daemonLog += String(c)));
@@ -57,21 +98,26 @@ export async function fixture(options: { caCert?: string } = {}) {
   const uiPort = await findFreePort();
   const origin = `http://localhost:${uiPort}`;
   const launch = () => {
-    const child = spawn(
-      process.execPath,
-      [
-        resolve(root, 'packages/cli/dist/index.js'),
-        'launch',
-        '--foreground',
-        '--no-browser',
-        '--no-upgrade',
-        '--port',
-        String(uiPort),
-      ],
-      {
-        env: { ...env(home), ...(options.caCert ? { NODE_EXTRA_CA_CERTS: options.caCert } : {}) },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      },
+    const child = track(() =>
+      spawn(
+        process.execPath,
+        [
+          resolve(root, 'packages/cli/dist/index.js'),
+          'launch',
+          '--foreground',
+          '--no-browser',
+          '--no-upgrade',
+          '--port',
+          String(uiPort),
+        ],
+        {
+          env: {
+            ...env(home),
+            ...(options.caCert ? { NODE_EXTRA_CA_CERTS: options.caCert } : {}),
+          },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      ),
     );
     let output = '';
     child.stdout.on('data', (c) => (output += String(c)));
@@ -79,6 +125,7 @@ export async function fixture(options: { caCert?: string } = {}) {
     return { child, output: () => output };
   };
   const cockpit = launch();
+  onTeardown(() => stop(cockpit.child));
   const invitation = await until(
     () => /#invite=(iv_[a-f0-9]{64})/.exec(cockpit.output())?.[1],
     (value) => !!value,
