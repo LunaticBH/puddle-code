@@ -336,7 +336,8 @@ export class WindowsSupervisor {
       if (holder !== 'absent') {
         this.deps.log(
           holder === 'foreign'
-            ? 'the connector lock pipe is held by a process that cannot prove it reads this home'
+            ? 'the connector lock pipe is held by a process that cannot prove it reads this home — ' +
+                'run puddle upgrade daemon to rename the home’s pipes; looking again later'
             : 'another connector serves this home; looking again later',
         );
         this.connector.timer = setTimeout(() => {

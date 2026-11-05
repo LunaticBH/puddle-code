@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import type { ChildProcess } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync } from 'node:fs';
 import type { Server, Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,7 +10,11 @@ import {
   startWindowsSupervisor,
   superviseWindowsConnector,
 } from '../src/node/windows-supervision.js';
-import { connectorPipeState, supervisorRequest } from '../src/node/windows-pipes.js';
+import {
+  connectorPipeSquatted,
+  connectorPipeState,
+  supervisorRequest,
+} from '../src/node/windows-pipes.js';
 import type { PowerShellRunner } from '../src/node/windows-tasks.js';
 
 /**
@@ -113,6 +117,30 @@ describe('the supervisor pipe', () => {
     const other = freshHome();
     await serve(other, 'remote', () => ({ t: 'proven', proof: '0'.repeat(64) }));
     expect(await connectorPipeState(other, 'remote')).toBe('foreign');
+  });
+
+  it('finds a squatter on any connector pipe, a registered profile’s included', async () => {
+    const home = freshHome();
+    const profile = '0123456789';
+    mkdirSync(join(home, 'remote', 'profiles', profile), { recursive: true });
+    // Not a profile id: never probed.
+    mkdirSync(join(home, 'remote', 'profiles', 'not-a-profile'), { recursive: true });
+    expect(await connectorPipeSquatted(home)).toBe(false);
+    const prove = (scope: string) => (request: Record<string, string>) => ({
+      t: 'proven',
+      proof: ipcProof(home, scope, request.challenge!),
+    });
+    await serve(home, 'remote', prove('remote'));
+    await serve(home, `remote-${profile}`, prove(`remote-${profile}`));
+    expect(await connectorPipeSquatted(home)).toBe(false);
+
+    const squatted = freshHome();
+    mkdirSync(join(squatted, 'remote', 'profiles', profile), { recursive: true });
+    await serve(squatted, `remote-${profile}`, () => ({ t: 'proven', proof: '0'.repeat(64) }));
+    expect(await connectorPipeSquatted(squatted)).toBe(true);
+    const locked = freshHome();
+    await serve(locked, 'remote', () => ({ t: 'error' }));
+    expect(await connectorPipeSquatted(locked)).toBe(true);
   });
 });
 

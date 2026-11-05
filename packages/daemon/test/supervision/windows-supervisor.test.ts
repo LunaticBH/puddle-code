@@ -334,6 +334,16 @@ describe('the supervised connector', () => {
     await until(() => h.connectors.length === 1);
   });
 
+  it('names the remedy for a squatter on the connector lock', async () => {
+    const h = harness({ connector: true, manager: 'foreign' });
+    h.start();
+    await until(() => h.log.some((line) => line.includes('connector lock pipe is held')));
+    expect(h.log.find((line) => line.includes('connector lock pipe is held'))).toMatch(
+      /run puddle upgrade daemon to rename the home’s pipes/,
+    );
+    expect(h.connectors).toHaveLength(0);
+  });
+
   it('starts a connector it gave up on afresh once remote access is enabled again', async () => {
     const h = harness({ connector: true });
     h.start();

@@ -64,6 +64,7 @@ export {
   type WindowsTaskState,
 } from './windows-tasks.js';
 export {
+  connectorPipeSquatted,
   connectorPipeState,
   controlPipeState,
   requestDaemonShutdown,
