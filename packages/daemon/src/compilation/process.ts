@@ -51,15 +51,23 @@ type CompilationSpawnOptions = SpawnOptionsWithStdioTuple<StdioNull, StdioPipe, 
 /** Each running command, with what identifies its process tree on Windows. */
 const liveCommands = new Map<ReturnType<typeof spawn>, ChildProcessTree>();
 
-/** Terminate compiler process groups when their owning daemon shuts down. */
-export function disposeCompilationCommands(): void {
+/**
+ * Terminate compiler process groups when their owning daemon shuts down.
+ * POSIX signals each group at once and resolves. On Windows it resolves once
+ * each command's tree has been stopped: that stop reads the process table
+ * before it ends anything (terminateGroup), and a daemon that exited first
+ * would leave the command's descendants running, as libuv's kill-on-close
+ * job ends the command alone. Never rejects.
+ */
+export function disposeCompilationCommands(): Promise<void> {
   const commands = [...liveCommands];
-  for (const [child, tree] of commands) terminateGroup(child, tree, 'SIGTERM');
+  const stops = commands.map(([child, tree]) => terminateGroup(child, tree, 'SIGTERM'));
   setTimeout(() => {
     for (const [child, tree] of commands) {
-      if (liveCommands.has(child)) terminateGroup(child, tree, 'SIGKILL');
+      if (liveCommands.has(child)) void terminateGroup(child, tree, 'SIGKILL');
     }
   }, 1_000).unref();
+  return Promise.all(stops).then(() => undefined);
 }
 
 /**
@@ -150,11 +158,11 @@ export const runCompilationCommand: CompilationCommandRunner = (command) =>
     let forced = false;
 
     const terminate = (): void => {
-      terminateGroup(child, tree, 'SIGTERM');
+      void terminateGroup(child, tree, 'SIGTERM');
       setTimeout(() => {
         if (exited || child.pid === undefined) return;
         forced = true;
-        terminateGroup(child, tree, 'SIGKILL');
+        void terminateGroup(child, tree, 'SIGKILL');
       }, 1_000).unref();
     };
 
@@ -230,22 +238,21 @@ export const runCompilationCommand: CompilationCommandRunner = (command) =>
  * what that started (docs/windows.md, decision 8). Unlike the group, the
  * tree includes console processes the command started detached or in a
  * console of their own (a server started with `start`, say): they end with
- * it.
+ * it. Resolves once the stop has been carried out (at once on POSIX);
+ * never rejects.
  */
 function terminateGroup(
   child: ReturnType<typeof spawn>,
   tree: ChildProcessTree,
   signal: NodeJS.Signals,
   platform: NodeJS.Platform = process.platform,
-): void {
-  if (child.pid === undefined) return;
-  if (platform === 'win32') {
-    void tree.kill({ platform });
-    return;
-  }
+): Promise<void> {
+  if (child.pid === undefined) return Promise.resolve();
+  if (platform === 'win32') return tree.kill({ platform }).catch(() => undefined);
   try {
     process.kill(-child.pid, signal);
   } catch {
     child.kill(signal);
   }
+  return Promise.resolve();
 }

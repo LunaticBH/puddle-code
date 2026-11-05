@@ -30,6 +30,8 @@ import { disposeCompilationCommands } from './process.js';
 import { DependencyWatcher } from './dependency-watcher.js';
 
 const WATCH_IDLE_TTL_MS = 6 * 60 * 60 * 1_000;
+/** How long dispose waits for running commands' stops (a few table reads on Windows). */
+const COMMAND_STOP_WAIT_MS = 5_000;
 
 export type CompilationEvent =
   | { type: 'started'; key: string; status: CompilationStatusResponse }
@@ -222,7 +224,14 @@ export class CompilationService {
     return () => this.listeners.delete(listener);
   }
 
-  dispose(): void {
+  /**
+   * Closes the service and stops every running command. Resolves once those
+   * stops have been carried out, or after COMMAND_STOP_WAIT_MS: on Windows a
+   * stop reads the process table before it ends anything, and a daemon that
+   * exited sooner would leave a command's descendants running
+   * (disposeCompilationCommands). POSIX signals at once. Never rejects.
+   */
+  dispose(): Promise<void> {
     this.disposed = true;
     clearInterval(this.sweepTimer);
     for (const state of this.targets.values()) {
@@ -230,9 +239,17 @@ export class CompilationService {
       state.watcher.close();
     }
     for (const provider of this.providers.values()) provider.dispose?.();
-    disposeCompilationCommands();
+    const stopping = disposeCompilationCommands();
     this.targets.clear();
     this.listeners.clear();
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, COMMAND_STOP_WAIT_MS);
+      const done = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      stopping.then(done, done);
+    });
   }
 
   private target(request: CompilationTargetRequest): TargetState {

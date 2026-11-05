@@ -444,8 +444,10 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
       if (platform !== 'win32') await closeControl();
       clearInterval(fetchTimer);
       catalogue.dispose();
-      compilation.dispose();
-      await notebooks.dispose();
+      // Both wait for their stops, which on Windows read the process table
+      // before they end a command's or a kernel's tree: an exit sooner would
+      // leave those trees' descendants running.
+      await Promise.all([compilation.dispose(), notebooks.dispose()]);
       onboarding.dispose();
       // Freeze session rows at their live statuses (reconcile → interrupted),
       // then wait for PTY exits so nothing touches the db after close.
