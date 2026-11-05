@@ -5,6 +5,7 @@ import { registeredProfiles, profileDirectory } from './profile-state.js';
 import { jsonLines, atomicPrivateJson, readPrivateJson } from '@puddle/shared/node';
 import { administrativeRequest, configureConnector, resetConnectorIdentity } from './admin.js';
 import { inspectConnector } from './inspect.js';
+import { runConnectorManager } from './lifecycle.js';
 import { startConnectorManager } from './manager.js';
 import {
   PROTOCOL_VERSION,
@@ -73,20 +74,6 @@ if (process.argv.includes('--version')) {
     },
   );
 } else {
-  const connector = await startConnectorManager(home);
-  let stopping = false;
-  const stop = () => {
-    if (stopping) return;
-    stopping = true;
-    void connector.close().then(() => process.exit(0));
-  };
-  process.on('SIGINT', stop);
-  process.on('SIGTERM', stop);
-  if (process.platform === 'win32') {
-    // Closing a console sends SIGHUP and Ctrl-Break SIGBREAK; the Windows
-    // supervisor stops its connector by closing the IPC channel it gave it.
-    process.on('SIGHUP', stop);
-    process.on('SIGBREAK', stop);
-    if (process.channel) process.on('disconnect', stop);
-  }
+  // The Windows supervisor stops its connector by closing the IPC channel it gave it.
+  await runConnectorManager(() => startConnectorManager(home));
 }

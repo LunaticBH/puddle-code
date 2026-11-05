@@ -114,17 +114,22 @@ export class HelperMissingError extends CliError {
 /**
  * The daemon carries an administrator's elevated SSH token: WMI created its
  * supervisor from the session, or it runs attached to the session itself.
- * The logon task runs it without elevation.
+ * Until it stops, its pipes refuse that user's unelevated programs there:
+ * the desktop app, a local CLI, and the logon task's supervisor, which
+ * leaves the home to it. The logon task runs it without elevation, but only
+ * while its user is logged on, and never beside a daemon that already
+ * serves the home: the elevated one has to stop first, which only an
+ * elevated session (or a restart) can make a WMI-started supervisor do.
  */
 export function elevatedWarning(label: string, via: 'wmi' | 'session'): string {
   return (
     `puddled on ${label} runs elevated: an administrator's SSH session started it ` +
-    `${via === 'wmi' ? 'through WMI' : 'as its own child'}, outside Task Scheduler; ` +
+    `${via === 'wmi' ? 'through WMI' : 'as its own child'}, outside Task Scheduler, and ` +
+    'programs there that run without elevation cannot reach it until it stops; ' +
+    'to run it without elevation, log on to the machine and stay logged on, then ' +
     (via === 'wmi'
-      ? // A logon task started later only meets this supervisor's pipe and stands down.
-        `log on to the machine, then run puddle upgrade daemon ${label} (or restart it), so its ` +
-        'logon task, which runs without elevation, starts it instead'
-      : 'log on to the machine once so its logon task, which runs without elevation, starts it instead')
+      ? `run puddle upgrade daemon ${label}, which stops it and starts it through its logon task`
+      : 'launch again once this cockpit has closed: its logon task then starts it')
   );
 }
 

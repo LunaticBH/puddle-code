@@ -146,8 +146,23 @@ export class WindowsSupervisor {
       this.server = await this.deps.listen((socket) => this.serve(socket));
     } catch (err) {
       if (!(err instanceof Error) || !err.message.includes('already active')) throw err;
-      if ((await this.deps.holder()) === 'answered') {
+      const holder = await this.deps.holder();
+      if (holder === 'answered') {
         this.deps.log('another supervisor already runs for this home');
+        return 0;
+      }
+      if (holder === 'unavailable') {
+        // No squatter: one that answered without the proof would be. A pipe
+        // this process cannot open is typically an elevated supervisor's,
+        // which WMI started from an administrator's SSH session; renaming
+        // the pipes would only leave it running beside this one. An elevated
+        // upgrade stops it, then starts this task again.
+        this.deps.log(
+          'another supervisor holds this home’s pipe, but this process cannot reach it: it may ' +
+            'run elevated, started from an administrator’s session; leaving the home to it ' +
+            '(to run it without elevation, run puddle upgrade daemon from an elevated session ' +
+            'while logged on, or restart the machine)',
+        );
         return 0;
       }
       this.deps.log(
@@ -212,7 +227,8 @@ export class WindowsSupervisor {
           void this.shutdown('shutdown requested over the supervisor pipe');
           return answer();
         }
-        if (t === 'reconcile') this.reconcileConnector();
+        // Only `remote enable` asks: a fresh start for a connector given up on.
+        if (t === 'reconcile') this.reconcileConnector(true);
         if (t === 'restart_connector') return void this.restartConnector().then(answer);
         answer();
       },
@@ -296,7 +312,12 @@ export class WindowsSupervisor {
     this.deps.writePid(null);
   }
 
-  private reconcileConnector(): void {
+  /**
+   * Start or stop the connector as its supervision says. `requested`: remote
+   * access was enabled again (a `reconcile` request), which ends a give-up,
+   * as the give-up's log line says; restarts and backoff timers do not.
+   */
+  private reconcileConnector(requested = false): void {
     if (this.stopping) return;
     if (!this.deps.connectorWanted()) {
       this.connector.gaveUp = false;
@@ -305,6 +326,11 @@ export class WindowsSupervisor {
       this.connector.timer = undefined;
       void this.stopConnector();
       return;
+    }
+    if (requested && this.connector.gaveUp) {
+      this.connector.gaveUp = false;
+      this.connector.restarts.reset();
+      this.deps.log('remote access was enabled again — starting the connector afresh');
     }
     if (this.connector.stopping.size > 0) {
       this.connector.deferred = true;
@@ -325,7 +351,8 @@ export class WindowsSupervisor {
       if (holder !== 'absent') {
         this.deps.log(
           holder === 'foreign'
-            ? 'the connector lock pipe is held by a process that cannot prove it reads this home'
+            ? 'the connector lock pipe is held by a process that cannot prove it reads this home — ' +
+                'run puddle upgrade daemon to rename the home’s pipes; looking again later'
             : 'another connector serves this home; looking again later',
         );
         this.connector.timer = setTimeout(() => {

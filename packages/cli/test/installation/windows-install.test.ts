@@ -670,4 +670,32 @@ describe.runIf(
       await new Promise<void>((resolve) => squatter.close(() => resolve()));
     }
   }, 180_000);
+
+  it('renames the home’s pipes when another program squats a connector pipe', async () => {
+    for (const scope of ['remote', 'remote-0123456789']) {
+      const at = freshHome();
+      mkdirSync(join(at, 'remote', 'profiles', '0123456789'), { recursive: true });
+      const squatted = ipcPath(at, scope);
+      const before = ipcPath(at, 'host');
+      // It answers the challenge, but cannot prove it reads the home.
+      const squatter = await listenPrivate(squatted, (socket) => {
+        socket.on('error', () => {});
+        socket.on('data', () =>
+          socket.end(JSON.stringify({ t: 'proven', proof: '0'.repeat(64) }) + '\n'),
+        );
+      });
+      try {
+        const { lines, ...log } = logger();
+        await install({ home: at, tarball: zip, logger: log });
+        expect(lines.join('\n'), scope).toMatch(/not this home’s connector holds one of its pipes/);
+        expect(ipcPath(at, scope)).not.toBe(squatted);
+        expect(ipcPath(at, 'host')).not.toBe(before);
+        (await waitForStartedDaemon(new LocalTransport(), 60_000)).authority.close();
+        expect(await connectorPipeState(at, scope)).toBe('absent');
+        await stopWindowsDaemon(at);
+      } finally {
+        await new Promise<void>((resolve) => squatter.close(() => resolve()));
+      }
+    }
+  }, 300_000);
 });

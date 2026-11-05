@@ -24,6 +24,7 @@ import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import { initialisePrivateHome, ipcPath, listenPrivate, rotateIpcNonce } from '@puddle/shared/node';
 import {
+  connectorPipeSquatted,
   isPidAlive,
   isWindowsArch,
   registerSupervisorTask,
@@ -211,15 +212,20 @@ export async function installWindowsDaemon(opts: WindowsInstallOptions = {}): Pr
     let pipe = await controlPipeState(home);
     let answer = await supervisorRequest(home, 'status');
     let supervisor = answer.kind;
-    if (pipe === 'foreign' || supervisor === 'foreign') {
+    // The connector's pipes too: a squatter there keeps remote access down.
+    const connector = await connectorPipeSquatted(home);
+    if (pipe === 'foreign' || supervisor === 'foreign' || connector) {
       // Another account serves a name an earlier run used. Renamed under the
       // lock, the home's pipes leave it behind; the lock moves with them, and
       // its new name, keyed by the private ipc-key, says nothing of the
-      // daemon's. A supervisor of this home would be left on the old names.
+      // daemon's. A supervisor of this home would be left on the old names;
+      // stopping it stops its connector first.
       logger.warn(
         pipe === 'foreign'
           ? 'a process that is not this home’s daemon holds its control pipe — renaming it'
-          : 'a process that is not this home’s supervisor holds its pipe — renaming it',
+          : supervisor === 'foreign'
+            ? 'a process that is not this home’s supervisor holds its pipe — renaming it'
+            : 'a process that is not this home’s connector holds one of its pipes — renaming them',
       );
       if (supervisor === 'answered') await stopWindowsSupervisor(home, { logger });
       rotateIpcNonce(home);
@@ -345,6 +351,9 @@ async function supervise(
             started: {
               ran: registration.ran,
               state: registration.state ?? 'unknown',
+              ...(registration.lastResult !== undefined
+                ? { lastResult: registration.lastResult }
+                : {}),
               ...(registration.error !== undefined ? { error: registration.error } : {}),
             },
           }

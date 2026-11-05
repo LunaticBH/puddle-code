@@ -156,11 +156,36 @@ const PRELUDE = [
 ];
 
 /**
+ * Whose a task is and what it runs, before a script trusts one of its name.
+ * Task Scheduler reports a principal by account name, so it is translated
+ * to the SID it is compared with; one that cannot be translated is not this
+ * user's. The action is this home's supervisor command line exactly
+ * (PUDDLE_TASK_COMMAND and PUDDLE_TASK_ARGUMENTS), case aside.
+ */
+const OWNERSHIP = [
+  '$me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
+  'function Test-OwnTask($task) {',
+  '  $id = [string]$task.Principal.UserId',
+  "  if ($id -notmatch '^S-1-\\d+(-\\d+)+$') {",
+  '    try { $id = (New-Object Security.Principal.NTAccount($id)).Translate([Security.Principal.SecurityIdentifier]).Value } catch { return $false }',
+  '  }',
+  '  return $id -eq $me',
+  '}',
+  'function Test-TaskAction($task) {',
+  '  $actions = @($task.Actions)',
+  '  return $actions.Count -eq 1 -and [string]$actions[0].Execute -eq $env:PUDDLE_TASK_COMMAND -and [string]$actions[0].Arguments -eq $env:PUDDLE_TASK_ARGUMENTS',
+  '}',
+];
+
+/**
  * Start the task, then wait (PUDDLE_TASK_WAIT_MS) until it runs or has run:
  * an interactive-token task does not run while its user has no desktop
- * session, and Start-ScheduledTask still succeeds then. A run that is just
- * ending (its program exited a moment ago) is waited out first, since
- * IgnoreNew would drop the start.
+ * session, and Start-ScheduledTask still succeeds then. Task Scheduler
+ * stamps the run it refused with a new LastRunTime all the same, so a run
+ * whose result is a refusal (0x800710E0 ERROR_REQUEST_REFUSED, 0x800704DD
+ * ERROR_NOT_LOGGED_ON, compared as the unsigned values they are) never
+ * counts as one. A run that is just ending (its program exited a moment
+ * ago) is waited out first, since IgnoreNew would drop the start.
  */
 const START = [
   'try {',
@@ -174,7 +199,11 @@ const START = [
   '  do {',
   "    $task = Get-ScheduledTask -TaskName $name -TaskPath '\\'",
   '    $info = $task | Get-ScheduledTaskInfo',
-  "    if ([string]$task.State -eq 'Running' -or $info.LastRunTime -ne $before) { $out.ran = $true; break }",
+  "    if ([string]$task.State -eq 'Running') { $out.ran = $true; break }",
+  '    if ($info.LastRunTime -ne $before) {',
+  '      $out.ran = @(2147946720, 2147943645) -notcontains [int64]$info.LastTaskResult',
+  '      break',
+  '    }',
   '    Start-Sleep -Milliseconds 200',
   '  } while ((Get-Date) -lt $deadline)',
   '  $out.state = [string]$task.State',
@@ -185,31 +214,63 @@ const START = [
 /**
  * Register (or replace) the task from PUDDLE_TASK_XML, and start it when
  * PUDDLE_TASK_START is 1. A task its user disabled stays as it is and is not
- * started: that is how a user turns logon autostart off.
+ * started: that is how a user turns logon autostart off. A task of that
+ * name that another account registered is never replaced, nor reported as
+ * registered. Once registered, this user's other root `Puddle *` tasks that
+ * run the same command line (an earlier name of the home's task) are
+ * removed, unless one is running, and one its user disabled leaves this one
+ * disabled too.
  */
 const REGISTER_SCRIPT = [
   ...PRELUDE,
-  "$out = @{ registered = $false; disabled = $false; ran = $false; state = 'absent'; error = '' }",
+  ...OWNERSHIP,
+  "$out = @{ registered = $false; disabled = $false; ran = $false; state = 'absent'; error = ''; replaced = 0 }",
   "$existing = Get-ScheduledTask -TaskName $name -TaskPath '\\' -ErrorAction SilentlyContinue",
-  "if ($existing -and [string]$existing.State -eq 'Disabled') {",
+  'if ($existing -and -not (Test-OwnTask $existing)) {',
+  "  $out.state = [string]$existing.State; $out.error = 'a scheduled task of this name runs as another account'",
+  "} elseif ($existing -and [string]$existing.State -eq 'Disabled') {",
   "  $out.registered = $true; $out.disabled = $true; $out.state = 'Disabled'",
   '} else {',
   '  try {',
   "    $null = Register-ScheduledTask -TaskName $name -TaskPath '\\' -Xml $env:PUDDLE_TASK_XML -Force",
   "    $out.registered = $true; $out.state = 'Ready'",
   '  } catch { $out.error = $_.Exception.Message }',
-  "  if ($out.registered -and $env:PUDDLE_TASK_START -eq '1') {",
-  ...START.map((line) => `    ${line}`),
-  '  }',
+  '}',
+  'if ($out.registered -and $env:PUDDLE_TASK_COMMAND) {',
+  '  try {',
+  "    foreach ($other in @(Get-ScheduledTask -TaskPath '\\' -ErrorAction SilentlyContinue)) {",
+  "      if ($other.TaskName -eq $name -or $other.TaskName -notlike 'Puddle *' -or [string]$other.State -eq 'Running') { continue }",
+  '      if (-not (Test-OwnTask $other) -or -not (Test-TaskAction $other)) { continue }',
+  "      if ([string]$other.State -eq 'Disabled' -and -not $out.disabled) {",
+  "        $null = Disable-ScheduledTask -TaskName $name -TaskPath '\\'",
+  "        $out.disabled = $true; $out.state = 'Disabled'",
+  '      }',
+  "      Unregister-ScheduledTask -TaskName $other.TaskName -TaskPath '\\' -Confirm:$false",
+  '      $out.replaced = $out.replaced + 1',
+  '    }',
+  '  } catch {}',
+  '}',
+  "if ($out.registered -and -not $out.disabled -and $env:PUDDLE_TASK_START -eq '1') {",
+  ...START.map((line) => `  ${line}`),
   '}',
   '$out | ConvertTo-Json -Compress',
 ].join('\n');
 
+/**
+ * Start the task only when this user registered it and, given
+ * PUDDLE_TASK_COMMAND, it runs that command line: a task of the name that
+ * runs anything else is reported, never started.
+ */
 const START_SCRIPT = [
   ...PRELUDE,
+  ...OWNERSHIP,
   "$out = @{ ran = $false; state = 'absent'; error = '' }",
   "$existing = Get-ScheduledTask -TaskName $name -TaskPath '\\' -ErrorAction SilentlyContinue",
-  "if ($existing -and [string]$existing.State -eq 'Disabled') { $out.state = 'Disabled' } elseif ($existing) {",
+  'if ($existing -and -not (Test-OwnTask $existing)) {',
+  "  $out.state = [string]$existing.State; $out.error = 'a scheduled task of this name runs as another account'",
+  '} elseif ($existing -and $env:PUDDLE_TASK_COMMAND -and -not (Test-TaskAction $existing)) {',
+  "  $out.state = [string]$existing.State; $out.error = 'the scheduled task of this name runs another programme'",
+  "} elseif ($existing -and [string]$existing.State -eq 'Disabled') { $out.state = 'Disabled' } elseif ($existing) {",
   ...START.map((line) => `  ${line}`),
   '}',
   '$out | ConvertTo-Json -Compress',
@@ -334,11 +395,28 @@ export interface WindowsTaskRegistration extends Partial<WindowsTaskStart> {
   error?: string;
 }
 
-/** Register `name` from `xml`, replacing an earlier definition; optionally start it. */
+/** The one program a task runs, as its definition gives it. */
+export type WindowsTaskAction = Pick<WindowsTaskDefinition, 'command' | 'arguments'>;
+
+/** The action a script checks a task of the name against, in its environment. */
+const actionEnv = (action: WindowsTaskAction | undefined): Record<string, string> =>
+  action === undefined
+    ? {}
+    : { PUDDLE_TASK_COMMAND: action.command, PUDDLE_TASK_ARGUMENTS: action.arguments };
+
+/**
+ * Register `name` from `xml`, replacing an earlier definition of this user's
+ * (never another account's); optionally start it. Given the `action` the XML
+ * defines, this user's other `Puddle *` tasks that run it are removed.
+ */
 export async function registerWindowsTask(
   name: string,
   xml: string,
-  opts: WindowsTaskOptions & { start?: boolean; startWaitMs?: number } = {},
+  opts: WindowsTaskOptions & {
+    start?: boolean;
+    startWaitMs?: number;
+    action?: WindowsTaskAction;
+  } = {},
 ): Promise<WindowsTaskRegistration> {
   const report = await run(
     REGISTER_SCRIPT,
@@ -347,6 +425,7 @@ export async function registerWindowsTask(
       PUDDLE_TASK_XML: xml,
       PUDDLE_TASK_START: opts.start ? '1' : '0',
       PUDDLE_TASK_WAIT_MS: String(opts.startWaitMs ?? 5000),
+      ...actionEnv(opts.action),
     },
     opts,
   );
@@ -362,14 +441,21 @@ export async function registerWindowsTask(
   };
 }
 
-/** Start a registered task and report whether it ran; an absent task reports `absent`. */
+/**
+ * Start a registered task of this user's (running `action`, when given) and
+ * report whether it ran; an absent task reports `absent`.
+ */
 export async function startWindowsTask(
   name: string,
-  opts: WindowsTaskOptions & { startWaitMs?: number } = {},
+  opts: WindowsTaskOptions & { startWaitMs?: number; action?: WindowsTaskAction } = {},
 ): Promise<WindowsTaskStart> {
   const report = await run(
     START_SCRIPT,
-    { PUDDLE_TASK_NAME: name, PUDDLE_TASK_WAIT_MS: String(opts.startWaitMs ?? 5000) },
+    {
+      PUDDLE_TASK_NAME: name,
+      PUDDLE_TASK_WAIT_MS: String(opts.startWaitMs ?? 5000),
+      ...actionEnv(opts.action),
+    },
     opts,
   );
   const error = reportedError(report);

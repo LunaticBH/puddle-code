@@ -1,7 +1,10 @@
+import { readdirSync } from 'node:fs';
 import { connect } from 'node:net';
+import { join } from 'node:path';
 import {
   connectorProvenSchema,
   controlResponseSchema,
+  profileId,
   supervisorResponseSchema,
   type SupervisorRequest,
   type SupervisorResponse,
@@ -199,4 +202,27 @@ export function connectorPipeState(
       socket.write(JSON.stringify({ t: 'challenge', challenge }) + '\n'),
     );
   });
+}
+
+/**
+ * Whether a server that cannot prove it reads the home holds one of its
+ * connector pipes: the manager's lock (`remote`) or a registered profile's
+ * (`remote-<profile>`). The installer renames the home's pipes away from it,
+ * as from a squatter on the daemon's or the supervisor's.
+ */
+export async function connectorPipeSquatted(home: string): Promise<boolean> {
+  const scopes = ['remote', ...connectorProfiles(home).map((profile) => `remote-${profile}`)];
+  const states = await Promise.all(scopes.map((scope) => connectorPipeState(home, scope)));
+  return states.includes('foreign');
+}
+
+/** The ids under `<home>\remote\profiles`, as the connector lists them, changing nothing. */
+function connectorProfiles(home: string): string[] {
+  try {
+    return readdirSync(join(home, 'remote', 'profiles')).filter(
+      (id) => profileId.safeParse(id).success,
+    );
+  } catch {
+    return [];
+  }
 }

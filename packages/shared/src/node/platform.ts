@@ -57,6 +57,7 @@ export {
   windowsTaskXml,
   type PowerShellResult,
   type PowerShellRunner,
+  type WindowsTaskAction,
   type WindowsTaskDefinition,
   type WindowsTaskOptions,
   type WindowsTaskRegistration,
@@ -64,6 +65,7 @@ export {
   type WindowsTaskState,
 } from './windows-tasks.js';
 export {
+  connectorPipeSquatted,
   connectorPipeState,
   controlPipeState,
   requestDaemonShutdown,

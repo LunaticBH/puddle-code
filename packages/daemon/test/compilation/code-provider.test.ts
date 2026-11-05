@@ -264,6 +264,31 @@ describe('code tool discovery and process bounds', () => {
     expect(find(powershell, [bin, pwsh])).toBe(join(pwsh, 'pwsh.exe'));
   });
 
+  it('runs PowerShell scripts with the Microsoft Store’s PowerShell 7, by its alias', () => {
+    const bin = directory();
+    writeFileSync(join(bin, 'powershell.exe'), '');
+    const aliases = directory();
+    const alias = join(aliases, 'pwsh.exe');
+    const isAlias = (path: string) => path === alias;
+    const powershell = recipeExecutables(recipe('powershell'), 'win32');
+    expect(findCodeExecutable(powershell, [bin, aliases], 'win32', isAlias)).toBe(alias);
+    // An installed pwsh.exe comes first, and no other alias is ever chosen.
+    const installed = directory();
+    writeFileSync(join(installed, 'pwsh.exe'), '');
+    expect(findCodeExecutable(powershell, [aliases, installed], 'win32', isAlias)).toBe(
+      join(installed, 'pwsh.exe'),
+    );
+    expect(findCodeExecutable(['python'], [aliases], 'win32', () => true)).toBeNull();
+    expect(findCodeExecutable(powershell, [bin, aliases], 'win32', () => false)).toBe(
+      join(bin, 'powershell.exe'),
+    );
+    // The folder Windows keeps the user's aliases in is searched.
+    const localAppData = directory();
+    expect(codeSearchDirectories({ LOCALAPPDATA: localAppData }, directory(), 'win32')).toContain(
+      join(localAppData, 'Microsoft', 'WindowsApps'),
+    );
+  });
+
   it('offers PowerShell scripts on Windows and POSIX shells elsewhere', () => {
     // The POSIX provider list, in order, is fixed.
     const posix = [

@@ -247,6 +247,27 @@ describe('the Windows supervisor', () => {
     }
   });
 
+  it('leaves the home to a supervisor it cannot reach, without calling it a squatter', async () => {
+    const h = harness();
+    // An elevated supervisor's pipe: served, but this process cannot open it.
+    const held: Server = await listenPrivate(ipcPath(h.home, 'supervisor'), (socket) => {
+      socket.on('error', () => {});
+    });
+    try {
+      const supervisor = new WindowsSupervisor({ ...h.deps, holder: async () => 'unavailable' });
+      expect(await supervisor.run()).toBe(0);
+      expect(h.daemons).toHaveLength(0);
+      const log = h.log.join('\n');
+      expect(log).toMatch(/cannot reach it: it may run elevated/);
+      expect(log).toMatch(
+        /run puddle upgrade daemon from an elevated session while logged on, or restart the machine/,
+      );
+      expect(log).not.toMatch(/rename the home’s pipes/);
+    } finally {
+      await new Promise<void>((resolve) => held.close(() => resolve()));
+    }
+  });
+
   it('shuts the daemon and connector down on request, answering first', async () => {
     const h = harness({ connector: true });
     const { done } = h.start();
@@ -332,5 +353,42 @@ describe('the supervised connector', () => {
     expect(h.connectors).toHaveLength(0);
     h.state.manager = 'absent';
     await until(() => h.connectors.length === 1);
+  });
+
+  it('names the remedy for a squatter on the connector lock', async () => {
+    const h = harness({ connector: true, manager: 'foreign' });
+    h.start();
+    await until(() => h.log.some((line) => line.includes('connector lock pipe is held')));
+    expect(h.log.find((line) => line.includes('connector lock pipe is held'))).toMatch(
+      /run puddle upgrade daemon to rename the home’s pipes/,
+    );
+    expect(h.connectors).toHaveLength(0);
+  });
+
+  it('starts a connector it gave up on afresh once remote access is enabled again', async () => {
+    const h = harness({ connector: true });
+    h.start();
+    for (let crash = 1; crash <= 10; crash++) {
+      await until(() => h.connectors.length === crash);
+      h.connectors[crash - 1]!.exit(1);
+    }
+    await until(() => h.log.some((line) => line.includes('failed 10 times in ten minutes')));
+    // Only an enable revives it: the backoff and the supervisor's own reconciles do not.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(h.connectors).toHaveLength(10);
+    // `remote enable` rewrites the marker (still present) and asks the supervisor to reconcile.
+    expect((await supervisorRequest(h.home, 'reconcile')).kind).toBe('answered');
+    await until(() => h.connectors.length === 11);
+    expect(h.log.join('\n')).toMatch(/enabled again — starting the connector afresh/);
+    // A fresh start: the next crash restarts it at the first backoff again.
+    h.connectors[10]!.exit(1);
+    await until(() => h.connectors.length === 12);
+    expect(h.log.filter((line) => line.startsWith('restarting the connector')).at(-1)).toMatch(
+      /restarting the connector in 0\.01 s/,
+    );
+    // A reconcile while it runs changes nothing.
+    await supervisorRequest(h.home, 'reconcile');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(h.connectors).toHaveLength(12);
   });
 });

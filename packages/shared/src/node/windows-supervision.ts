@@ -1,16 +1,17 @@
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { existsSync, openSync, realpathSync, renameSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, win32 } from 'node:path';
 import { deleteEnv, getEnv, setEnv } from './environment.js';
 import { disableCurrentDirectorySearch } from './executables.js';
+import { ipcProof } from './security.js';
 import { readCurrentWindowsUserSid } from './windows-acl.js';
 import { supervisorRequest } from './windows-pipes.js';
 import {
   createWindowsProcess,
   registerWindowsTask,
   startWindowsTask,
+  type WindowsTaskAction,
   type WindowsTaskDefinition,
   type WindowsTaskOptions,
   type WindowsTaskRegistration,
@@ -92,10 +93,18 @@ export function canonicalWindowsHome(home: string): string {
   }
 }
 
-/** `Puddle <16 hex>`: one root-folder task per home, whichever spelling names it. */
+/**
+ * `Puddle <16 hex>`: one root-folder task per home, whichever spelling names
+ * it. Task names in the root folder are shared by every account, and any of
+ * them may create one there, so the name is keyed as the home's pipe names
+ * are (docs/windows.md, decision 3): by the home's private `ipc-key`, which
+ * no other account can read, so none can take the name first. `ipcProof`
+ * is that keyed HMAC; no server ever answers for the `scheduled-task` scope,
+ * and a home path is no challenge one would accept.
+ */
 export function supervisorTaskName(home: string): string {
   const identity = canonicalWindowsHome(home).toLowerCase();
-  return `Puddle ${createHash('sha256').update(identity).digest('hex').slice(0, 16)}`;
+  return `Puddle ${ipcProof(home, 'scheduled-task', identity).slice(0, 16)}`;
 }
 
 /**
@@ -166,6 +175,11 @@ export function supervisorCommandLine(home: string): string {
   return `${quoted(supervisorPaths(home).launcher)} ${supervisorArguments(home)}`;
 }
 
+/** What the home's task must run before it is started or counted as the home's. */
+function supervisorAction(home: string): WindowsTaskAction {
+  return { command: supervisorPaths(home).launcher, arguments: supervisorArguments(home) };
+}
+
 /**
  * `<home>\remote\supervised`: present while the supervisor runs the
  * connector, the counterpart of POSIX's installed connector unit. Managed
@@ -197,7 +211,10 @@ export async function registerSupervisorTask(
     return await registerWindowsTask(
       name,
       windowsTaskXml(name, supervisorTaskDefinition(home, sid)),
-      opts,
+      {
+        ...opts,
+        action: supervisorAction(home),
+      },
     );
   } catch (err) {
     return { registered: false, disabled: false, error: (err as Error).message };
@@ -232,12 +249,27 @@ export async function waitForSupervisor(home: string, waitMs: number): Promise<b
   }
 }
 
+/** Why a start of the task did not run it, for the log. */
+function notRun(started: WindowsTaskStart): string {
+  if (started.error !== undefined) return started.error;
+  // Task Scheduler's result codes read as the unsigned hexadecimal it documents.
+  const result =
+    started.lastResult !== undefined && started.lastResult !== 0
+      ? `, last result 0x${(started.lastResult >>> 0).toString(16).toUpperCase().padStart(8, '0')}`
+      : '';
+  return `state ${started.state}${result}`;
+}
+
 /**
  * Start the home's supervisor unless one runs: through its task, then WMI,
  * then as a detached child. A late start of an earlier way only meets the
  * supervisor pipe already served and exits, so falling through never leaves
  * two supervisors. A home the task cannot start (unschedulableHome) skips
- * it. Throws when no way brings the supervisor up.
+ * it. WMI starts it from an elevated caller too, with that token: the only
+ * way that outlives an administrator's SSH session while nobody is logged
+ * on. Its pipes then refuse its user's unelevated processes until it stops
+ * (the logon task's supervisor leaves the home to it), which the SSH client
+ * warns of. Throws when no way brings the supervisor up.
  */
 export async function startWindowsSupervisor(
   home: string,
@@ -249,7 +281,10 @@ export async function startWindowsSupervisor(
   if (opts.task && unschedulableHome(canonicalWindowsHome(home)) === undefined) {
     let started = opts.started;
     try {
-      started ??= await startWindowsTask(supervisorTaskName(home), opts);
+      started ??= await startWindowsTask(supervisorTaskName(home), {
+        ...opts,
+        action: supervisorAction(home),
+      });
     } catch (err) {
       started = { ran: false, state: 'unknown', error: (err as Error).message };
     }
@@ -257,7 +292,7 @@ export async function startWindowsSupervisor(
     info(
       started.ran
         ? 'the scheduled task ran, but its supervisor did not come up — starting it directly'
-        : `the scheduled task did not run (${started.error ?? `state ${started.state}`}); ` +
+        : `the scheduled task did not run (${notRun(started)}); ` +
             'no desktop session may be logged on — starting the supervisor directly',
     );
   }

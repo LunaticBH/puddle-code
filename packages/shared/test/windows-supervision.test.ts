@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import type { ChildProcess } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync } from 'node:fs';
 import type { Server, Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,7 +10,11 @@ import {
   startWindowsSupervisor,
   superviseWindowsConnector,
 } from '../src/node/windows-supervision.js';
-import { connectorPipeState, supervisorRequest } from '../src/node/windows-pipes.js';
+import {
+  connectorPipeSquatted,
+  connectorPipeState,
+  supervisorRequest,
+} from '../src/node/windows-pipes.js';
 import type { PowerShellRunner } from '../src/node/windows-tasks.js';
 
 /**
@@ -114,6 +118,30 @@ describe('the supervisor pipe', () => {
     await serve(other, 'remote', () => ({ t: 'proven', proof: '0'.repeat(64) }));
     expect(await connectorPipeState(other, 'remote')).toBe('foreign');
   });
+
+  it('finds a squatter on any connector pipe, a registered profile’s included', async () => {
+    const home = freshHome();
+    const profile = '0123456789';
+    mkdirSync(join(home, 'remote', 'profiles', profile), { recursive: true });
+    // Not a profile id: never probed.
+    mkdirSync(join(home, 'remote', 'profiles', 'not-a-profile'), { recursive: true });
+    expect(await connectorPipeSquatted(home)).toBe(false);
+    const prove = (scope: string) => (request: Record<string, string>) => ({
+      t: 'proven',
+      proof: ipcProof(home, scope, request.challenge!),
+    });
+    await serve(home, 'remote', prove('remote'));
+    await serve(home, `remote-${profile}`, prove(`remote-${profile}`));
+    expect(await connectorPipeSquatted(home)).toBe(false);
+
+    const squatted = freshHome();
+    mkdirSync(join(squatted, 'remote', 'profiles', profile), { recursive: true });
+    await serve(squatted, `remote-${profile}`, () => ({ t: 'proven', proof: '0'.repeat(64) }));
+    expect(await connectorPipeSquatted(squatted)).toBe(true);
+    const locked = freshHome();
+    await serve(locked, 'remote', () => ({ t: 'error' }));
+    expect(await connectorPipeSquatted(locked)).toBe(true);
+  });
 });
 
 describe('starting the supervisor', () => {
@@ -155,10 +183,75 @@ describe('starting the supervisor', () => {
       logger: { info: (line) => lines.push(line), warn: (line) => lines.push(line) },
     });
     expect(started).toBe('process');
+    // The task start names the command line it must run; WMI runs the same one.
+    expect(calls[0]!.PUDDLE_TASK_COMMAND).toMatch(/\\bin\\current\\bin\\puddle-hidden\.exe$/);
+    expect(calls[0]!.PUDDLE_TASK_ARGUMENTS).toMatch(/supervisor\.mjs" --home "/);
     expect(calls[1]!.PUDDLE_PROCESS_COMMAND).toMatch(
       /^"[^"]*\\bin\\current\\bin\\puddle-hidden\.exe" "[^"]*\\node\.exe" ".*supervisor\.mjs" --home "/,
     );
+    expect(calls[1]!.PUDDLE_PROCESS_COMMAND).toBe(
+      `"${calls[0]!.PUDDLE_TASK_COMMAND}" ${calls[0]!.PUDDLE_TASK_ARGUMENTS}`,
+    );
     expect(lines.join('\n')).toMatch(/no desktop session/);
+  });
+
+  it('goes to WMI at once when Task Scheduler refused the run, naming its result', async () => {
+    const home = freshHome();
+    const lines: string[] = [];
+    const { runner, calls } = powershell((env) => {
+      if ('PUDDLE_PROCESS_COMMAND' in env) {
+        void supervisor(home);
+        return { code: 0, pid: 77, error: '' };
+      }
+      // What START reports for a run refused for want of a desktop session.
+      return { ran: false, state: 'Ready', lastResult: 0x800710e0, error: '' };
+    });
+    const begun = Date.now();
+    const started = await startWindowsSupervisor(home, {
+      task: true,
+      powershell: runner,
+      waitMs: 20_000,
+      logger: { info: (line) => lines.push(line), warn: (line) => lines.push(line) },
+    });
+    expect(started).toBe('process');
+    // No wait for a supervisor the refused task never started.
+    expect(Date.now() - begun).toBeLessThan(10_000);
+    expect(calls.filter((env) => 'PUDDLE_PROCESS_COMMAND' in env)).toHaveLength(1);
+    expect(lines.join('\n')).toMatch(
+      /the scheduled task did not run \(state ready, last result 0x800710E0\); no desktop session/,
+    );
+    expect(lines.join('\n')).not.toMatch(/ran, but its supervisor did not come up/);
+  });
+
+  it('starts it through WMI from an elevated session too, the one way that outlives it', async () => {
+    const home = freshHome();
+    const lines: string[] = [];
+    // An administrator's session, as any question about elevation would hear.
+    const { runner, calls } = powershell((env) => {
+      if ('PUDDLE_PROCESS_COMMAND' in env) {
+        void supervisor(home);
+        return { code: 0, pid: 77, error: '' };
+      }
+      if ('PUDDLE_TASK_NAME' in env) return { ran: false, state: 'Ready', error: '' };
+      return { elevated: true, error: '' };
+    });
+    const { spawnDetached, spawned } = spawner();
+    const started = await startWindowsSupervisor(home, {
+      task: true,
+      powershell: runner,
+      spawnDetached,
+      waitMs: 3000,
+      logger: { info: (line) => lines.push(line), warn: (line) => lines.push(line) },
+    });
+    // Nobody is logged on: an SSH session refuses the detached child, so
+    // skipping WMI would leave no supervisor that outlives the session.
+    expect(started).toBe('process');
+    expect(spawned).toEqual([]);
+    expect(calls.map((env) => Object.keys(env)[0])).toEqual([
+      'PUDDLE_TASK_NAME',
+      'PUDDLE_PROCESS_COMMAND',
+    ]);
+    expect(lines.join('\n')).not.toMatch(/elevated/);
   });
 
   it('supervises a home holding % without its task, through WMI or a detached child', async () => {
