@@ -32,6 +32,15 @@ const cli = resolve(root, 'packages/cli/dist/index.js');
 const helper = resolve(root, 'packages/cli/dist/windows-host.mjs');
 const gitBash = join(process.env.ProgramFiles ?? 'C:\\Program Files', 'Git', 'bin', 'bash.exe');
 
+// CI builds the zip first; there, a missing zip must fail rather than skip.
+it.runIf(process.platform === 'win32' && process.env.CI !== undefined)(
+  'has a Windows daemon zip and host helper to test with',
+  () => {
+    expect(zip).toBeDefined();
+    expect(existsSync(helper)).toBe(true);
+  },
+);
+
 describe.runIf(process.platform === 'win32' && zip !== undefined && existsSync(helper))(
   'SSH to a Windows host, through a fake Windows OpenSSH server',
   () => {
