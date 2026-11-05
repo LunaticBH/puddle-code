@@ -43,7 +43,7 @@ const options = { mode: 'on_demand', command: null } as const;
 afterEach(async () => {
   for (const root of roots.splice(0)) {
     // Windows keeps a working directory busy until a stopped command has gone,
-    // which taskkill completes shortly after the command's promise settles.
+    // which the tree's stop completes shortly after the command's promise settles.
     for (let attempt = 0; ; attempt++) {
       try {
         rmSync(root, { recursive: true, force: true });

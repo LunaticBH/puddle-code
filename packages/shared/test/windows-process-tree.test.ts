@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  childProcessTree,
   isPidAlive,
   killProcessTree,
   listWindowsProcesses,
@@ -16,7 +18,7 @@ import {
  * stops real processes on Windows.
  */
 
-/** What killProcessTree runs (taskkill.exe), recorded on its way through. */
+/** What killProcessTree runs, recorded on its way through: never taskkill.exe. */
 const executed = vi.hoisted(() => [] as string[]);
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
@@ -139,6 +141,14 @@ describe('windowsProcessTree', () => {
       pids(windowsProcessTree([entry(10, 1, 1000), entry(11, 10, null)], { pid: 10 })),
     ).toEqual([10]);
     expect(windowsProcessTree(table, { pid: 0 })).toEqual([]);
+  });
+
+  it('leaves out what `spare` names and everything below it, never the root', () => {
+    const spare = (e: WindowsProcess) => e.pid === 11 || e.pid === 10;
+    expect(pids(windowsProcessTree(table, { pid: 10 }, spare))).toEqual([10, 13]);
+    // A dead root's orphan is spared too.
+    const orphans = [entry(11, 10, 1100), entry(12, 11, 1200), entry(13, 10, 1300)];
+    expect(pids(windowsProcessTree(orphans, { pid: 10, startedAtMs: 1000 }, spare))).toEqual([13]);
   });
 });
 
@@ -308,6 +318,86 @@ describe('stopWindowsProcessTree', () => {
   });
 });
 
+describe('stopWindowsProcessTree sparing GUI programmes', () => {
+  // Subsystems by image: GUI (2), console (3), or unreadable (null).
+  const kinds: Record<string, number | null> = {
+    'node.exe': 3,
+    'cmd.exe': 3,
+    'gui.exe': 2,
+    'conhost.exe': 2,
+    'locked.exe': null,
+  };
+  const subsystem = async (e: WindowsProcess) => kinds[e.name] ?? null;
+
+  it('leaves a GUI programme, what it started, and an unreadable image running', async () => {
+    const w = world([
+      entry(10, 1, 1000, 'gui.exe'), // the root: its own image never counts
+      entry(11, 10, 1100),
+      entry(12, 11, 1200, 'gui.exe'),
+      entry(13, 12, 1300), // a console programme the GUI programme started
+      entry(14, 10, 1400, 'conhost.exe'),
+      entry(15, 10, 1500, 'locked.exe'),
+      entry(16, 15, 1600),
+      entry(17, 11, 1700, 'cmd.exe'),
+    ]);
+    const stopped = await stopWindowsProcessTree(10, {
+      processes: w.processes,
+      root: { createdAtMs: 1000 },
+      terminate: w.terminate,
+      spareGui: true,
+      subsystem,
+    });
+    expect(w.terminated).toEqual([10, 11, 17]);
+    expect(pids(stopped)).toEqual([10, 11, 17]);
+  });
+
+  it('spares a GUI programme started between reads, with its children', async () => {
+    const w = world([entry(10, 1, 1000), entry(11, 10, 1100)]);
+    w.onTerminate((pid) => {
+      if (pid !== 10) return;
+      w.add(entry(12, 11, 1500, 'gui.exe'), entry(13, 12, 1600), entry(14, 11, 1550));
+    });
+    await stopWindowsProcessTree(10, {
+      processes: w.processes,
+      root: { createdAtMs: 1000 },
+      terminate: w.terminate,
+      spareGui: true,
+      subsystem,
+    });
+    expect(w.terminated).toEqual([10, 11, 14]);
+  });
+
+  it('ends the running root through `endRoot`, never by its pid', async () => {
+    const w = world([entry(10, 1, 1000), entry(11, 10, 1100)]);
+    const ended: string[] = [];
+    await stopWindowsProcessTree(10, {
+      processes: w.processes,
+      root: { startedAtMs: 1000, createdBeforeMs: 1050 },
+      terminate: w.terminate,
+      endRoot: () => ended.push('root'),
+    });
+    expect(ended).toEqual(['root']);
+    expect(w.terminated).toEqual([11]);
+  });
+
+  it('never ends a later holder of the root’s pid, by its pid or through `endRoot`', async () => {
+    // The root (started at 1000, created by 1050) exited; pid 10 was taken at 3000.
+    const w = world([entry(10, 1, 3000), entry(11, 10, 3100), entry(12, 10, 1020)]);
+    let ended = false;
+    await stopWindowsProcessTree(10, {
+      processes: w.processes,
+      root: { startedAtMs: 1000, createdBeforeMs: 1050 },
+      terminate: w.terminate,
+      endRoot: () => (ended = true),
+      spareGui: true,
+      subsystem,
+    });
+    expect(ended).toBe(false);
+    // Only the root's own orphan, created during its life.
+    expect(w.terminated).toEqual([12]);
+  });
+});
+
 describe('killProcessTree with a process table', () => {
   it('keeps POSIX on its signals, whatever table it is given', async () => {
     let read = false;
@@ -321,8 +411,18 @@ describe('killProcessTree with a process table', () => {
     expect(read).toBe(false);
   });
 
-  it('stops nothing when the table cannot be read: never taskkill on a pid that may be reused', async () => {
+  it('ends only the root through its handle when the table cannot be read: never taskkill', async () => {
     executed.length = 0;
+    const ended: string[] = [];
+    await expect(
+      killProcessTree(2 ** 30, {
+        platform: 'win32',
+        processes: () => Promise.reject(new Error('no table')),
+        endRoot: () => ended.push('root'),
+      }),
+    ).resolves.toBeUndefined();
+    expect(ended).toEqual(['root']);
+    // Without a handle, nothing can be told apart: nothing ends.
     await expect(
       killProcessTree(2 ** 30, {
         platform: 'win32',
@@ -332,11 +432,83 @@ describe('killProcessTree with a process table', () => {
     expect(executed.filter((file) => /taskkill/i.test(file))).toEqual([]);
   });
 
-  it('still runs taskkill without a table', async () => {
+  it('never runs taskkill, reading the shared table by default', async () => {
     executed.length = 0;
-    // A pid no process holds: taskkill (or its absence off Windows) finds nothing.
+    // A pid no process holds (off Windows the shared table cannot be read at all).
     await killProcessTree(2 ** 30, { platform: 'win32' });
-    expect(executed.filter((file) => /taskkill/i.test(file))).toHaveLength(1);
+    expect(executed.filter((file) => /taskkill/i.test(file))).toEqual([]);
+  });
+
+  it('spares GUI programmes and their children, ending the rest of the tree', async () => {
+    const w = world([
+      entry(10, 1, 1000),
+      entry(11, 10, 1100, 'gui.exe'),
+      entry(12, 11, 1200),
+      entry(13, 10, 1300),
+    ]);
+    const ended: string[] = [];
+    await killProcessTree(10, {
+      platform: 'win32',
+      processes: w.processes,
+      root: { startedAtMs: 1000, createdBeforeMs: 1010 },
+      endRoot: () => ended.push('root'),
+      terminate: w.terminate,
+      subsystem: async (e) => (e.name === 'gui.exe' ? 2 : 3),
+    });
+    expect(ended).toEqual(['root']);
+    expect(w.terminated).toEqual([13]);
+  });
+
+  it('spares a process whose image cannot be read by default', async () => {
+    const w = world([entry(10, 1, 1000), entry(11, 10, 1100)]);
+    await killProcessTree(10, {
+      platform: 'win32',
+      processes: w.processes,
+      root: { createdAtMs: 1000 },
+      terminate: w.terminate,
+    });
+    // The stand-in table carries no image paths.
+    expect(w.terminated).toEqual([10]);
+  });
+});
+
+describe('childProcessTree', () => {
+  it('identifies a child by when it was spawned and when it exited, and ends it by its handle', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(2000);
+      const child = new EventEmitter() as EventEmitter & { pid: number; kill: () => boolean };
+      const kills: string[] = [];
+      child.pid = 2 ** 30;
+      child.kill = () => {
+        kills.push('kill');
+        return true;
+      };
+      const tree = childProcessTree(child as never, 1990);
+      expect(tree.root()).toEqual({ startedAtMs: 1990, createdBeforeMs: 2000 });
+      const table = [entry(2 ** 30, process.pid, 1995), entry(2 ** 30 + 1, 2 ** 30, 2500)];
+      const terminated: number[] = [];
+      await tree.kill({
+        platform: 'win32',
+        processes: async () => table,
+        terminate: (pid) => terminated.push(pid),
+        subsystem: async () => 3,
+      });
+      expect(kills).toEqual(['kill']);
+      expect(terminated).toEqual([2 ** 30 + 1]);
+      vi.setSystemTime(3000);
+      child.emit('exit', 0, null);
+      expect(tree.root()).toEqual({ startedAtMs: 1990, createdBeforeMs: 2000, exitedAtMs: 3000 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('resolves at once for a child that never started', async () => {
+    const child = Object.assign(new EventEmitter(), { pid: undefined, kill: () => false });
+    await expect(childProcessTree(child as never, 0).kill({ platform: 'win32' })).resolves.toBe(
+      undefined,
+    );
   });
 });
 

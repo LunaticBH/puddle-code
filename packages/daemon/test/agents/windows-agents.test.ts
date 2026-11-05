@@ -172,7 +172,8 @@ describe('lifecycle version probes', () => {
 });
 
 describe.runIf(process.platform === 'win32')('Codex app-server stop on Windows', () => {
-  it('stops the npm launcher and the native server it started', async () => {
+  it('stops the npm launcher and the native server it started, without a ConPTY helper', async () => {
+    const startedAtMs = Date.now();
     const launcher = spawn(
       process.execPath,
       [
@@ -181,11 +182,12 @@ describe.runIf(process.platform === 'win32')('Codex app-server stop on Windows',
       ],
       { stdio: ['ignore', 'pipe', 'ignore'] },
     );
+    const spawnedAtMs = Date.now();
     let output = '';
     launcher.stdout.on('data', (chunk: Buffer) => (output += chunk.toString()));
     await waitFor(() => /\d+\s/.test(output));
     const server = Number(output.trim());
-    stopProcess(launcher, 'win32');
+    await stopProcess({ child: launcher, startedAtMs, spawnedAtMs }, 'win32', { inspector: null });
     await waitFor(() => !isPidAlive(server, 'win32') && !isPidAlive(launcher.pid!, 'win32'));
   });
 });

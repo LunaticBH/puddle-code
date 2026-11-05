@@ -444,8 +444,10 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
       if (platform !== 'win32') await closeControl();
       clearInterval(fetchTimer);
       catalogue.dispose();
-      compilation.dispose();
-      await notebooks.dispose();
+      // Both wait for their stops, which on Windows read the process table
+      // before they end a command's or a kernel's tree: an exit sooner would
+      // leave those trees' descendants running.
+      await Promise.all([compilation.dispose(), notebooks.dispose()]);
       onboarding.dispose();
       // Freeze session rows at their live statuses (reconcile → interrupted),
       // then wait for PTY exits so nothing touches the db after close.
@@ -470,6 +472,9 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
       // What is attached to a PTY's console may not outlive the daemon: wait
       // for the teardowns that outlasted their PTYs' deadlines.
       if (platform === 'win32') await ptys.settled(SETTLE_MS);
+      // Nor what is attached to a Codex app-server's console: its stop, which
+      // its agent's exit began, reads the process table first.
+      if (platform === 'win32') await service.lifecyclesDisposed(LIFECYCLE_DISPOSE_MS);
       await ptys.closeTerminalStates();
       logs.closeAll();
       if (platform === 'win32') clearPtyRoots(ptyRootsFile(paths.home));
@@ -523,6 +528,13 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
  * (PtyManager.settled).
  */
 const SETTLE_MS = 10_000;
+
+/**
+ * Bound on a Windows shutdown waiting, once the PTYs have exited, for the
+ * lifecycle resources their agents' exits disposed (a Codex app-server's
+ * stop takes a few process-table reads).
+ */
+const LIFECYCLE_DISPOSE_MS = 5_000;
 
 /**
  * Windows shutdown, once the PTYs' consoles have had their time to close:
