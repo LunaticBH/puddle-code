@@ -12,6 +12,9 @@ WSL on a Windows host. It drives Windows through PowerShell (Windows PowerShell 
 supported release) and through native system tools (`tar.exe`, `curl.exe`, `taskkill.exe`,
 `icacls.exe`, `reg.exe`); `cmd.exe` appears only where Windows itself needs it for batch files.
 
+What has not been verified or released yet is listed in
+[the port's status report](reports/2026-11-06-windows-port-status.md).
+
 ## Support matrix
 
 | Area                                    | Windows status                                                                                |
