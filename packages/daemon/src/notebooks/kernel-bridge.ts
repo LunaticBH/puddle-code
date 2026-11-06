@@ -17,7 +17,7 @@ import {
   type ProcessTreeRoot,
   type WindowsProcess,
 } from '@puddle/shared/node/platform';
-import { stopOwnConsole, type OwnConsoleStop } from '../pty/own-console.js';
+import { mayEndTree, stopOwnConsole, type OwnConsoleStop } from '../pty/own-console.js';
 import { NOTEBOOK_BRIDGE } from './bridge.js';
 import { pythonEnvironment } from './python-env.js';
 
@@ -289,12 +289,19 @@ export class KernelBridge {
     this.closePromise = new Promise((resolve) => {
       const timer = setTimeout(() => {
         if (this.platform === 'win32' && this.child.pid !== undefined) {
-          // One stop for the bridge's console, the kernel's with it; failing
-          // that, the kernel's tree and then the bridge's, which includes any
-          // kernel it still owns, each once the one before has finished.
+          // One stop for the bridge's console, the kernel's with it; without
+          // the ConPTY helper, the kernel's tree and then the bridge's, which
+          // includes any kernel it still owns, each once the one before has
+          // finished. With the helper and no console of the bridge's to end,
+          // the bridge alone, by its handle (mayEndTree).
           const kernel = this.takeKernel();
           this.enqueueStop(async () => {
-            if ((await this.endConsole()) === 'ended') return;
+            const stop = await this.endConsole();
+            if (stop === 'ended') return;
+            if (!(await mayEndTree(stop, this.child.spawnfile))) {
+              this.endBridge();
+              return;
+            }
             if (kernel) await this.endKernelTree(kernel);
             await this.windows.endBridgeTree(this.tree);
           });
@@ -409,10 +416,13 @@ export class KernelBridge {
     if (this.platform === 'win32') {
       // No process groups: the kernel is on the bridge's console, which
       // stands for its group (pty/own-console.ts), and what it left there
-      // with it; without the ConPTY helper, its tree.
+      // with it; without the ConPTY helper, its tree. A console the helper
+      // finds closed has had the kernel end or leave it: what left it is to
+      // outlive it, as POSIX `setsid` does, which the tree would end.
       const kernel = this.takeKernel()!;
       this.enqueueStop(async () => {
-        if ((await this.endConsole()) !== 'ended') await this.endKernelTree(kernel);
+        const stop = await this.endConsole();
+        if (await mayEndTree(stop, this.child.spawnfile)) await this.endKernelTree(kernel);
       });
       return;
     }

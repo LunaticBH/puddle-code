@@ -170,4 +170,43 @@ describe('a notebook bridge’s Windows stops', () => {
     await other.close();
     expect(events).toEqual(['console exited', 'no helper', 'kernel']);
   });
+
+  it('ends no tree once the helper finds the bridge’s console closed', async () => {
+    // As when the kernel has exited, without saying so, before its bridge:
+    // what left the console is to outlive it, as `setsid` does.
+    const events: string[] = [];
+    const created = await bridge(() => ({
+      endConsole: async () => {
+        events.push('console closed');
+        return 'closed';
+      },
+      endKernelTree: async () => {
+        events.push('kernel');
+      },
+      endBridgeTree: async () => {
+        events.push('bridge');
+      },
+    }));
+    const exited = new Promise((resolve) => created.child.once('exit', resolve));
+    created.child.kill('SIGKILL');
+    await exited;
+    await created.close();
+    expect(events).toEqual(['console closed']);
+    // A bridge that does not shut down ends alone, by its handle.
+    const other = await bridge(() => ({
+      endConsole: async () => {
+        events.push('console closed');
+        return 'closed';
+      },
+      endKernelTree: async () => {
+        events.push('kernel');
+      },
+      endBridgeTree: async () => {
+        events.push('bridge');
+      },
+    }));
+    await other.close();
+    expect(other.child.exitCode !== null || other.child.signalCode !== null).toBe(true);
+    expect(events).toEqual(['console closed', 'console closed']);
+  });
 });

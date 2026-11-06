@@ -1,7 +1,22 @@
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { ProcessTreeRoot, WindowsProcess } from '@puddle/shared/node/platform';
+import {
+  listWindowsProcesses,
+  type ProcessTreeRoot,
+  type WindowsProcess,
+} from '@puddle/shared/node/platform';
 import { KernelBridge, windowsKernelIdentity } from '../../src/notebooks/kernel-bridge.js';
-import { role, stillRunning, stopMarked, survivors, waitUntil } from '../helpers/process-trees.js';
+import { ownConsoleHost, stopOwnConsole } from '../../src/pty/own-console.js';
+import {
+  marked,
+  role,
+  stillRunning,
+  stopMarked,
+  survivors,
+  waitUntil,
+} from '../helpers/process-trees.js';
 import { consoleProgram, sparedTreeMembers, writeSparedTree } from '../helpers/spared-trees.js';
 
 /**
@@ -252,4 +267,83 @@ describe.runIf(process.platform === 'win32')('a notebook kernel’s stop on Wind
       });
     }
   }
+
+  it('spares what a kernel left running detached, once the helper finds the bridge’s console closed', async () => {
+    // A kernel that starts a detached child, then exits, without the
+    // bridge saying so, once `<marker>\exit` appears.
+    const marker = mkdtempSync(join(tmpdir(), 'puddle-kernel-'));
+    markers.push(marker);
+    const script = join(marker, 'kernel.mjs');
+    writeFileSync(
+      script,
+      "import { spawn } from 'node:child_process';\n" +
+        "import { existsSync } from 'node:fs';\n" +
+        "import { join } from 'node:path';\n" +
+        'const [marker] = process.argv.slice(2);\n' +
+        "spawn(process.execPath, ['-e', 'setInterval(()=>{},1e9)', marker + ':detached'], " +
+        "{ stdio: 'ignore', detached: true, windowsHide: true }).unref();\n" +
+        "setInterval(() => { if (existsSync(join(marker, 'exit'))) process.exit(0); }, 50);\n",
+    );
+    process.env.PUDDLE_FAKE_KERNEL = process.execPath;
+    process.env.PUDDLE_FAKE_KERNEL_ARGS = `"${script}" "${marker}"`;
+    let kernel = 0;
+    const identities: Array<number | null> = [];
+    const own: { host?: WindowsProcess } = {};
+    const bridge = new KernelBridge(
+      await consoleProgram('fake-bridge', BRIDGE),
+      (message) => {
+        if (message.event === 'spawned' && message.pid) kernel = message.pid;
+      },
+      undefined,
+      false,
+      {
+        windows: {
+          identify: async (root, pid, namedAtMs) => {
+            const identity = windowsKernelIdentity(
+              await listWindowsProcesses({ fresh: true }),
+              root,
+              pid,
+              namedAtMs,
+            );
+            identities.push(identity);
+            return identity;
+          },
+          // The real stop, once the bridge's console has closed.
+          endConsole: async (root, endBridge) => {
+            await survivors([own.host!], 10_000);
+            return stopOwnConsole(root, endBridge);
+          },
+        },
+      },
+    );
+    bridges.push(bridge);
+    bridge.ready.catch(() => {});
+    await bridge.ready;
+    await waitUntil(() => identities.length > 0, 30_000, 'the kernel’s identity');
+    // Without the helper, the kernel's tree would end what it started.
+    expect(identities[0]).not.toBeNull();
+    let detached: WindowsProcess | undefined;
+    await waitUntil(
+      async () =>
+        (detached = (await marked(marker)).find((entry) => role(entry) === 'detached')) !==
+        undefined,
+      30_000,
+      'the kernel’s detached child',
+    );
+    const table = await listWindowsProcesses({ fresh: true });
+    const self = table.find((entry) => entry.pid === bridge.child.pid);
+    own.host = ownConsoleHost(
+      table.filter((entry) => (entry.createdAtMs ?? 0) >= (self?.createdAtMs ?? Infinity)),
+      bridge.child.pid!,
+    );
+    expect(own.host).toBeDefined();
+    const started = table.find((entry) => entry.pid === kernel);
+    expect(started).toBeDefined();
+    writeFileSync(join(marker, 'exit'), '');
+    expect(await survivors([started!], 10_000)).toEqual([]);
+    bridge.child.kill();
+    await new Promise((resolve) => bridge.child.once('exit', resolve));
+    await bridge.close();
+    expect((await stillRunning([detached!])).map(role)).toEqual(['detached']);
+  });
 });
