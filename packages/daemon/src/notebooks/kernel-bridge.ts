@@ -17,6 +17,7 @@ import {
   type ProcessTreeRoot,
   type WindowsProcess,
 } from '@puddle/shared/node/platform';
+import { stopOwnConsole } from '../pty/own-console.js';
 import { NOTEBOOK_BRIDGE } from './bridge.js';
 import { pythonEnvironment } from './python-env.js';
 
@@ -62,6 +63,12 @@ const STOP_WAIT_MS = 5_000;
 export interface KernelBridgeWindows {
   /** The kernel's creation time (windowsKernelIdentity), or null when the table cannot vouch for it. */
   identify(bridge: ProcessTreeRoot, kernelPid: number, namedAtMs: number): Promise<number | null>;
+  /**
+   * Ends the bridge's own console (pty/own-console.ts): the bridge by its
+   * handle, should it still run, and what is attached to its console, the
+   * kernel among it. False, with nothing ended, when it could not.
+   */
+  endConsole(bridge: ProcessTreeRoot, endBridge: () => void): Promise<boolean>;
   /** Ends the kernel's tree, identified by its creation time. */
   endKernelTree(pid: number, createdAtMs: number): Promise<void>;
   /** Ends the bridge's tree, the bridge by its handle. */
@@ -88,6 +95,7 @@ const windowsStops: KernelBridgeWindows = {
       return null;
     }
   },
+  endConsole: (bridge, endBridge) => stopOwnConsole(bridge, endBridge),
   endKernelTree: (pid, createdAtMs) =>
     killProcessTree(pid, { root: { createdAtMs } }).catch(() => undefined),
   endBridgeTree: (tree) => tree.kill().catch(() => undefined),
@@ -269,8 +277,9 @@ export class KernelBridge {
 
   /**
    * Resolves once the bridge has exited, and on Windows once the stops of
-   * its tree and its kernel's have been carried out (or after
-   * STOP_WAIT_MS): a daemon that exited sooner would leave them running.
+   * its console, or its tree and its kernel's, have been carried out (or
+   * after STOP_WAIT_MS): a daemon that exited sooner would leave them
+   * running.
    */
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
@@ -278,10 +287,12 @@ export class KernelBridge {
     this.closePromise = new Promise((resolve) => {
       const timer = setTimeout(() => {
         if (this.platform === 'win32' && this.child.pid !== undefined) {
-          // The kernel's tree, then the bridge's, which includes any kernel
-          // it still owns, once the kernel's stop has finished.
+          // One stop for the bridge's console, the kernel's with it; failing
+          // that, the kernel's tree and then the bridge's, which includes any
+          // kernel it still owns, each once the one before has finished.
           const kernel = this.takeKernel();
           this.enqueueStop(async () => {
+            if (await this.endConsole()) return;
             if (kernel) await this.endKernelTree(kernel);
             await this.windows.endBridgeTree(this.tree);
           });
@@ -351,6 +362,25 @@ export class KernelBridge {
   }
 
   /**
+   * Windows: the bridge's own console (pty/own-console.ts), the bridge by
+   * its handle should it still run; false, with nothing ended, without the
+   * ConPTY helper or a console to go by.
+   */
+  private endConsole(): Promise<boolean> {
+    const pid = this.child.pid;
+    if (pid === undefined) return Promise.resolve(false);
+    return this.windows
+      .endConsole({ pid, ...this.tree.root() }, () => {
+        try {
+          this.child.kill();
+        } catch {
+          // Exited meanwhile.
+        }
+      })
+      .catch(() => false);
+  }
+
+  /**
    * Windows: the kernel's tree as the process table shows it (never a GUI
    * programme, nor what one started, but console processes it started
    * detached as well), once it is identified by its creation time: a later
@@ -370,8 +400,13 @@ export class KernelBridge {
   private killKernel(): void {
     if (!this.pid) return;
     if (this.platform === 'win32') {
+      // No process groups: the kernel is on the bridge's console, which
+      // stands for its group (pty/own-console.ts), and what it left there
+      // with it; without the ConPTY helper, its tree.
       const kernel = this.takeKernel()!;
-      this.enqueueStop(() => this.endKernelTree(kernel));
+      this.enqueueStop(async () => {
+        if (!(await this.endConsole())) await this.endKernelTree(kernel);
+      });
       return;
     }
     try {

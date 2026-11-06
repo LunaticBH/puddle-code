@@ -63,7 +63,15 @@ describe('a notebook bridge’s Windows stops', () => {
       },
       undefined,
       false,
-      { platform: 'win32', windows: { identify: async () => 1234, ...windows(() => created) } },
+      {
+        platform: 'win32',
+        // No ConPTY helper, unless a test says otherwise: the trees' stops.
+        windows: {
+          identify: async () => 1234,
+          endConsole: async () => false,
+          ...windows(() => created),
+        },
+      },
     );
     bridges.push(created);
     await created.ready;
@@ -107,5 +115,59 @@ describe('a notebook bridge’s Windows stops', () => {
     await exited;
     await created.close();
     expect(events).toEqual(['kernel', 'kernel ended']);
+  });
+
+  it('ends the bridge’s console, the kernel’s with it, in one stop where the ConPTY helper can', async () => {
+    const events: string[] = [];
+    const created = await bridge((self) => ({
+      endConsole: async (root, endBridge) => {
+        events.push(`console ${root.pid === self().child.pid ? 'of the bridge' : 'of another'}`);
+        endBridge();
+        return true;
+      },
+      endKernelTree: async () => {
+        events.push('kernel');
+      },
+      endBridgeTree: async () => {
+        events.push('bridge');
+      },
+    }));
+    await created.close();
+    expect(created.child.exitCode !== null || created.child.signalCode !== null).toBe(true);
+    // Its exit, which the console's stop caused, begins no second stop.
+    expect(events).toEqual(['console of the bridge']);
+  });
+
+  it('ends what the bridge leaves on its console as it exits, the kernel its tree without the helper', async () => {
+    const events: string[] = [];
+    const created = await bridge(() => ({
+      endConsole: async (root) => {
+        events.push(`console ${root.exitedAtMs === undefined ? 'running' : 'exited'}`);
+        return true;
+      },
+      endKernelTree: async () => {
+        events.push('kernel');
+      },
+    }));
+    const exited = new Promise((resolve) => created.child.once('exit', resolve));
+    created.child.kill('SIGKILL');
+    await exited;
+    await created.close();
+    expect(events).toEqual(['console exited']);
+    // Without the helper: the kernel's tree, by its identity.
+    const other = await bridge(() => ({
+      endConsole: async () => {
+        events.push('no console');
+        return false;
+      },
+      endKernelTree: async () => {
+        events.push('kernel');
+      },
+    }));
+    const gone = new Promise((resolve) => other.child.once('exit', resolve));
+    other.child.kill('SIGKILL');
+    await gone;
+    await other.close();
+    expect(events).toEqual(['console exited', 'no console', 'kernel']);
   });
 });
