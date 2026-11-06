@@ -1,4 +1,5 @@
-import type { ChildProcess } from 'node:child_process';
+import { execFile, type ChildProcess } from 'node:child_process';
+import { system32Path } from '@puddle/shared/node/platform';
 import { findFreePort, sleep, tcpListening, waitForTcp } from './net.js';
 import { spawnClient } from './spawn.js';
 import type { SshTransport } from './ssh.js';
@@ -11,6 +12,50 @@ function spawnForwardClient(ssh: SshTransport, binary: string, args: string[]): 
     env: ssh.spawnEnv(),
     ...(ssh.hidesWindows ? { windowsHide: true } : {}),
   });
+}
+
+/**
+ * Whether `netstat -ano -p TCP` output has a socket listening on TCP port
+ * `port` of IPv4 loopback (or of every address). A listening row is told by
+ * its foreign address, `0.0.0.0:0`: the State column is localised
+ * (docs/windows.md, decision 8).
+ */
+export function netstatListens(stdout: string, port: number): boolean {
+  return stdout.split(/\r?\n/).some((line) => {
+    const match = /^\s*TCP\s+(\S+)\s+0\.0\.0\.0:0\s/i.exec(line);
+    return match !== null && (match[1] === `127.0.0.1:${port}` || match[1] === `0.0.0.0:${port}`);
+  });
+}
+
+/**
+ * Whether anything listens on 127.0.0.1:<port>, from System32's netstat
+ * (Windows only): unlike tcpListening, looking connects to nothing.
+ */
+export function windowsLoopbackListening(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    execFile(
+      system32Path('netstat.exe'),
+      ['-ano', '-p', 'TCP'],
+      { encoding: 'utf8', windowsHide: true, timeout: 10_000, maxBuffer: 16 * 1024 * 1024 },
+      (err, stdout) => resolve(!err && netstatListens(stdout, port)),
+    );
+  });
+}
+
+/** Poll until `port` listens; false once the forward's ssh has exited, or after `timeoutMs`. */
+async function waitForListener(
+  child: ChildProcess,
+  port: number,
+  timeoutMs: number,
+  listening: (port: number) => Promise<boolean>,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null || child.signalCode !== null) return false;
+    if (await listening(port)) return true;
+    await sleep(150);
+  }
+  return false;
 }
 
 export interface Tunnel {
@@ -43,11 +88,24 @@ const HEALTH_INTERVAL_MS = 1000;
  * load-bearing: no health loop, no reconnect, and a busy local port (another
  * cockpit, or a genuinely local login server) skips it with a warning rather
  * than failing the connect. Returns a closer, or null when skipped.
+ *
+ * Nothing listens on the host's end until a login runs there, so a
+ * connection through the forward only makes ssh report the refused channel
+ * ("channel N: open failed: connect failed"). A Windows client's ssh owns
+ * the listener and reports on the user's terminal, so there the forward is
+ * found in the OS's listener table (`listening`, netstat by default)
+ * instead. Elsewhere the master holds the forward, and its reports go
+ * nowhere: connecting stays the way to find it.
  */
 export async function openCallbackForward(
   ssh: SshTransport,
   port: number,
-  opts: { sshBinary?: string; logger?: Logger } = {},
+  opts: {
+    sshBinary?: string;
+    logger?: Logger;
+    /** Test seam: whether something listens on the local port, without connecting to it. */
+    listening?: (port: number) => Promise<boolean>;
+  } = {},
 ): Promise<(() => Promise<void>) | null> {
   const logger = opts.logger ?? silentLogger;
   const skip = (why: string) => {
@@ -63,7 +121,11 @@ export async function openCallbackForward(
     opts.sshBinary ?? 'ssh',
     ssh.args('-N', '-L', `${port}:127.0.0.1:${port}`, ssh.host),
   );
-  if (!(await waitForTcp(port, 5000))) {
+  const up =
+    ssh.clientPlatform === 'win32'
+      ? await waitForListener(child, port, 5000, opts.listening ?? windowsLoopbackListening)
+      : await waitForTcp(port, 5000);
+  if (!up) {
     child.kill('SIGTERM');
     void ssh.cancelForward(port, port);
     return skip('forward did not come up');

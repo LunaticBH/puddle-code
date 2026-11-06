@@ -6,7 +6,7 @@ import { clientHome, hostPaths } from '../paths.js';
 import { CliError } from '../types.js';
 import { spawnClient } from './spawn.js';
 import type { ExecOptions, ExecResult, Transport } from './transport.js';
-import { isWindowsHostFailure } from './windows-host.js';
+import { isWindowsHostFailure, ProbeStderrRelay } from './windows-host.js';
 import {
   frame,
   languageModeRefusal,
@@ -55,6 +55,11 @@ export interface SshOptions {
    * isolated home on a real host). Hosts otherwise use their own environment.
    */
   windowsHome?: string;
+  /**
+   * Test seam: where a Windows client relays the `true` probe's standard
+   * error (ProbeStderrRelay); this process's own by default.
+   */
+  probeStderr?: NodeJS.WritableStream;
 }
 
 /** A PowerShell operation's outcome on a Windows host. */
@@ -97,6 +102,8 @@ export class SshTransport implements Transport {
   readonly label: string;
   /** Set once the host is recognised as Windows; never cleared. */
   remotePlatform: 'win32' | undefined;
+  /** The OS this client runs on (injected in tests). */
+  readonly clientPlatform: NodeJS.Platform;
   private readonly ssh: string;
   private readonly scp: string;
   private readonly controlArgs: string[];
@@ -104,6 +111,7 @@ export class SshTransport implements Transport {
   private readonly askpassProgram: string | undefined;
   private readonly batchMode: boolean;
   private readonly windowsHome: string | undefined;
+  private readonly probeStderr: NodeJS.WritableStream;
   private probe: WindowsProbe | undefined;
 
   constructor(
@@ -117,7 +125,9 @@ export class SshTransport implements Transport {
     this.batchMode = opts.batchMode ?? false;
     this.remotePlatform = opts.remotePlatform;
     this.windowsHome = opts.windowsHome;
+    this.probeStderr = opts.probeStderr ?? process.stderr;
     const platform = opts.platform ?? process.platform;
+    this.clientPlatform = platform;
     if (platform === 'win32') {
       // Windows OpenSSH has no multiplexing: every spawn may prompt again.
       this.controlArgs = [];
@@ -201,27 +211,72 @@ export class SshTransport implements Transport {
    * (cmd.exe or PowerShell) has no `true`: one PowerShell probe tells, and a
    * host that does not answer it fails exactly as before. A host already
    * known to be Windows is opened with the probe alone.
+   *
+   * A Windows client relays the probe's standard error itself, leaving out
+   * a Windows host's answer to `true` (ProbeStderrRelay); its ssh.exe asks
+   * for host keys and passwords on the console, never on standard error.
+   * Linux and macOS clients keep the terminal inherited byte for byte: there
+   * OpenSSH prompts on /dev/tty while a relay delays standard error, so a
+   * pre-authentication banner would land after the password prompt.
    */
   open(): Promise<void> {
     if (this.remotePlatform === 'win32') return this.openWindows();
     return new Promise((resolve, reject) => {
+      const relay =
+        this.askpassProgram === undefined && this.clientPlatform === 'win32'
+          ? new ProbeStderrRelay((chunk) => this.probeStderr.write(chunk))
+          : null;
       const child = this.spawn(this.ssh, this.args(this.host, 'true'), {
         // A GUI has no useful inherited terminal; OpenSSH calls its askpass
         // helper instead. The terminal CLI keeps byte-for-byte inheritance.
-        stdio: this.askpassProgram === undefined ? 'inherit' : 'ignore',
+        stdio:
+          this.askpassProgram !== undefined
+            ? 'ignore'
+            : relay
+              ? ['inherit', 'inherit', 'pipe']
+              : 'inherit',
       });
+      child.stderr?.on('data', (chunk: Buffer) => relay?.write(chunk));
+      let settled = false;
+      let lingering: NodeJS.Timeout | undefined;
+      const settle = (code: number | null) => {
+        if (settled) return;
+        settled = true;
+        if (lingering) clearTimeout(lingering);
+        if (code === 0) {
+          relay?.end(false);
+          return resolve();
+        }
+        const unreachable = this.unreachable();
+        if (code === null || code === 255) {
+          relay?.end(false);
+          return reject(unreachable);
+        }
+        this.recogniseWindows().then(
+          (windows) => {
+            relay?.end(windows);
+            if (windows) resolve();
+            else reject(unreachable);
+          },
+          (err: unknown) => {
+            // Only PowerShell's ConstrainedLanguage refusal rejects: a Windows host answered.
+            relay?.end(err instanceof CliError);
+            reject(err instanceof CliError ? err : unreachable);
+          },
+        );
+      };
       child.on('error', (err) =>
         reject(new CliError('ssh_unreachable', `could not run ${this.ssh}: ${err.message}`)),
       );
-      child.on('close', (code) => {
-        if (code === 0) return resolve();
-        const unreachable = this.unreachable();
-        if (code === null || code === 255) return reject(unreachable);
-        this.recogniseWindows().then(
-          (windows) => (windows ? resolve() : reject(unreachable)),
-          (err: unknown) => reject(err instanceof CliError ? err : unreachable),
-        );
-      });
+      child.on('close', settle);
+      // A process ssh left behind (a ProxyCommand's own child) may hold the
+      // relayed pipe open: ssh's own exit decides soon after, and anything
+      // later passes through unchanged.
+      if (relay) {
+        child.on('exit', (code) => {
+          lingering = setTimeout(() => settle(code), 1000);
+        });
+      }
     });
   }
 

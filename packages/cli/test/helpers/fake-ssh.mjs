@@ -12,13 +12,17 @@
  *                                         host home (env FAKE_SSH_HOME)
  *   ssh <ctl…> -N -L lp:127.0.0.1:rp h  → a real TCP forwarder lp → rp,
  *                                         alive until killed (or until the
- *                                         file $FAKE_SSH_KILL appears)
+ *                                         file $FAKE_SSH_KILL appears); lp = rp
+ *                                         drops every connection, as nothing
+ *                                         listens there on the host
  *
  * FAKE_SSH_HOME becomes both HOME and PUDDLE_HOME for executed commands, so
- * $HOME/.puddle paths in remote commands land in the test's temp dir.
+ * $HOME/.puddle paths in remote commands land in the test's temp dir. A
+ * forwarder appends its local port to the file FAKE_SSH_LISTENING once it
+ * listens, and to FAKE_SSH_ACCEPTED for every connection it accepts.
  */
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { appendFileSync, existsSync } from 'node:fs';
 import { connect, createServer } from 'node:net';
 
 const args = process.argv.slice(2);
@@ -44,6 +48,13 @@ const forward = positionals.find((p) => p.startsWith('-L:'));
 if (positionals.includes('-N') && forward !== undefined) {
   const [lp, , rp] = forward.slice(3).split(':');
   const server = createServer((client) => {
+    if (process.env.FAKE_SSH_ACCEPTED) appendFileSync(process.env.FAKE_SSH_ACCEPTED, `${lp}\n`);
+    // A port forwarded to itself would reach this listener again: the host
+    // has no listener there, so the channel fails.
+    if (lp === rp) {
+      client.destroy();
+      return;
+    }
     const upstream = connect({ host: '127.0.0.1', port: Number(rp) });
     const drop = () => {
       client.destroy();
@@ -54,7 +65,9 @@ if (positionals.includes('-N') && forward !== undefined) {
     client.pipe(upstream);
     upstream.pipe(client);
   });
-  server.listen(Number(lp), '127.0.0.1');
+  server.listen(Number(lp), '127.0.0.1', () => {
+    if (process.env.FAKE_SSH_LISTENING) appendFileSync(process.env.FAKE_SSH_LISTENING, `${lp}\n`);
+  });
   const killFile = process.env.FAKE_SSH_KILL;
   if (killFile) {
     setInterval(() => {

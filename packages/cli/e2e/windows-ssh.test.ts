@@ -177,6 +177,7 @@ describe.runIf(process.platform === 'win32' && zip !== undefined && existsSync(h
         180_000,
       );
       if (!ready) throw new Error(`the cockpit did not start:\n${cockpit.output()}`);
+      expectQuietSsh(cockpit.output());
       const [, origin, invitation] = ready;
       const response = await fetch(`${origin}/cockpit/bootstrap`, {
         method: 'POST',
@@ -194,6 +195,16 @@ describe.runIf(process.platform === 'win32' && zip !== undefined && existsSync(h
       return { cockpit, api };
     }
 
+    /**
+     * What the user's terminal shows of ssh: never the default shell's
+     * answer to the `true` probe, nor a forwarded channel the host refused
+     * (the fake prints ssh's own line for one).
+     */
+    function expectQuietSsh(output: string) {
+      expect(output).not.toMatch(/is not recognized|operable program|CommandNotFoundException/);
+      expect(output).not.toMatch(/open failed/);
+    }
+
     /** Kill the cockpit, leaving its WMI-started daemon running, then remove it all. */
     async function killAndPurge(
       host: ReturnType<typeof setup>,
@@ -202,12 +213,15 @@ describe.runIf(process.platform === 'win32' && zip !== undefined && existsSync(h
       const kill = host.puddle('kill', 'alice@winhost');
       expect(await kill.exited, kill.output()).toBe(0);
       await cockpit.exited;
+      expectQuietSsh(kill.output());
+      expectQuietSsh(cockpit.output());
       // WMI started the supervisor outside the session: the daemon outlives the cockpit.
       expect(await controlPipePresent(host.home)).toBe(true);
 
       const remove = host.puddle('remove', 'daemon', 'alice@winhost', '--yes', '--purge');
       expect(await remove.exited, remove.output()).toBe(0);
       expect(remove.output()).toContain('%USERPROFILE%\\.puddle deleted');
+      expectQuietSsh(remove.output());
       expect(existsSync(host.home)).toBe(false);
       expect(await registeredTasks()).toEqual([]);
       const marker = host.home.toLowerCase();
@@ -254,6 +268,8 @@ describe.runIf(process.platform === 'win32' && zip !== undefined && existsSync(h
       const kill = host.puddle('kill', 'alice@winhost');
       expect(await kill.exited, kill.output()).toBe(0);
       await cockpit.exited;
+      expectQuietSsh(kill.output());
+      expectQuietSsh(cockpit.output());
       // The lease stopped its own daemon cleanly before closing its channel.
       const marker = join(host.home, 'bin').toLowerCase();
       await until(

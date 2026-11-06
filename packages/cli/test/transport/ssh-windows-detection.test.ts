@@ -3,17 +3,20 @@ import { EventEmitter } from 'node:events';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { PassThrough } from 'node:stream';
+import { PassThrough, Writable } from 'node:stream';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 interface Spawned {
   args: string[];
   stdin: string;
+  stdio: SpawnOptions['stdio'];
 }
 interface Reply {
   code: number;
   stdout?: string;
   stderr?: string;
+  /** ssh exits, but a process it left behind keeps its standard streams open. */
+  lingers?: true;
 }
 const spawned = vi.hoisted(() => [] as Spawned[]);
 const host = vi.hoisted(() => ({ reply: (_spawned: Spawned): Reply => ({ code: 0 }) }));
@@ -21,7 +24,7 @@ const host = vi.hoisted(() => ({ reply: (_spawned: Spawned): Reply => ({ code: 0
 // Every ssh child goes through spawnClient: record it and answer as `host.reply` says.
 vi.mock('../../src/lib/transport/spawn.js', () => ({
   spawnClient: (_file: string, args: string[], options: SpawnOptions) => {
-    const entry: Spawned = { args, stdin: '' };
+    const entry: Spawned = { args, stdin: '', stdio: options.stdio };
     spawned.push(entry);
     const child = Object.assign(new EventEmitter(), {
       stdin: new PassThrough(),
@@ -31,9 +34,17 @@ vi.mock('../../src/lib/transport/spawn.js', () => ({
     });
     const finish = () => {
       const reply = host.reply(entry);
+      if (reply.lingers) {
+        child.stderr.write(reply.stderr ?? '');
+        setImmediate(() => child.emit('exit', reply.code, null));
+        return;
+      }
       child.stdout.end(reply.stdout ?? '');
       child.stderr.end(reply.stderr ?? '');
-      setImmediate(() => child.emit('close', reply.code));
+      setImmediate(() => {
+        child.emit('exit', reply.code, null);
+        child.emit('close', reply.code);
+      });
     };
     if (Array.isArray(options.stdio) && options.stdio[0] === 'pipe') {
       child.stdin.on('data', (chunk: Buffer) => (entry.stdin += chunk.toString()));
@@ -49,6 +60,11 @@ import { installDaemon } from '../../src/lib/installation/bootstrap.js';
 import { hostPaths } from '../../src/lib/paths.js';
 import { SshTransport } from '../../src/lib/transport/ssh.js';
 import { windowsRemoteCommand } from '../../src/lib/transport/windows-remote.js';
+import {
+  CMD_TRUE_ANSWER,
+  HOST_KEY_WARNING,
+  POWERSHELL_TRUE_ANSWER,
+} from '../helpers/windows-true-answers.js';
 
 const probe = JSON.stringify({
   puddle: 'windows-host',
@@ -61,12 +77,13 @@ const probe = JSON.stringify({
   temp: 'C:\\Users\\a\\AppData\\Local\\Temp\\',
 });
 const isProbe = (s: Spawned) => s.args.at(-1) === windowsRemoteCommand();
+const windowsProbeAnswer: Reply = { code: 1, stdout: `${probe}\r\n`, stderr: 'puddle-exit:0\n' };
 /** A Windows host whose default shell answers POSIX `true` with `trueStatus`. */
 const windowsHost =
   (trueStatus: number) =>
   (s: Spawned): Reply =>
     isProbe(s)
-      ? { code: 1, stdout: `${probe}\r\n`, stderr: 'puddle-exit:0\n' }
+      ? windowsProbeAnswer
       : { code: trueStatus, stderr: "'true' is not recognized as an internal or external command" };
 
 const savedHome = process.env.PUDDLE_HOME;
@@ -158,11 +175,91 @@ describe('recognising a Windows SSH host', () => {
     expect(spawned.map(isProbe)).toEqual([true]);
   });
 
+  it('keeps a Linux or macOS client’s terminal inherited for `true`', async () => {
+    host.reply = windowsHost(1);
+    for (const platform of ['linux', 'darwin'] as const) {
+      spawned.length = 0;
+      await new SshTransport('alice@winbox', { platform }).open();
+      expect(spawned[0]!.stdio).toBe('inherit');
+    }
+  });
+
   it('hands the platform only to the background cockpit its launcher started', () => {
     const child = { PUDDLE_COCKPIT_CHILD: '1', PUDDLE_REMOTE_PLATFORM: 'win32' };
     expect(launcherRemotePlatform(child)).toBe('win32');
     expect(launcherRemotePlatform({ PUDDLE_REMOTE_PLATFORM: 'win32' })).toBeUndefined();
     expect(launcherRemotePlatform({ ...child, PUDDLE_REMOTE_PLATFORM: 'linux' })).toBeUndefined();
+  });
+});
+
+describe('the `true` probe’s standard error on a Windows client', () => {
+  /** Where the transport relays the probe's standard error, as it is written. */
+  function terminal() {
+    let text = '';
+    const sink = new Writable({
+      write(chunk: Buffer, _encoding, done) {
+        text += chunk.toString();
+        done();
+      },
+    });
+    return { sink, text: () => text };
+  }
+  const answering =
+    (answer: string, probeAnswer: Reply = windowsProbeAnswer) =>
+    (s: Spawned): Reply =>
+      isProbe(s) ? probeAnswer : { code: 1, stderr: HOST_KEY_WARNING + answer };
+
+  for (const [shell, answer] of [
+    ['cmd.exe', CMD_TRUE_ANSWER],
+    ['Windows PowerShell', POWERSHELL_TRUE_ANSWER],
+  ] as const) {
+    it(`shows ssh’s own lines but not ${shell}’s answer to \`true\``, async () => {
+      host.reply = answering(answer);
+      const { sink, text } = terminal();
+      const ssh = new SshTransport('alice@winbox', { platform: 'win32', probeStderr: sink });
+      await ssh.open();
+      expect(ssh.remotePlatform).toBe('win32');
+      expect(spawned[0]!.stdio).toEqual(['inherit', 'inherit', 'pipe']);
+      expect(text()).toBe(HOST_KEY_WARNING);
+    });
+  }
+
+  it('relays a POSIX host’s standard error unchanged', async () => {
+    const banner = "Authorised users only.\n'true' story\r\n";
+    host.reply = () => ({ code: 0, stderr: banner });
+    const { sink, text } = terminal();
+    await new SshTransport('alice@devbox', { platform: 'win32', probeStderr: sink }).open();
+    expect(text()).toBe(banner);
+  });
+
+  it('shows the answer when the host does not prove to be Windows', async () => {
+    host.reply = answering(CMD_TRUE_ANSWER, { code: 127, stderr: 'powershell.exe: not found\n' });
+    const { sink, text } = terminal();
+    const ssh = new SshTransport('alice@oddbox', { platform: 'win32', probeStderr: sink });
+    await expect(ssh.open()).rejects.toMatchObject({ code: 'ssh_unreachable' });
+    expect(text()).toBe(HOST_KEY_WARNING + CMD_TRUE_ANSWER);
+  });
+
+  it('decides soon after ssh exits though something still holds its standard error', async () => {
+    host.reply = (s) =>
+      isProbe(s) ? windowsProbeAnswer : { code: 1, stderr: CMD_TRUE_ANSWER, lingers: true };
+    const { sink, text } = terminal();
+    const ssh = new SshTransport('alice@winbox', { platform: 'win32', probeStderr: sink });
+    const started = Date.now();
+    await ssh.open();
+    expect(Date.now() - started).toBeLessThan(4000);
+    expect(ssh.remotePlatform).toBe('win32');
+    expect(text()).toBe('');
+  });
+
+  it('leaves a graphical embedder’s probe, which has no terminal, as it was', async () => {
+    host.reply = answering(CMD_TRUE_ANSWER);
+    const ssh = new SshTransport('alice@winbox', {
+      platform: 'win32',
+      askpassProgram: 'C:\\Puddle\\ssh-askpass.exe',
+    });
+    await ssh.open();
+    expect(spawned[0]!.stdio).toBe('ignore');
   });
 });
 
