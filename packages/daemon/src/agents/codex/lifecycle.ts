@@ -48,6 +48,11 @@ export async function prepareCodexLifecycle(
     codexAppServerSpawnOptions(context),
   );
   const server: CodexServerProcess = { child: appServer, startedAtMs, spawnedAtMs: Date.now() };
+  // A failed launch's stop runs on after it has thrown: shutdown waits for it.
+  const abandon = () => {
+    const stopping = stopProcess(server);
+    context.trackStop?.(stopping);
+  };
   let errorTail = '';
   appServer.once('error', (error) => {
     errorTail = `${errorTail}${error.message}`.slice(-2_000);
@@ -58,7 +63,7 @@ export async function prepareCodexLifecycle(
   try {
     await waitForWebSocket(appUrl, appServer, () => errorTail);
   } catch (error) {
-    void stopProcess(server);
+    abandon();
     throw error;
   }
 
@@ -70,13 +75,13 @@ export async function prepareCodexLifecycle(
     });
   } catch (error) {
     proxy.close();
-    void stopProcess(server);
+    abandon();
     throw error;
   }
   const address = proxy.address();
   if (address === null || typeof address === 'string') {
     proxy.close();
-    void stopProcess(server);
+    abandon();
     throw new Error('Codex lifecycle proxy did not bind a TCP port');
   }
   const proxyPort = address.port;
@@ -381,7 +386,9 @@ async function waitForWebSocket(
  * which holds the native app-server as its own, non-detached child:
  * TerminateProcess on the wrapper ends that server too, through the
  * kill-on-close job libuv puts it in, but leaves the commands it runs on
- * its console. Those end as well, never the whole tree: see windows-stop.ts.
+ * its console; a native install's codex.exe is the server itself. What is
+ * attached to its console ends as well, never the whole tree: see
+ * windows-stop.ts.
  */
 export function stopProcess(
   server: CodexServerProcess,

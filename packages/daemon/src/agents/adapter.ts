@@ -113,6 +113,12 @@ export interface LifecycleLaunchContext {
   /** Exact native identity/status from a structured execution resource. */
   bindConversation?(ref: string): Promise<void>;
   reportStatus?(state: 'working' | 'waiting_input'): void;
+  /**
+   * A stop a launch that failed leaves running (its sidecar's, which on
+   * Windows reads the process table first): daemon shutdown waits for it,
+   * within the bound it gives lifecycle disposals. Never rejects.
+   */
+  trackStop?(stop: Promise<void>): void;
 }
 
 export interface ConversationShareHooks {

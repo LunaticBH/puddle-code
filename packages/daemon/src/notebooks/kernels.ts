@@ -445,8 +445,24 @@ export class NotebookKernels {
     }
   }
 
-  async dispose(): Promise<void> {
+  /**
+   * Closes every bridge. POSIX closes the catalogue's first, then the
+   * kernels'. Windows closes them all at once: each close may take its
+   * bridge's 3 s shutdown grace and then its stop's 5 s (KernelBridge), and
+   * one after another they would hold the daemon's shutdown up past the
+   * supervisor's grace for it.
+   */
+  async dispose(platform: NodeJS.Platform = process.platform): Promise<void> {
     this.disposed = true;
+    if (platform === 'win32') {
+      await Promise.all([
+        this.catalogueBridge?.close(),
+        this.cataloguePending,
+        ...[...this.entries.values()].map((entry) => this.stop(entry)),
+      ]);
+      this.entries.clear();
+      return;
+    }
     await this.catalogueBridge?.close();
     await this.cataloguePending;
     await Promise.all([...this.entries.values()].map((entry) => this.stop(entry)));

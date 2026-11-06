@@ -17,6 +17,7 @@ import {
   type ProcessTreeRoot,
   type WindowsProcess,
 } from '@puddle/shared/node/platform';
+import { mayEndTree, stopOwnConsole, type OwnConsoleStop } from '../pty/own-console.js';
 import { NOTEBOOK_BRIDGE } from './bridge.js';
 import { pythonEnvironment } from './python-env.js';
 
@@ -54,6 +55,53 @@ export function windowsKernelIdentity(
 
 /** How long close waits for a Windows tree stop (a few process-table reads). */
 const STOP_WAIT_MS = 5_000;
+
+/**
+ * A bridge's Windows stops (docs/windows.md, decision 8); the real ones by
+ * default, stand-ins in tests. None rejects.
+ */
+export interface KernelBridgeWindows {
+  /** The kernel's creation time (windowsKernelIdentity), or null when the table cannot vouch for it. */
+  identify(bridge: ProcessTreeRoot, kernelPid: number, namedAtMs: number): Promise<number | null>;
+  /**
+   * Ends the bridge's own console (pty/own-console.ts): the bridge by its
+   * handle, should it still run, and what is attached to its console, the
+   * kernel among it. `bridge` is read again once the process table has been.
+   * Anything but `ended` ends nothing: `closed` with the ConPTY helper up
+   * and no console of the bridge's to end, `unavailable` without it.
+   */
+  endConsole(bridge: () => ProcessTreeRoot, endBridge: () => void): Promise<OwnConsoleStop>;
+  /** Ends the kernel's tree, identified by its creation time. */
+  endKernelTree(pid: number, createdAtMs: number): Promise<void>;
+  /** Ends the bridge's tree, the bridge by its handle. */
+  endBridgeTree(tree: ChildProcessTree): Promise<void>;
+}
+
+export interface KernelBridgeOptions {
+  /** Whose stops to run: POSIX signals or Windows' (`process.platform` by default). */
+  platform?: NodeJS.Platform;
+  /** Windows: stand-ins for the stops (tests). */
+  windows?: Partial<KernelBridgeWindows>;
+}
+
+const windowsStops: KernelBridgeWindows = {
+  identify: async (bridge, kernelPid, namedAtMs) => {
+    try {
+      return windowsKernelIdentity(
+        await listWindowsProcesses({ fresh: true }),
+        bridge,
+        kernelPid,
+        namedAtMs,
+      );
+    } catch {
+      return null;
+    }
+  },
+  endConsole: (bridge, endBridge) => stopOwnConsole(bridge, endBridge),
+  endKernelTree: (pid, createdAtMs) =>
+    killProcessTree(pid, { root: { createdAtMs } }).catch(() => undefined),
+  endBridgeTree: (tree) => tree.kill().catch(() => undefined),
+};
 
 export const messageSchema = z.object({
   event: z
@@ -106,17 +154,29 @@ export class KernelBridge {
   >();
   private closePromise: Promise<void> | null = null;
   /**
-   * Windows: tree stops still running, each of which reads the process table
+   * Windows: stops still running, each of which reads the process table
    * before it ends anything; close waits for them (stopsSettled).
    */
   private readonly stops = new Set<Promise<void>>();
+  /**
+   * Windows: the last stop begun. Each begins once the one before it has
+   * finished (enqueueStop): each reads its own process table, and one that
+   * ran beside another could end a pid that one had already ended, by then
+   * another process's.
+   */
+  private lastStop: Promise<void> = Promise.resolve();
+  private readonly platform: NodeJS.Platform;
+  private readonly windows: KernelBridgeWindows;
 
   constructor(
     python: string,
     onMessage?: (message: z.infer<typeof messageSchema>) => void,
     onExit?: (error: string) => void,
     exactPython = false,
+    options: KernelBridgeOptions = {},
   ) {
+    this.platform = options.platform ?? process.platform;
+    this.windows = { ...windowsStops, ...options.windows };
     const env = pythonEnvironment(python);
     const startedAtMs = Date.now();
     this.child = spawn(
@@ -152,7 +212,7 @@ export class KernelBridge {
             if (message.event === 'spawned' && message.pid) {
               this.pid = message.pid;
               this.kernelIdentity =
-                process.platform === 'win32' ? this.identifyKernel(message.pid, Date.now()) : null;
+                this.platform === 'win32' ? this.identifyKernel(message.pid, Date.now()) : null;
             }
             if (message.event === 'stopped' || message.event === 'dead') {
               this.pid = null;
@@ -219,19 +279,36 @@ export class KernelBridge {
 
   /**
    * Resolves once the bridge has exited, and on Windows once the stops of
-   * its tree and its kernel's have been carried out (or after
-   * STOP_WAIT_MS): a daemon that exited sooner would leave them running.
+   * its console, or its tree and its kernel's, have been carried out (or
+   * after STOP_WAIT_MS): a daemon that exited sooner would leave them
+   * running.
    */
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
     if (this.closed) return this.stopsSettled();
     this.closePromise = new Promise((resolve) => {
       const timer = setTimeout(() => {
-        this.killKernel();
-        if (process.platform === 'win32' && this.child.pid !== undefined) {
-          // The bridge's tree, which includes any kernel it still owns.
-          this.track(this.tree.kill());
-        } else this.child.kill('SIGKILL');
+        if (this.platform === 'win32' && this.child.pid !== undefined) {
+          // One stop for the bridge's console, the kernel's with it; without
+          // the ConPTY helper, the kernel's tree and then the bridge's, which
+          // includes any kernel it still owns, each once the one before has
+          // finished. With the helper and no console of the bridge's to end,
+          // the bridge alone, by its handle (mayEndTree).
+          const kernel = this.takeKernel();
+          this.enqueueStop(async () => {
+            const stop = await this.endConsole();
+            if (stop === 'ended') return;
+            if (!(await mayEndTree(stop, this.child.spawnfile))) {
+              this.endBridge();
+              return;
+            }
+            if (kernel) await this.endKernelTree(kernel);
+            await this.windows.endBridgeTree(this.tree);
+          });
+        } else {
+          this.killKernel();
+          this.child.kill('SIGKILL');
+        }
       }, 3000);
       this.child.once('exit', () => {
         clearTimeout(timer);
@@ -244,14 +321,17 @@ export class KernelBridge {
     return this.closePromise;
   }
 
-  /** Windows: holds `stop` until it has finished, for close. */
-  private track(stop: Promise<unknown>): void {
-    const tracked: Promise<void> = stop
-      .then(
-        () => undefined,
-        () => undefined,
-      )
-      .finally(() => this.stops.delete(tracked));
+  /**
+   * Windows: runs `stop` once every stop begun before it has finished, and
+   * holds it until it has, for close. Never rejects.
+   */
+  private enqueueStop(stop: () => Promise<unknown>): void {
+    const next = this.lastStop.then(stop).then(
+      () => undefined,
+      () => undefined,
+    );
+    this.lastStop = next;
+    const tracked: Promise<void> = next.finally(() => this.stops.delete(tracked));
     this.stops.add(tracked);
   }
 
@@ -278,37 +358,72 @@ export class KernelBridge {
     // What is known of the bridge before the table is read: an exit noted
     // after the read would hide a bridge the table shows running.
     const root = { pid: bridge, ...this.tree.root() };
+    return this.windows.identify(root, pid, namedAtMs).catch(() => null);
+  }
+
+  /** Windows: the kernel the bridge named, which no later stop is to end again. */
+  private takeKernel(): { pid: number; identity: Promise<number | null> | null } | null {
+    const pid = this.pid;
+    const identity = this.kernelIdentity;
+    this.pid = null;
+    this.kernelIdentity = null;
+    return pid ? { pid, identity } : null;
+  }
+
+  /**
+   * Windows: the bridge's own console (pty/own-console.ts), the bridge by
+   * its handle should it still run; anything but `ended` ends nothing.
+   */
+  private endConsole(): Promise<OwnConsoleStop> {
+    const pid = this.child.pid;
+    if (pid === undefined) return Promise.resolve('unavailable');
+    return this.windows
+      .endConsole(
+        () => ({ pid, ...this.tree.root() }),
+        () => this.endBridge(),
+      )
+      .catch(() => 'unavailable' as const);
+  }
+
+  /** The bridge, by its handle, which never names another process. */
+  private endBridge(): void {
     try {
-      return windowsKernelIdentity(
-        await listWindowsProcesses({ fresh: true }),
-        root,
-        pid,
-        namedAtMs,
-      );
+      this.child.kill();
     } catch {
-      return null;
+      // Exited meanwhile.
+    }
+  }
+
+  /**
+   * Windows: the kernel's tree as the process table shows it (never a GUI
+   * programme, nor what one started, but console processes it started
+   * detached as well), once it is identified by its creation time: a later
+   * holder of its pid is another process. One the table could not vouch for
+   * is left running.
+   */
+  private async endKernelTree(kernel: {
+    pid: number;
+    identity: Promise<number | null> | null;
+  }): Promise<void> {
+    const createdAtMs = await kernel.identity;
+    if (createdAtMs !== null && createdAtMs !== undefined) {
+      await this.windows.endKernelTree(kernel.pid, createdAtMs);
     }
   }
 
   private killKernel(): void {
     if (!this.pid) return;
-    if (process.platform === 'win32') {
-      // No process groups: stop the kernel and what it started as the
-      // process table shows its tree (never a GUI programme, nor what one
-      // started, but console processes it started detached as well), once
-      // it is identified by its creation time: a later holder of its pid is
-      // another process. One the table could not vouch for is left running.
-      const pid = this.pid;
-      const identity = this.kernelIdentity;
-      this.pid = null;
-      this.kernelIdentity = null;
-      if (identity) {
-        this.track(
-          identity.then((createdAtMs) =>
-            createdAtMs === null ? undefined : killProcessTree(pid, { root: { createdAtMs } }),
-          ),
-        );
-      }
+    if (this.platform === 'win32') {
+      // No process groups: the kernel is on the bridge's console, which
+      // stands for its group (pty/own-console.ts), and what it left there
+      // with it; without the ConPTY helper, its tree. A console the helper
+      // finds closed has had the kernel end or leave it: what left it is to
+      // outlive it, as POSIX `setsid` does, which the tree would end.
+      const kernel = this.takeKernel()!;
+      this.enqueueStop(async () => {
+        const stop = await this.endConsole();
+        if (await mayEndTree(stop, this.child.spawnfile)) await this.endKernelTree(kernel);
+      });
       return;
     }
     try {

@@ -444,37 +444,21 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
       if (platform !== 'win32') await closeControl();
       clearInterval(fetchTimer);
       catalogue.dispose();
-      // Both wait for their stops, which on Windows read the process table
-      // before they end a command's or a kernel's tree: an exit sooner would
-      // leave those trees' descendants running.
-      await Promise.all([compilation.dispose(), notebooks.dispose()]);
-      onboarding.dispose();
-      // Freeze session rows at their live statuses (reconcile → interrupted),
-      // then wait for PTY exits so nothing touches the db after close.
-      service.beginShutdown();
-      ptys.killAll();
-      const deadline = Date.now() + 3000;
-      while (ptys.liveCount() > 0) {
-        if (Date.now() > deadline) {
-          if (platform === 'win32') {
-            // Windows has no hang-up: a PTY counts as live until what is
-            // attached to its console has ended (or its deadline), so this
-            // waits for that too.
-            await stopRemainingConptys(ptys);
-            break;
-          }
-          ptys.killAll(undefined, 'SIGKILL');
-          await new Promise((r) => setTimeout(r, 200));
-          break;
-        }
-        await new Promise((r) => setTimeout(r, 25));
-      }
-      // What is attached to a PTY's console may not outlive the daemon: wait
-      // for the teardowns that outlasted their PTYs' deadlines.
-      if (platform === 'win32') await ptys.settled(SETTLE_MS);
-      // Nor what is attached to a Codex app-server's console: its stop, which
-      // its agent's exit began, reads the process table first.
-      if (platform === 'win32') await service.lifecyclesDisposed(LIFECYCLE_DISPOSE_MS);
+      await endDaemonWork(
+        {
+          executions: () => Promise.all([compilation.dispose(), notebooks.dispose()]),
+          beginShutdown: () => {
+            onboarding.dispose();
+            // Freeze session rows at their live statuses (reconcile →
+            // interrupted), then wait for PTY exits so nothing touches the
+            // db after close.
+            service.beginShutdown();
+          },
+          ptys,
+          lifecyclesDisposed: (ms) => service.lifecyclesDisposed(ms),
+        },
+        platform,
+      );
       await ptys.closeTerminalStates();
       logs.closeAll();
       if (platform === 'win32') clearPtyRoots(ptyRootsFile(paths.home));
@@ -535,6 +519,108 @@ const SETTLE_MS = 10_000;
  * stop takes a few process-table reads).
  */
 const LIFECYCLE_DISPOSE_MS = 5_000;
+
+/**
+ * Bound on a Windows shutdown waiting for compile commands' and notebook
+ * bridges' stops, from when they begin: a bridge's 3 s shutdown grace, then
+ * its stop's 5 s (KernelBridge.close; a compile command's stop has 5 s,
+ * CompilationService.dispose).
+ */
+const EXECUTION_STOP_MS = 8_000;
+
+/** What `endDaemonWork` ends: the daemon's, or a test's stand-ins. */
+export interface DaemonWork {
+  /** Compile commands' and notebook kernels' disposal, which waits for their stops. */
+  executions: () => Promise<unknown>;
+  /** Called once the PTYs are about to be killed. */
+  beginShutdown: () => void;
+  ptys: Pick<PtyManager, 'killAll' | 'liveCount' | 'settled'>;
+  /** SessionService.lifecyclesDisposed. */
+  lifecyclesDisposed: (ms: number) => Promise<void>;
+}
+
+/**
+ * The daemon stop's ending of what it runs: compile commands, notebook
+ * kernels and PTYs. Compile commands' and kernels' disposal waits for their
+ * stops, which on Windows read the process table before they end anything:
+ * an exit sooner would leave what they should end running. POSIX disposes
+ * of them first, then kills the PTYs, SIGKILL after 3 s.
+ *
+ * Windows starts them with the PTYs' teardown instead, so that they never
+ * add to it: kills the PTYs at once, waits 3 s for them to exit, then
+ * forces those still live and waits, at most 15 s more, for every one to
+ * report its exit (stopRemainingConptys; each reports it at most 4.5 s
+ * after the stop, 250 ms after the SIGKILL). Then, together, it waits for
+ * the PTY teardowns that outlasted their PTYs' deadlines (SETTLE_MS), the
+ * lifecycle stops their agents' exits began (LIFECYCLE_DISPOSE_MS), and the
+ * compile and kernel stops until EXECUTION_STOP_MS after they began: at most
+ * 10 s after the PTYs' exits, and nothing at all for the compile and kernel
+ * stops once the PTYs have taken 8 s.
+ */
+export async function endDaemonWork(
+  work: DaemonWork,
+  platform: NodeJS.Platform,
+  bounds: { executionsMs: number; settleMs: number; lifecycleMs: number } = {
+    executionsMs: EXECUTION_STOP_MS,
+    settleMs: SETTLE_MS,
+    lifecycleMs: LIFECYCLE_DISPOSE_MS,
+  },
+): Promise<void> {
+  const { ptys } = work;
+  const windows = platform === 'win32';
+  const executionsBy = Date.now() + bounds.executionsMs;
+  const executions = work.executions();
+  if (!windows) await executions;
+  // Windows waits for it last: a failure is reported then, not raised before
+  // the PTYs have been seen to.
+  const executed = windows
+    ? executions.catch((error: unknown) =>
+        console.warn(`compile and notebook stops failed: ${(error as Error).message}`),
+      )
+    : executions;
+  work.beginShutdown();
+  ptys.killAll();
+  const deadline = Date.now() + 3000;
+  while (ptys.liveCount() > 0) {
+    if (Date.now() > deadline) {
+      if (windows) {
+        // Windows has no hang-up: a PTY counts as live until what is
+        // attached to its console has ended (or its deadline), so this
+        // waits for that too.
+        await stopRemainingConptys(ptys);
+        break;
+      }
+      ptys.killAll(undefined, 'SIGKILL');
+      await new Promise((r) => setTimeout(r, 200));
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  if (!windows) return;
+  await Promise.all([
+    // What is attached to a PTY's console may not outlive the daemon: the
+    // teardowns that outlasted their PTYs' deadlines.
+    ptys.settled(bounds.settleMs),
+    // Nor what is attached to a Codex app-server's console: its stop, which
+    // its agent's exit began, reads the process table first.
+    work.lifecyclesDisposed(bounds.lifecycleMs),
+    // Nor what a compile command or a kernel runs.
+    within(executed, executionsBy - Date.now()),
+  ]);
+}
+
+/** Once `promise` has settled, or after `ms`; never rejects. */
+function within(promise: Promise<unknown>, ms: number): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    const done = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    promise.then(done, done);
+  });
+}
 
 /**
  * Windows shutdown, once the PTYs' consoles have had their time to close:

@@ -285,7 +285,8 @@ export class SessionService extends EventEmitter {
   }
 
   /**
-   * Resolves once every lifecycle resource disposed so far has finished, or
+   * Resolves once every lifecycle resource disposed so far, and every stop
+   * a failed lifecycle launch left running (`trackStop`), has finished, or
    * after `ms`; never rejects. Daemon shutdown waits for it once the PTYs
    * have exited: on Windows a Codex app-server's stop reads the process
    * table before it ends what is attached to the server's console, and a
@@ -315,7 +316,17 @@ export class SessionService extends EventEmitter {
       void resource.dispose();
       return;
     }
-    const disposal: Promise<void> = Promise.resolve(resource.dispose())
+    this.trackDisposal(Promise.resolve(resource.dispose()));
+  }
+
+  /**
+   * Windows: holds `work` (a lifecycle resource's disposal, or the stop a
+   * failed launch left running) until it has finished, for
+   * lifecyclesDisposed; one that rejects is reported.
+   */
+  private trackDisposal(work: Promise<unknown>): void {
+    const disposal: Promise<void> = work
+      .then(() => undefined)
       .catch((error: unknown) =>
         console.warn(`agent lifecycle bridge did not close: ${(error as Error).message}`),
       )
@@ -1452,6 +1463,10 @@ export class SessionService extends EventEmitter {
             },
             reportStatus: (state) => {
               this.signalAgentStatus(signalNonce, state);
+            },
+            // Windows only, as disposals are: POSIX stops are immediate signals.
+            trackStop: (stop) => {
+              if (process.platform === 'win32') this.trackDisposal(stop);
             },
             bindConversation: async (ref) => {
               const accepted = await this.signalAgentLifecycle({

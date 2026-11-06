@@ -1,11 +1,16 @@
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Account } from '@puddle/shared';
 import { codex } from '../../src/agents/codex/index.js';
-import { codexAppServerSpawnOptions, codexRemoteArgs } from '../../src/agents/codex/lifecycle.js';
+import {
+  codexAppServerSpawnOptions,
+  codexRemoteArgs,
+  prepareCodexLifecycle,
+} from '../../src/agents/codex/lifecycle.js';
+import { writeFakeExecutable } from '../helpers/fake-executable.js';
 import { newestRolloutFor, renderRollout } from '../../src/agents/codex/rollout.js';
 import { StatusDetector } from '../../src/pty/status-detector.js';
 
@@ -157,6 +162,35 @@ describe('codex adapter — args', () => {
         args: ['resume', UUID_A],
       }),
     ).toEqual(['--remote', 'ws://bridge', '-C', '/wt', 'resume', UUID_A]);
+  });
+});
+
+describe('codex adapter — lifecycle launch', () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('hands the stop a failed app-server start leaves running to whoever launched it', async () => {
+    // A codex whose app-server exits before it listens.
+    const bin = mkdtempSync(join(tmpdir(), 'puddle-codex-bin-'));
+    writeFakeExecutable(
+      bin,
+      'codex',
+      "if (process.argv[2] === '--version') console.log('codex-cli 0.160.0');\nprocess.exit(3);\n",
+    );
+    vi.stubEnv('PATH', `${bin}${delimiter}${dirname(process.execPath)}`);
+    const stops: Promise<void>[] = [];
+    const worktree = mkdtempSync(join(tmpdir(), 'puddle-codex-work-'));
+    await expect(
+      prepareCodexLifecycle({
+        account: account(mkdtempSync(join(tmpdir(), 'puddle-codex-home-'))),
+        opts: { sessionId: 's', worktreePath: worktree, skipPermissions: false },
+        args: [],
+        signalUrl: 'http://127.0.0.1:1/agent-signal',
+        signalNonce: 'nonce',
+        trackStop: (stop) => stops.push(stop),
+      }),
+    ).rejects.toThrow(/exited before ready/);
+    expect(stops).toHaveLength(1);
+    await expect(stops[0]).resolves.toBeUndefined();
   });
 });
 

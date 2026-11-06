@@ -18,10 +18,12 @@
  * console (a detached process, one in a console of its own), as the PTY's
  * teardown spares them. The next turn is admitted only once that is done.
  * A helper that exits (an agent's `Stop-Process -Name powershell`, say) is
- * replaced, and the running turn's CLI held again a second on; one that
- * could not start (Constrained Language Mode, or too slow) is tried again
- * five minutes on, as the daemon retries its own. Until a helper holds the
- * CLI, only the CLI is ended, through its own handle; nothing is logged. A
+ * replaced, and the running turn's CLI held again a second on, even when it
+ * exits before it has started (such a Stop-Process may catch it compiling);
+ * after a second in a row that could not start (Constrained Language Mode,
+ * or too slow), one is tried again five minutes on, as the daemon retries
+ * its own. Until a helper holds the CLI, only the CLI is ended, through its
+ * own handle; nothing is logged. A
  * driver ended before it could do this (a SIGKILL, or the supervisor's reap
  * after a daemon crash once the driver has outlasted Windows' 5 s for a
  * console's close) takes the CLI and its helper with it (libuv holds the
@@ -35,15 +37,17 @@ const socket = net.connect(process.argv[1]);
 const token = process.argv[2];
 const windows = process.platform === 'win32';
 let child = null, current = null, buffer = '', stopping = false, killTimer = null, release = null;
-let launch = null, helper = null, asked = 0, holds = 0;
+let launch = null, helper = null, asked = 0, holds = 0, unready = 0;
 const send = (message) => {
   if (!socket.destroyed) return socket.write(JSON.stringify(message) + '\n');
   return false;
 };
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // Windows: this driver's ConPTY helper, ending with this process. One that
-// exits is replaced: at once if it had started (the running turn's CLI is
-// held again a second on), else five minutes on, as the daemon retries its own.
+// exits is replaced at once (the running turn's CLI held again a second on)
+// if it had started, or if it is the first in a row to exit before it had:
+// an agent's Stop-Process may have caught it compiling. A second such exit
+// in a row is one that cannot start, tried again five minutes on.
 const startHelper = () => {
   if (!launch) return null;
   if (helper && (!helper.dead || Date.now() < helper.retry)) return helper;
@@ -64,11 +68,13 @@ const startHelper = () => {
       resolve(false);
       if (self.dead) return;
       self.dead = true;
-      self.retry = ready ? 0 : Date.now() + 300000;
+      unready = ready ? 0 : unready + 1;
+      const again = ready || unready < 2;
+      self.retry = again ? 0 : Date.now() + 300000;
       for (const answer of [...self.answers.values()]) answer(null);
       // What it held is let go: the running turn's CLI is held through the next one.
       const cli = child;
-      if (!ready || !cli || stopping) return;
+      if (!again || !cli || stopping) return;
       setTimeout(() => {
         if (child === cli && !stopping && !killTimer && cli.helper === self) cli.held = hold(cli);
       }, 1000);
@@ -83,7 +89,7 @@ const startHelper = () => {
         if (end < 0) break;
         const line = text.slice(0, end).trim(); text = text.slice(end + 1);
         const space = line.indexOf(' ');
-        if (line === 'ready') { ready = true; clearTimeout(timer); resolve(true); }
+        if (line === 'ready') { ready = true; unready = 0; clearTimeout(timer); resolve(true); }
         else if (space > 0) self.answers.get(line.slice(0, space))?.(line.slice(space + 1));
       }
     });

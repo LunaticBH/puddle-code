@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { fakeAdapter } from '../helpers/daemon-fixtures.js';
+import type { LifecycleLaunchContext } from '../../src/agents/adapter.js';
 import { resolvePaths } from '../../src/paths.js';
 import { stripAnsi } from '../../src/pty/ansi.js';
 import { installShellHooks, type ShellHooks } from '../../src/pty/shell-hooks.js';
@@ -653,6 +654,42 @@ describe('native conversation lifecycle', () => {
       await waiting;
       expect(settled).toBe(true);
       await expect(f.service.lifecyclesDisposed(60_000)).resolves.toBeUndefined();
+    },
+  );
+
+  // Windows only, as for disposals.
+  it.skipIf(process.platform !== 'win32')(
+    'lets shutdown wait, within a bound, for the stop a failed lifecycle launch left running',
+    async () => {
+      // As a Codex app-server that never became ready: its stop runs on.
+      let finish: (() => void) | undefined;
+      const adapter = {
+        ...fakeAdapter(),
+        prepareLifecycleLaunch: async (context: LifecycleLaunchContext) => {
+          context.trackStop?.(new Promise<void>((resolve) => (finish = resolve)));
+          throw new Error('app-server did not become ready');
+        },
+      };
+      const f = fixture({ adapter });
+      f.service.setSignalPort(65432);
+      const session = await f.service.create({
+        project_id: f.ids.project,
+        account_id: f.ids.account,
+      });
+      // The agent runs without the bridge.
+      await waitFor(() => f.logs.readTail(session.id, 'agent').includes('LAUNCH'));
+      expect(f.service.get(session.id).native_sync).toBe('fallback');
+      expect(finish).toBeDefined();
+      let settled = false;
+      const waiting = f.service.lifecyclesDisposed(60_000).then(() => (settled = true));
+      const startedAt = Date.now();
+      await f.service.lifecyclesDisposed(100);
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(90);
+      expect(settled).toBe(false);
+      finish!();
+      await waiting;
+      expect(settled).toBe(true);
+      await f.service.kill(session.id);
     },
   );
 
