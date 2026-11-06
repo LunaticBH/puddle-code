@@ -6,7 +6,12 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { controlResponseSchema } from '@puddle/shared';
 import { ipcPath, jsonLines } from '@puddle/shared/node';
-import { listenWithFallback, startDaemon, stopRemainingConptys } from '../../src/daemon.js';
+import {
+  endDaemonWork,
+  listenWithFallback,
+  startDaemon,
+  stopRemainingConptys,
+} from '../../src/daemon.js';
 
 function request(path: string, message: object) {
   return new Promise<ReturnType<typeof controlResponseSchema.parse>>((resolve, reject) => {
@@ -101,6 +106,73 @@ describe('stopping the ConPTYs that outlast their consoles’ closing', () => {
     const started = Date.now();
     await stopRemainingConptys(ptys, 100);
     expect(Date.now() - started).toBeLessThan(2000);
+  });
+});
+
+describe('ending the daemon’s work as it stops', () => {
+  /** PTYs that exit as soon as they are killed, and a record of when things happened. */
+  function work(executionsMs: number | null) {
+    const events: string[] = [];
+    let live = 1;
+    let finish: (() => void) | undefined;
+    return {
+      events,
+      finish: () => finish?.(),
+      work: {
+        executions: () =>
+          new Promise<void>((resolve) => {
+            finish = () => {
+              events.push('executions done');
+              resolve();
+            };
+            if (executionsMs !== null) setTimeout(() => finish!(), executionsMs);
+          }),
+        beginShutdown: () => events.push('shutdown begun'),
+        ptys: {
+          killAll: () => {
+            events.push('ptys killed');
+            live = 0;
+          },
+          liveCount: () => live,
+          settled: async () => {
+            events.push('ptys settled');
+          },
+        },
+        lifecyclesDisposed: async () => {
+          events.push('lifecycles disposed');
+        },
+      },
+    };
+  }
+
+  it('ends the PTYs on Windows while compile commands and kernels stop, then waits for those', async () => {
+    const { events, work: daemon } = work(300);
+    const started = Date.now();
+    await endDaemonWork(daemon, 'win32');
+    expect(Date.now() - started).toBeGreaterThanOrEqual(250);
+    expect(events).toEqual([
+      'shutdown begun',
+      'ptys killed',
+      'ptys settled',
+      'lifecycles disposed',
+      'executions done',
+    ]);
+  });
+
+  it('waits for compile commands and kernels on Windows within a bound from when they began', async () => {
+    const { events, finish, work: daemon } = work(null);
+    const started = Date.now();
+    await endDaemonWork(daemon, 'win32', { executionsMs: 200, settleMs: 0, lifecycleMs: 0 });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(150);
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(events).not.toContain('executions done');
+    finish();
+  });
+
+  it('keeps POSIX on disposing of compile commands and kernels before the PTYs', async () => {
+    const { events, work: daemon } = work(100);
+    await endDaemonWork(daemon, 'linux');
+    expect(events).toEqual(['executions done', 'shutdown begun', 'ptys killed']);
   });
 });
 
