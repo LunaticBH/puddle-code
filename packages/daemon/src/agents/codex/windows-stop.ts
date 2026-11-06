@@ -33,9 +33,12 @@ import {
  * GUI programme nor what one started, nor what left the console: a
  * detached process, one in a console of its own (`Start-Process`), or one
  * on a pseudoconsole of the server's (which ends as that console closes
- * with the server). Without the helper (Constrained Language Mode), only
- * the native server the launcher started ends, as the process table vouches
- * for it while the launcher runs, and then the launcher, by its handle.
+ * with the server). Without the helper (Constrained Language Mode), npm's
+ * launcher (node running codex.js) has the native server it started end
+ * first, as the process table vouches for it while the launcher runs, then
+ * the launcher, by its handle. Any other launcher (a native codex.exe, as
+ * winget, scoop and the GitHub releases install it) is the server itself
+ * and ends alone, by its handle.
  */
 
 /** The app-server process the daemon started, and when (this process's clock). */
@@ -111,19 +114,25 @@ export async function stopCodexServerWindows(
     }).catch(() => false);
     if (ended) return;
   }
-  // No console to go by: the native server the launcher started, as this
-  // table vouches for it (a console child of the launcher, created since),
-  // then the launcher, by its handle. The server goes first, by pid, while
-  // the launcher runs and holds the server's handle (until it sees the
-  // server exit, as codex.js then exits too): once the launcher has ended,
-  // and a node launcher's non-detached child with it through libuv's
-  // kill-on-close job, another process may hold that pid.
+  // No console to go by. Only npm's launcher, node running codex.js, has a
+  // direct child that is the native server, as this table vouches for it (a
+  // console child of the launcher, created since, not its console's host):
+  // the server goes first, by pid, while the launcher runs and holds the
+  // server's handle (until it sees the server exit, as codex.js then exits
+  // too): once the launcher has ended, and a node launcher's non-detached
+  // child with it through libuv's kill-on-close job, another process may
+  // hold that pid. A native launcher (codex.exe) is the server itself: its
+  // children are the commands it runs, which nothing here tells on its
+  // console from what left it, so it ends alone, by its handle.
   const subsystem = deps.subsystem ?? imageSubsystem;
   const servers: WindowsProcess[] = [];
-  for (const entry of tree) {
-    if (entry === launcher || entry === host || entry.ppid !== pid) continue;
-    const kind = await subsystem(entry).catch(() => null);
-    if (kind !== null && !isGuiSubsystem(kind)) servers.push(entry);
+  if (launcher.name.toLowerCase() === 'node.exe') {
+    for (const entry of tree) {
+      if (entry === launcher || entry.ppid !== pid) continue;
+      if (entry === host || entry.name.toLowerCase() === 'conhost.exe') continue;
+      const kind = await subsystem(entry).catch(() => null);
+      if (kind !== null && !isGuiSubsystem(kind)) servers.push(entry);
+    }
   }
   if (child.exitCode === null && child.signalCode === null) {
     const terminate =
