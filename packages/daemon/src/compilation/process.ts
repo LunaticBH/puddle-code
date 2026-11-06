@@ -11,7 +11,7 @@ import {
   restoreCurrentDirectorySearch,
   type ChildProcessTree,
 } from '@puddle/shared/node/platform';
-import { stopOwnConsole, type OwnConsoleDeps } from '../pty/own-console.js';
+import { mayEndTree, stopOwnConsole, type OwnConsoleDeps } from '../pty/own-console.js';
 import { withEnvironment } from './environment.js';
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -262,8 +262,9 @@ export const runCompilationCommand = (
  * already ended, by then another process's. The SIGKILL that follows a
  * timeout's SIGTERM, and the daemon's dispose during a cancellation, so wait
  * for the stop under way; once it is done, another may run (for what the
- * command started meanwhile). Every Windows stop is in runningStops until
- * it is done.
+ * command started meanwhile), which never falls back on the command's tree
+ * once one has gone by its console (terminateWindows). Every Windows stop is
+ * in runningStops until it is done.
  */
 function commandStop(
   child: ReturnType<typeof spawn>,
@@ -290,14 +291,26 @@ function commandStop(
 }
 
 /**
+ * Commands whose own console a Windows stop has ended, or found closed, with
+ * the ConPTY helper: no later stop of theirs (the SIGKILL that follows a
+ * SIGTERM, or the daemon's dispose) ends their tree, which would end what
+ * left that console.
+ */
+const consoleStopped = new WeakSet<ReturnType<typeof spawn>>();
+
+/**
  * Windows has no process groups to signal. The command's own console stands
  * for its group (pty/own-console.ts): the command ends by its own handle,
  * with every process the ConPTY helper finds attached to that console,
  * those its descendants left there as they exited (`cmd /c start /b`)
  * included, and what left it outlives it, as a POSIX `setsid` does: a
  * detached process, or one in a console of its own (`start`,
- * `Start-Process`). Without the helper, or a console to go by (a GUI
- * command has none), it forces the tree the process table shows, by
+ * `Start-Process`), even one that holds the command's output open. Once the
+ * helper has found the console closed, as it is once the command has exited
+ * and everything on its console has ended or left it, nothing more ends but
+ * the command, by its handle, and so for every later stop of the command's.
+ * Without the helper, or for a command that never had a console (its image
+ * a GUI programme's), it forces the tree the process table shows, by
  * creation-time-consistent links, and the command by its handle
  * (killProcessTree); unlike the group, that tree includes console processes
  * the command started detached or in a console of their own, and misses
@@ -319,8 +332,18 @@ export async function terminateWindows(
       // Exited meanwhile.
     }
   };
-  if (await stopOwnConsole({ pid, ...tree.root() }, endRoot, deps)) return;
-  await tree.kill({ platform: 'win32' }).catch(() => undefined);
+  // Read again once the table has been: the command's exit may be noted meanwhile.
+  const stop = await stopOwnConsole(() => ({ pid, ...tree.root() }), endRoot, deps);
+  if (stop === 'ended') {
+    consoleStopped.add(child);
+    return;
+  }
+  if (!consoleStopped.has(child) && (await mayEndTree(stop, child.spawnfile))) {
+    await tree.kill({ platform: 'win32' }).catch(() => undefined);
+    return;
+  }
+  if (stop === 'closed') consoleStopped.add(child);
+  endRoot();
 }
 
 /** POSIX signals the command's process group, at once. */

@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
 import { childProcessTree, type WindowsProcess } from '@puddle/shared/node/platform';
-import { ownConsoleHost, stopOwnConsole } from '../../src/pty/own-console.js';
+import { mayEndTree, ownConsoleHost, stopOwnConsole } from '../../src/pty/own-console.js';
 import { entry, key, world } from '../helpers/console-world.js';
 import { role, stillRunning, stopMarked, survivors } from '../helpers/process-trees.js';
 import { sparedTreeMembers, writeSparedTree } from '../helpers/spared-trees.js';
@@ -37,7 +37,7 @@ describe('ending a child’s own console on Windows', () => {
       inspector: w.inspector,
       subsystem: async () => 3,
     });
-    expect(ended).toBe(true);
+    expect(ended).toBe('ended');
     expect(rootEnded).toBe(1);
     expect(w.ended).toEqual([key(A), key(O)]);
     expect(w.released()).toBe(w.classified.length);
@@ -55,7 +55,7 @@ describe('ending a child’s own console on Windows', () => {
       inspector: w.inspector,
       subsystem: async () => 3,
     });
-    expect(ended).toBe(true);
+    expect(ended).toBe('ended');
     expect(rootEnded).toBe(0);
     expect(w.ended).toEqual([key(A), key(O)]);
   });
@@ -69,8 +69,56 @@ describe('ending a child’s own console on Windows', () => {
       processes: w.processes,
       inspector: w.inspector,
     });
-    expect(ended).toBe(false);
+    expect(ended).toBe('closed');
     expect(w.classified).toEqual([]);
+  });
+
+  it('takes the exit of a child’s root that the table no longer shows from after the read', async () => {
+    // The root exited as the table was read; its exit was noted since.
+    const w = world(
+      table.filter((e) => e !== R),
+      { attached, gui: [107] },
+    );
+    let reads = 0;
+    const ended = await stopOwnConsole(
+      () => (reads++ === 0 ? root : { ...root, exitedAtMs: 2000 }),
+      () => {},
+      { processes: w.processes, inspector: w.inspector, subsystem: async () => 3 },
+    );
+    expect(ended).toBe('ended');
+    expect(w.ended).toEqual([key(A), key(O)]);
+    // Not noted yet: libuv holds the root's pid until it is, so the table's
+    // processes that name it are its own.
+    const zombie = world(
+      table.filter((e) => e !== R),
+      { attached, gui: [107] },
+    );
+    expect(
+      await stopOwnConsole(
+        () => root,
+        () => {},
+        {
+          processes: zombie.processes,
+          inspector: zombie.inspector,
+          subsystem: async () => 3,
+        },
+      ),
+    ).toBe('ended');
+    expect(zombie.ended).toEqual([key(A), key(O)]);
+  });
+
+  it('keeps a root the table shows running though its exit is noted after the read', async () => {
+    const w = world(table, { attached, gui: [107] });
+    let reads = 0;
+    let rootEnded = 0;
+    const ended = await stopOwnConsole(
+      () => (reads++ === 0 ? root : { ...root, exitedAtMs: 2000 }),
+      () => rootEnded++,
+      { processes: w.processes, inspector: w.inspector, subsystem: async () => 3 },
+    );
+    expect(ended).toBe('ended');
+    expect(rootEnded).toBe(1);
+    expect(w.ended).toEqual([key(A), key(O)]);
   });
 
   it('ends nothing without a helper, a table, or a console host', async () => {
@@ -79,23 +127,41 @@ describe('ending a child’s own console on Windows', () => {
       throw new Error('ended');
     };
     expect(await stopOwnConsole(root, endRoot, { processes: w.processes, inspector: null })).toBe(
-      false,
+      'unavailable',
     );
     expect(
       await stopOwnConsole(root, endRoot, {
         processes: () => Promise.reject(new Error('no table')),
         inspector: w.inspector,
       }),
-    ).toBe(false);
-    // A GUI root has no console of its own.
+    ).toBe('unavailable');
+    // A GUI root has no console of its own; nor has one whose console has closed.
     const gui = world(
       table.filter((e) => e !== H),
       { attached },
     );
     expect(
       await stopOwnConsole(root, endRoot, { processes: gui.processes, inspector: gui.inspector }),
-    ).toBe(false);
+    ).toBe('closed');
+    // Without the helper up, nothing tells that the console has closed.
+    expect(
+      await stopOwnConsole(root, endRoot, {
+        processes: gui.processes,
+        inspector: { ...gui.inspector, ready: async () => false },
+      }),
+    ).toBe('unavailable');
     expect(w.ended).toEqual([]);
+  });
+
+  it('lets a tree end in its stead only without the helper, or for a root that never had a console', async () => {
+    const console = async () => 3;
+    const gui = async () => 2;
+    expect(await mayEndTree('unavailable', 'x.exe', console)).toBe(true);
+    expect(await mayEndTree('ended', 'x.exe', gui)).toBe(false);
+    // A console closed: what left it is to outlive it, as `setsid` does.
+    expect(await mayEndTree('closed', 'x.exe', console)).toBe(false);
+    expect(await mayEndTree('closed', 'x.exe', async () => null)).toBe(false);
+    expect(await mayEndTree('closed', 'x.exe', gui)).toBe(true);
   });
 
   it('ends no other console’s process, nor one created before the host', async () => {
@@ -154,7 +220,7 @@ describe.runIf(process.platform === 'win32')('a child’s own console on Windows
     const ended = await stopOwnConsole({ pid: one.child.pid!, ...one.processTree.root() }, () =>
       one.child.kill(),
     );
-    expect(ended).toBe(true);
+    expect(ended).toBe('ended');
     await exited;
     const ending = one.members.filter((e) =>
       ['agent', 'attached', 'orphan-attached'].includes(role(e)),

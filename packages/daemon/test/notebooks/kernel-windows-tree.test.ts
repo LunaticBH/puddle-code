@@ -203,7 +203,7 @@ describe.runIf(process.platform === 'win32')('a notebook kernel’s stop on Wind
       },
       undefined,
       false,
-      helper ? {} : { windows: { endConsole: async () => false } },
+      helper ? {} : { windows: { endConsole: async () => 'unavailable' } },
     );
     bridges.push(bridge);
     bridge.ready.catch(() => {});

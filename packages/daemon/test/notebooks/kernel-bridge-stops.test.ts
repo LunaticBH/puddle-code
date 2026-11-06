@@ -68,7 +68,7 @@ describe('a notebook bridge’s Windows stops', () => {
         // No ConPTY helper, unless a test says otherwise: the trees' stops.
         windows: {
           identify: async () => 1234,
-          endConsole: async () => false,
+          endConsole: async () => 'unavailable',
           ...windows(() => created),
         },
       },
@@ -121,9 +121,9 @@ describe('a notebook bridge’s Windows stops', () => {
     const events: string[] = [];
     const created = await bridge((self) => ({
       endConsole: async (root, endBridge) => {
-        events.push(`console ${root.pid === self().child.pid ? 'of the bridge' : 'of another'}`);
+        events.push(`console ${root().pid === self().child.pid ? 'of the bridge' : 'of another'}`);
         endBridge();
-        return true;
+        return 'ended';
       },
       endKernelTree: async () => {
         events.push('kernel');
@@ -142,8 +142,8 @@ describe('a notebook bridge’s Windows stops', () => {
     const events: string[] = [];
     const created = await bridge(() => ({
       endConsole: async (root) => {
-        events.push(`console ${root.exitedAtMs === undefined ? 'running' : 'exited'}`);
-        return true;
+        events.push(`console ${root().exitedAtMs === undefined ? 'running' : 'exited'}`);
+        return 'ended';
       },
       endKernelTree: async () => {
         events.push('kernel');
@@ -157,8 +157,8 @@ describe('a notebook bridge’s Windows stops', () => {
     // Without the helper: the kernel's tree, by its identity.
     const other = await bridge(() => ({
       endConsole: async () => {
-        events.push('no console');
-        return false;
+        events.push('no helper');
+        return 'unavailable';
       },
       endKernelTree: async () => {
         events.push('kernel');
@@ -168,6 +168,6 @@ describe('a notebook bridge’s Windows stops', () => {
     other.child.kill('SIGKILL');
     await gone;
     await other.close();
-    expect(events).toEqual(['console exited', 'no console', 'kernel']);
+    expect(events).toEqual(['console exited', 'no helper', 'kernel']);
   });
 });

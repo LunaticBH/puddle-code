@@ -92,13 +92,13 @@ export async function stopCodexServerWindows(
   const subsystem = deps.subsystem ?? imageSubsystem;
   const inspector = deps.inspector === undefined ? sharedConptyJobs() : deps.inspector;
   if (inspector) {
-    const ended = await endOwnConsole(table, root, endLauncher, {
+    const stop = await endOwnConsole(table, root, endLauncher, {
       processes,
       inspector,
       subsystem,
       now: deps.now ?? Date.now,
-    }).catch(() => false);
-    if (ended) return;
+    }).catch(() => 'unavailable' as const);
+    if (stop === 'ended') return;
   }
   // No console to go by. Only npm's launcher, node running codex.js, has a
   // direct child that is the native server, as this table vouches for it (a

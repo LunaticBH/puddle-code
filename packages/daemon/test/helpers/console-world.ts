@@ -77,6 +77,7 @@ export function world(
       remove(pid);
     },
     inspector: {
+      ready: async () => true,
       classify: async (list: readonly { pid: number; createdAtMs: number }[]) => {
         classified.push(list.map((p) => `${p.pid}@${p.createdAtMs}`));
         const held: ClassifiedProcess[] = list
