@@ -9,6 +9,8 @@ import type { WindowsProcess } from '@puddle/shared/node/platform';
 import {
   disposeCompilationCommands,
   runCompilationCommand,
+  terminateWindows,
+  type CompilationStopOptions,
 } from '../../src/compilation/process.js';
 import { onTeardown } from '../helpers/process-guard.js';
 import {
@@ -27,13 +29,16 @@ const built = existsSync(
 );
 
 /**
- * A compile command's stop on Windows (docs/windows.md, decision 8): the
- * tree the process table shows, by creation-time-consistent links, ends,
- * but never a GUI programme the command started, nor what that started.
- * Unlike a POSIX process group, a console process it started detached is
- * part of the tree and ends with it; a process whose parent has exited (an
- * orphan through `cmd /c start /b`, or PowerShell's Start-Process) is not
- * reached.
+ * A compile command's stop on Windows (docs/windows.md, decision 8). The
+ * command has a console of its own, which stands for its POSIX process
+ * group: the command and what is attached to that console end, a process
+ * its descendants left there as they exited (an orphan through `cmd /c
+ * start /b`) included, and what left it outlives it, as `setsid` does: a
+ * detached process and one in a console of its own (PowerShell's
+ * Start-Process); never a GUI programme the command started, nor what that
+ * started. Without the ConPTY helper, the tree the process table shows ends
+ * instead, by creation-time-consistent links: a console process the command
+ * started detached ends with it, and an orphan is not reached.
  */
 describe.runIf(process.platform === 'win32')('a compile command’s stop on Windows', () => {
   const markers: string[] = [];
@@ -41,24 +46,46 @@ describe.runIf(process.platform === 'win32')('a compile command’s stop on Wind
     for (const marker of markers.splice(0)) await stopMarked(marker);
   });
 
-  it('ends the command’s console tree, never a GUI programme or what one started', async () => {
+  /** The spared tree as a compile command; resolves once all of it runs. */
+  async function compileTree(options?: CompilationStopOptions) {
     const tree = await writeSparedTree();
     markers.push(tree.marker);
-    const run = runCompilationCommand({
-      file: process.execPath,
-      args: tree.args,
-      cwd: tree.marker,
-      timeoutMs: 120_000,
-    }).catch((error: unknown) => error);
-    const members = await sparedTreeMembers(tree.marker);
-    const ending = members.filter((e) => ['agent', 'attached', 'detached'].includes(role(e)));
-    const spared = members.filter((e) => ['gui', 'gui-child', 'start-process'].includes(role(e)));
-    expect(spared.map(role).sort()).toEqual(['gui', 'gui-child', 'gui-child', 'start-process']);
+    const run = runCompilationCommand(
+      { file: process.execPath, args: tree.args, cwd: tree.marker, timeoutMs: 120_000 },
+      options,
+    ).catch((error: unknown) => error);
+    return { tree, run, members: await sparedTreeMembers(tree.marker) };
+  }
+
+  it('ends what is attached to the command’s console, never what left it or a GUI programme’s', async () => {
+    const { tree, run, members } = await compileTree();
+    const ending = members.filter((e) =>
+      ['agent', 'attached', 'orphan-attached'].includes(role(e)),
+    );
+    const spared = members.filter((e) => !ending.includes(e));
+    expect(spared.map(role).sort()).toEqual(
+      ['detached', 'gui', 'gui-child', 'gui-child', 'start-process'].sort(),
+    );
     // As when the daemon shuts down; what is to end has ended once it resolves.
     await disposeCompilationCommands();
     expect(await survivors(ending, 0)).toEqual([]);
     expect((await stillRunning(spared)).map(role).sort()).toEqual(spared.map(role).sort());
     // A GUI programme may hold the command's output open: it settles once the survivors end.
+    await stopMarked(tree.marker);
+    expect(String(await run)).toMatch(/exited with/);
+  });
+
+  it('ends the command’s console tree without the helper, never a GUI programme or what one started', async () => {
+    const { tree, run, members } = await compileTree({
+      stopWindows: (child, processTree) =>
+        terminateWindows(child, processTree, { inspector: null }),
+    });
+    const ending = members.filter((e) => ['agent', 'attached', 'detached'].includes(role(e)));
+    const spared = members.filter((e) => ['gui', 'gui-child', 'start-process'].includes(role(e)));
+    expect(spared.map(role).sort()).toEqual(['gui', 'gui-child', 'gui-child', 'start-process']);
+    await disposeCompilationCommands();
+    expect(await survivors(ending, 0)).toEqual([]);
+    expect((await stillRunning(spared)).map(role).sort()).toEqual(spared.map(role).sort());
     await stopMarked(tree.marker);
     expect(String(await run)).toMatch(/exited with/);
   });

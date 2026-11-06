@@ -11,6 +11,7 @@ import {
   restoreCurrentDirectorySearch,
   type ChildProcessTree,
 } from '@puddle/shared/node/platform';
+import { stopOwnConsole, type OwnConsoleDeps } from '../pty/own-console.js';
 import { withEnvironment } from './environment.js';
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -93,9 +94,10 @@ export function disposeCompilationCommands(): Promise<void> {
  * How `command` is started without a shell. POSIX makes it lead a new
  * process group, which cancellation signals as a whole. Windows has no
  * process groups to signal: the command stays attached so that, with
- * `windowsHide`, it and every console grandchild share one hidden console
- * (a detached command's grandchildren would each open a visible window), and
- * cancellation stops its tree (terminateGroup). npm-style `.cmd` shims and other
+ * `windowsHide` and no inherited stdio, libuv gives it CREATE_NO_WINDOW, a
+ * hidden console of its own that every console grandchild shares (a
+ * detached command's grandchildren would each open a visible window), and
+ * cancellation ends that console (terminateWindows). npm-style `.cmd` shims and other
  * batch files are resolved first, since Node will not start them directly,
  * and a relative path such as `.\tools\build.exe` names a file in the
  * command's working directory, as on POSIX. Throws `UnsafeCmdArgumentError`
@@ -288,17 +290,37 @@ function commandStop(
 }
 
 /**
- * Windows has no process groups to signal: it always forces the tree the
- * process table shows, by creation-time-consistent links, and the command
- * itself by its own handle (killProcessTree), but never a GUI programme the
+ * Windows has no process groups to signal. The command's own console stands
+ * for its group (pty/own-console.ts): the command ends by its own handle,
+ * with every process the ConPTY helper finds attached to that console,
+ * those its descendants left there as they exited (`cmd /c start /b`)
+ * included, and what left it outlives it, as a POSIX `setsid` does: a
+ * detached process, or one in a console of its own (`start`,
+ * `Start-Process`). Without the helper, or a console to go by (a GUI
+ * command has none), it forces the tree the process table shows, by
+ * creation-time-consistent links, and the command by its handle
+ * (killProcessTree); unlike the group, that tree includes console processes
+ * the command started detached or in a console of their own, and misses
+ * those whose parent has exited. Neither ever ends a GUI programme the
  * command started, nor what that started (docs/windows.md, decision 8).
- * Unlike the group, the tree includes console processes the command
- * started detached or in a console of their own (a server started with
- * `start`, say): they end with it. Resolves once the stop has been carried
- * out; never rejects.
+ * Resolves once the stop has been carried out; never rejects.
  */
-function terminateWindows(child: ReturnType<typeof spawn>, tree: ChildProcessTree): Promise<void> {
-  return tree.kill({ platform: 'win32' }).catch(() => undefined);
+export async function terminateWindows(
+  child: ReturnType<typeof spawn>,
+  tree: ChildProcessTree,
+  deps: OwnConsoleDeps = {},
+): Promise<void> {
+  const pid = child.pid;
+  if (pid === undefined) return;
+  const endRoot = () => {
+    try {
+      child.kill();
+    } catch {
+      // Exited meanwhile.
+    }
+  };
+  if (await stopOwnConsole({ pid, ...tree.root() }, endRoot, deps)) return;
+  await tree.kill({ platform: 'win32' }).catch(() => undefined);
 }
 
 /** POSIX signals the command's process group, at once. */
