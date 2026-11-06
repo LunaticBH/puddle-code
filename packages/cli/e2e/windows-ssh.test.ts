@@ -197,10 +197,12 @@ describe.runIf(process.platform === 'win32' && zip !== undefined && existsSync(h
 
     /**
      * What the user's terminal shows of ssh: never the default shell's
-     * answer to the `true` probe.
+     * answer to the `true` probe, nor a forwarded channel the host refused
+     * (the fake prints ssh's own line for one).
      */
     function expectQuietSsh(output: string) {
       expect(output).not.toMatch(/is not recognized|operable program|CommandNotFoundException/);
+      expect(output).not.toMatch(/open failed/);
     }
 
     /** Kill the cockpit, leaving its WMI-started daemon running, then remove it all. */

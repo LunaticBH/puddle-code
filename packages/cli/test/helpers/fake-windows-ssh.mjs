@@ -18,7 +18,9 @@
  *   ssh <opts…> -N -L lp:127.0.0.1:rp h → a TCP forwarder lp → rp, alive
  *                                         until killed (lp = rp drops every
  *                                         connection: nothing listens there
- *                                         on the host)
+ *                                         on the host); a connection the
+ *                                         host refuses prints ssh's
+ *                                         "channel N: open failed" line
  *   ssh <opts…> -O <ctl> host          → exit 0 (a Windows client has no master)
  *   scp <opts…> <file> host:<path>     → a copy into the profile (run as
  *                                         scp: its launcher is named scp)
@@ -124,22 +126,37 @@ function session() {
 
   if (noCommand && forward !== undefined) {
     const [lp, , rp] = forward.split(':');
+    // ssh numbers a -N client's forwarded channels from 2, and reports one
+    // the server could not connect on its standard error.
+    let channel = 1;
+    const refused = () => {
+      channel += 1;
+      process.stderr.write(
+        `channel ${channel}: open failed: connect failed: Connection refused\r\n`,
+      );
+    };
     const server = createServer((client) => {
       // The "host" shares this machine's loopback: a port forwarded to itself
       // (the agent OAuth callback's 1455) would reach this listener again, in
       // an endless loop that exhausts the ephemeral ports. The host has no
       // listener there, so the channel fails, as sshd's would.
       if (lp === rp) {
+        refused();
         client.destroy();
         return;
       }
       const upstream = connect({ host: '127.0.0.1', port: Number(rp) });
+      let opened = false;
+      upstream.once('connect', () => (opened = true));
       const drop = () => {
         client.destroy();
         upstream.destroy();
       };
       client.on('error', drop);
-      upstream.on('error', drop);
+      upstream.on('error', () => {
+        if (!opened) refused();
+        drop();
+      });
       client.pipe(upstream);
       upstream.pipe(client);
     });
