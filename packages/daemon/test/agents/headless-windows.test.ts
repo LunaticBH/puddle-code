@@ -15,7 +15,7 @@ import {
 } from '../../src/agents/headless/control.js';
 import { codexDriver } from '../../src/agents/codex/headless.js';
 import { LogStore } from '../../src/logs/log-store.js';
-import { isConptyHelper } from '../../src/pty/conpty-jobs.js';
+import { isConptyHelper, sharedConptyJobs } from '../../src/pty/conpty-jobs.js';
 import { PtyManager } from '../../src/pty/pty-manager.js';
 import { waitFor } from '../helpers/daemon-fixtures.js';
 import { stopPtysAfterFile } from '../helpers/process-guard.js';
@@ -244,8 +244,52 @@ describe.runIf(process.platform === 'win32')('a Windows headless CLI’s end', (
     for (const marker of markers.splice(0)) await stopMarked(marker);
   });
 
-  /** The driver in a real PTY, running a turn of the CLI above; resolves once its whole tree runs. */
-  async function headlessTree() {
+  /** The ConPTY helpers driver `driver` runs. */
+  async function helpersOf(driver: number): Promise<WindowsProcess[]> {
+    return (await listWindowsProcesses({ fresh: true })).filter(
+      (p) => p.ppid === driver && isConptyHelper(p.commandLine ?? ''),
+    );
+  }
+
+  /**
+   * Whether `helper` has started: it lets go of its own console as it
+   * begins to serve (FreeConsole, just before it says it is ready), so
+   * Windows then names no console host for it.
+   */
+  async function started(helper: WindowsProcess): Promise<boolean> {
+    const held = await sharedConptyJobs().classify([
+      { pid: helper.pid, createdAtMs: helper.createdAtMs! },
+    ]);
+    held?.console.release();
+    return held?.processes[0]?.consoleHost === 0;
+  }
+
+  /**
+   * The driver's one helper, once it has started and so holds the turn's
+   * CLI: until then a turn's end ends the CLI alone, after waiting a while
+   * for it (terminal-source.ts), which a loaded machine can outlast.
+   */
+  async function startedHelper(driver: number, unlike?: WindowsProcess): Promise<WindowsProcess> {
+    let helper: WindowsProcess | undefined;
+    await waitUntil(
+      async () => {
+        const helpers = await helpersOf(driver);
+        helper = helpers.length === 1 ? helpers[0] : undefined;
+        if (!helper || helper.createdAtMs === unlike?.createdAtMs) return false;
+        return started(helper);
+      },
+      30_000,
+      unlike ? 'a helper in its place' : 'its helper',
+    );
+    return helper!;
+  }
+
+  /**
+   * The driver in a real PTY, running a turn of the CLI above; resolves once
+   * its whole tree runs and its helper has started. `starting` runs on its
+   * first helper as soon as it is seen.
+   */
+  async function headlessTree(starting?: (helper: WindowsProcess) => Promise<void>) {
     const marker = mkdtempSync(join(tmpdir(), 'puddle-tree-'));
     markers.push(marker);
     const script = join(marker, 'agent.mjs');
@@ -266,12 +310,23 @@ describe.runIf(process.platform === 'win32')('a Windows headless CLI’s end', (
     const abort = new AbortController();
     const turn = control.ask('question', abort.signal);
     turn.catch(() => {});
+    const driver = ptys.pidFor('h', 'agent')!;
+    if (starting) {
+      let first: WindowsProcess | undefined;
+      await waitUntil(
+        async () => (first = (await helpersOf(driver))[0]) !== undefined,
+        30_000,
+        'its helper',
+      );
+      await starting(first!);
+    }
     let members: WindowsProcess[] = [];
     await waitUntil(
       async () => (members = await marked(marker)).length === ATTACHED.length + LEFT.length,
       30_000,
       'the whole tree',
     );
+    const helper = await startedHelper(driver);
     const exited = new Promise<void>((resolve) => ptys.once('exit', () => resolve()));
     return {
       ptys,
@@ -279,6 +334,8 @@ describe.runIf(process.platform === 'win32')('a Windows headless CLI’s end', (
       abort,
       turn,
       exited,
+      driver,
+      helper,
       dispose: () => resource.dispose(),
       attached: withRoles(members, ATTACHED),
       left: withRoles(members, LEFT),
@@ -304,21 +361,27 @@ describe.runIf(process.platform === 'win32')('a Windows headless CLI’s end', (
   });
 
   it('replaces a ConPTY helper that exits mid-turn, which still ends what is attached to the CLI’s console', async () => {
-    const { ptys, control, abort, turn, attached, left } = await headlessTree();
-    const driver = ptys.pidFor('h', 'agent')!;
-    const helpers = async () =>
-      (await listWindowsProcesses({ fresh: true })).filter(
-        (p) => p.ppid === driver && isConptyHelper(p.commandLine ?? ''),
-      );
-    let first: WindowsProcess[] = [];
-    await waitUntil(async () => (first = await helpers()).length === 1, 30_000, 'its helper');
+    const { control, abort, turn, driver, helper, attached, left } = await headlessTree();
     // As an agent's `Stop-Process -Name powershell` would.
-    process.kill(first[0]!.pid);
-    await waitUntil(
-      async () => (await helpers()).some((p) => p.createdAtMs !== first[0]!.createdAtMs),
-      30_000,
-      'a helper in its place',
-    );
+    process.kill(helper.pid);
+    await startedHelper(driver, helper);
+    abort.abort();
+    await expect(turn).rejects.toThrow('cancelled');
+    expect(await survivors(attached)).toEqual([]);
+    expect((await stillRunning(left)).map(role).sort()).toEqual([...LEFT].sort());
+    expect(control.ready).toBe(true);
+  });
+
+  it('replaces a ConPTY helper that exits as it starts, which still ends what is attached to the CLI’s console', async () => {
+    // Such a Stop-Process may catch the helper while it compiles, which is
+    // no sign that it cannot start.
+    let first: WindowsProcess | undefined;
+    const { control, abort, turn, helper, attached, left } = await headlessTree(async (seen) => {
+      first = seen;
+      expect(await started(seen)).toBe(false);
+      process.kill(seen.pid);
+    });
+    expect(helper.createdAtMs).not.toBe(first!.createdAtMs);
     abort.abort();
     await expect(turn).rejects.toThrow('cancelled');
     expect(await survivors(attached)).toEqual([]);
