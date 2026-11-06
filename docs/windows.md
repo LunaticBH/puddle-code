@@ -144,10 +144,19 @@ supported release) and through native system tools (`tar.exe`, `curl.exe`, `task
    PowerShell is. The daemon records each PTY's root and console host in `<home>\pty-roots.json`,
    and after a crash the supervisor ends only what is still attached to a recorded console. The
    headless agent driver and the Codex app-server stop end their console the same way, never a
-   whole live tree. Compile commands and notebook kernels stop as trees of creation-time-consistent
-   descendants that spare GUI programs and what they start, never `taskkill /T` on a pid the process
-   table cannot vouch for; daemon shutdown waits, bounded per stop (5 s each), for those stops, so
-   nothing they should end outlives the daemon.
+   whole live tree; without the helper, only npm's node launcher has its direct console child (the
+   native server) ended by pid, and a native `codex.exe` launcher ends alone. Compile commands and
+   notebook bridges start hidden with no inherited standard streams, so each has a console of its
+   own, standing for its POSIX process group. Their stops end that console the same way — the
+   command or bridge by its handle, then whatever the helper finds attached to it, including
+   orphans a descendant left there (`cmd /c start /b`) — while detached and own-console processes
+   outlive them, as with `setsid`; once that console has closed, no later stop falls back on the
+   process tree. Only one stop runs at a time per command or bridge. Without the helper (or for a
+   GUI image, which never had a console) they fall back on a tree of creation-time-consistent
+   descendants that spares GUI programs, never `taskkill /T` on a pid the process table cannot
+   vouch for. On shutdown, compile and notebook stops start together with the PTY teardown, and the
+   remaining waits (PTY teardowns, agents' lifecycle stops, compile and notebook stops) share one
+   bound, so a Windows stop finishes within about 15 s, inside the supervisor's 20 s grace.
 9. **Executables.** Lookup honours `PATHEXT` and uses absolute `PATH` entries only: a bare name is
    never looked up in the working directory, and one missing from `PATH` is refused rather than
    spawned. A relative path with a directory part names a file in the command's working directory.
@@ -216,7 +225,12 @@ supported release) and through native system tools (`tar.exe`, `curl.exe`, `task
     is confirmed the same way — only for the commands a Git Bash default shell gives itself away in
     (the control-helper stage and `install.sh`), never after ssh's own 255 and never from relayed
     output such as logs. Once `win32`, POSIX commands refuse; an operation whose loader never
-    reported a status (a dropped connection) is `ssh_unreachable`, never `not_installed`. Every operation is
+    reported a status (a dropped connection) is `ssh_unreachable`, never `not_installed`. A Windows
+    client relays the `true` probe's standard error, holding back a line that begins as a Windows
+    shell's English answer to `true` and dropping it once the probe proves the host is Windows
+    (ssh.exe prompts on the console, never on standard error); Linux and macOS clients keep it on
+    the terminal unchanged. The Codex OAuth callback forward is checked without connecting through
+    it, since nothing listens on the host's end until a login runs. Every operation is
     `powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand
     <loader>`, which parses identically under a cmd.exe, PowerShell or Git Bash default shell. The
     loader reads a length-framed UTF-8 script (`PUDDLE1 <bytes>`, at most 64 KB) from raw stdin,
@@ -248,9 +262,12 @@ supported release) and through native system tools (`tar.exe`, `curl.exe`, `task
   WDAC), a PTY's teardown relies on its console's close or hang-up, which also ends a GUI programme
   that attached to the console (Electron does unless told otherwise) and what it started there.
   What left the console (a detached process, one in a console of its own, a GUI programme that did
-  not attach) still outlives the session, as with the helper.
-- A console programme that a GUI launcher started on a PTY's console is taken for one of the
-  console's own, and ended with the session, when the launcher has exited before the teardown:
+  not attach) still outlives the session, as with the helper. Compile commands and kernels then
+  stop as process trees, which end their detached and own-console descendants and miss console
+  orphans whose parent has exited.
+- A console programme that a GUI launcher started on a PTY's (or a compile command's or kernel's)
+  console is taken for one of the console's own, and ended with it, when the launcher has exited
+  before the stop:
   Windows keeps nothing of an exited process that the helper did not hold.
 - Processes the helper cannot open (another user's, or elevated ones under an unelevated daemon)
   are not ended by it.
@@ -261,9 +278,10 @@ supported release) and through native system tools (`tar.exe`, `curl.exe`, `task
 - An SSH session whose OpenSSH default shell is WSL's bash lands in Linux, and Puddle treats that
   host as Linux.
 - Windows clients re-authenticate SSH for every operation (no ControlMaster).
-- On first contact with a Windows host whose OpenSSH default shell is cmd.exe, the terminal shows
-  cmd's "'true' is not recognized" line once, because SSH's stderr stays on the terminal for
-  host-key and password prompts.
+- On first contact from a Linux or macOS client with a Windows host whose OpenSSH default shell is
+  cmd.exe or PowerShell, the terminal shows that shell's answer to `true` once: those clients keep
+  ssh's standard error on the terminal, because relaying it would move a server banner after the
+  password prompt. Windows clients hide the answer; a localised (non-English) answer stays visible.
 - Interrupting a notebook cell blocked in `time.sleep` takes effect when the call returns.
 - File watchers held by live compilation targets can make pruning their worktree answer
   `worktree_busy` until the target stops.
